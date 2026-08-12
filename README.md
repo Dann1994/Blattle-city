@@ -30,15 +30,22 @@ adicionales. Ver el documento de diseño completo en
 
 ## Build
 
-Requiere un compilador de C++ y CMake instalados (no vienen incluidos en este repo).
+Usa el mismo toolchain que SuperMarioClone: MSYS2/MinGW64 (`C:\msys64\mingw64\bin`, incluye `cmake`, `ninja` y `g++`), que no está en el PATH del sistema.
 
 ```bash
-cmake -B build -S .
-cmake --build build --config Release
+export PATH="/c/msys64/mingw64/bin:$PATH"
+cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
 ```
 
-El ejecutable queda en `build/bin/`.
+El ejecutable queda en `build/bin/battlecity.exe`.
+
+## Controles (Fase 1)
+
+- Jugador 1: `W A S D` para moverse (sin diagonales).
 
 ## Estado
 
-Fase 0 en curso — ver Documentaciones/Documento_de_Diseno.md sección 14 para el plan completo por fases.
+Fase 0 completa y verificada (compila y corre). Fase 1 en curso: tanque del
+jugador 1 con movimiento y colisión contra el mapa — falta disparo (Fase 2).
+Ver Documentaciones/Documento_de_Diseno.md sección 14 para el plan completo por fases.
