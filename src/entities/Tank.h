@@ -27,6 +27,7 @@ public:
 
 private:
     bool TryMove(float dx, float dy, const TileMap& map);
+    bool TryMoveWithAssist(float dx, float dy, double dt, const TileMap& map);
 
     float x_ = 0.0f;
     float y_ = 0.0f;

@@ -1,5 +1,6 @@
 #include "Tank.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace bc {
@@ -7,6 +8,7 @@ namespace bc {
 namespace {
 constexpr double kAnimFrameDuration = 0.1; // segundos por frame de animacion
 constexpr float kTankSize = 1.0f;          // el tanque ocupa 1 celda, como en el original
+constexpr float kAlignAssistMaxOffset = 0.25f; // celdas (~4px con tiles de 16px)
 }
 
 bool Tank::TryMove(float dx, float dy, const TileMap& map) {
@@ -40,6 +42,39 @@ bool Tank::TryMove(float dx, float dy, const TileMap& map) {
     return true;
 }
 
+bool Tank::TryMoveWithAssist(float dx, float dy, double dt, const TileMap& map) {
+    if (TryMove(dx, dy, map)) {
+        return true;
+    }
+
+    // Si el movimiento recto choca pero el tanque esta desalineado por pocos
+    // pixeles respecto de la celda (por ejemplo entrando a un hueco justo),
+    // se lo empuja de a poco hacia la celda mas cercana en el eje perpendicular
+    // y se reintenta. TryMove sigue validando colision real, asi que esto no
+    // atraviesa paredes: solo ayuda cuando el hueco realmente existe.
+    const float assistDistance = static_cast<float>(speed_ * dt);
+
+    if (dx != 0.0f) {
+        const float offset = std::round(y_) - y_;
+        if (std::fabs(offset) > 0.001f && std::fabs(offset) <= kAlignAssistMaxOffset) {
+            const float nudgeY = std::clamp(offset, -assistDistance, assistDistance);
+            if (TryMove(dx, nudgeY, map)) {
+                return true;
+            }
+        }
+    } else if (dy != 0.0f) {
+        const float offset = std::round(x_) - x_;
+        if (std::fabs(offset) > 0.001f && std::fabs(offset) <= kAlignAssistMaxOffset) {
+            const float nudgeX = std::clamp(offset, -assistDistance, assistDistance);
+            if (TryMove(nudgeX, dy, map)) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 void Tank::Update(double dt, const PlayerInput& input, const TileMap& map) {
     const float distance = static_cast<float>(speed_ * dt);
     bool moved = false;
@@ -48,16 +83,16 @@ void Tank::Update(double dt, const PlayerInput& input, const TileMap& map) {
     // direccion presionada, incluso si el movimiento queda bloqueado.
     if (input.moveUp) {
         facing_ = Direction::Up;
-        moved = TryMove(0.0f, -distance, map);
+        moved = TryMoveWithAssist(0.0f, -distance, dt, map);
     } else if (input.moveDown) {
         facing_ = Direction::Down;
-        moved = TryMove(0.0f, distance, map);
+        moved = TryMoveWithAssist(0.0f, distance, dt, map);
     } else if (input.moveLeft) {
         facing_ = Direction::Left;
-        moved = TryMove(-distance, 0.0f, map);
+        moved = TryMoveWithAssist(-distance, 0.0f, dt, map);
     } else if (input.moveRight) {
         facing_ = Direction::Right;
-        moved = TryMove(distance, 0.0f, map);
+        moved = TryMoveWithAssist(distance, 0.0f, dt, map);
     }
 
     if (moved) {
