@@ -1,0 +1,23 @@
+{
+  "width": 13,
+  "height": 13,
+  "tiles": [
+    "BBB..SSS..BBB",
+    "B...........B",
+    "B..TTT...I..B",
+    "B..T.T......B",
+    "B..TTT..WWW.B",
+    "............B",
+    ".....S.......",
+    "............B",
+    "B...........B",
+    "B..SSS......B",
+    "B..S.S......B",
+    "BB.S.S.....BB",
+    "BBB.....BBBBB"
+  ],
+  "player_spawns": [[4, 12], [6, 12], [8, 12], [10, 12]],
+  "enemy_spawns": [[0, 0], [6, 0], [12, 0]],
+  "enemy_wave": {"basic": 8, "fast": 6, "power": 4, "armor": 2},
+  "base_position": [6, 12]
+}
