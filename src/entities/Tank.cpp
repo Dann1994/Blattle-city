@@ -8,7 +8,9 @@ namespace bc {
 namespace {
 constexpr double kAnimFrameDuration = 0.1; // segundos por frame de animacion
 constexpr float kTankSize = 1.0f;          // el tanque ocupa 1 celda, como en el original
-constexpr float kAlignAssistMaxOffset = 0.25f; // celdas (~4px con tiles de 16px)
+// Media celda: si menos de la mitad del sprite se solapa con el obstaculo,
+// se reacomoda solo (round() ya acota el desfasaje a como mucho media celda).
+constexpr float kAlignAssistMaxOffset = 0.5f;
 }
 
 bool Tank::TryMove(float dx, float dy, const TileMap& map) {
