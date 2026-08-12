@@ -8,9 +8,6 @@ namespace bc {
 namespace {
 constexpr double kAnimFrameDuration = 0.1; // segundos por frame de animacion
 constexpr float kTankSize = 1.0f;          // el tanque ocupa 1 celda, como en el original
-// Media celda: si menos de la mitad del sprite se solapa con el obstaculo,
-// se reacomoda solo (round() ya acota el desfasaje a como mucho media celda).
-constexpr float kAlignAssistMaxOffset = 0.5f;
 }
 
 bool Tank::TryMove(float dx, float dy, const TileMap& map) {
@@ -49,28 +46,58 @@ bool Tank::TryMoveWithAssist(float dx, float dy, double dt, const TileMap& map) 
         return true;
     }
 
-    // Si el movimiento recto choca pero el tanque esta desalineado por pocos
-    // pixeles respecto de la celda (por ejemplo entrando a un hueco justo),
-    // se lo empuja de a poco hacia la celda mas cercana en el eje perpendicular
-    // y se reintenta. TryMove sigue validando colision real, asi que esto no
-    // atraviesa paredes: solo ayuda cuando el hueco realmente existe.
-    const float assistDistance = static_cast<float>(speed_ * dt);
+    // El movimiento recto choca. Si el tanque tiene menos de la mitad de sus
+    // pixeles metidos en la fila/columna que esta chocando, se lo desliza de a
+    // poco hacia el lado libre (la fila/columna donde esta la mayoria de su
+    // cuerpo) y se reintenta. TryMove sigue validando la colision real del
+    // destino, asi que esto nunca atraviesa una pared genuina.
+    const float assist = static_cast<float>(speed_ * dt);
 
     if (dx != 0.0f) {
-        const float offset = std::round(y_) - y_;
-        if (std::fabs(offset) > 0.001f && std::fabs(offset) <= kAlignAssistMaxOffset) {
-            const float nudgeY = std::clamp(offset, -assistDistance, assistDistance);
-            if (TryMove(dx, nudgeY, map)) {
-                return true;
-            }
+        return TrySlidePerpendicularY(dx, assist, map);
+    }
+    if (dy != 0.0f) {
+        return TrySlidePerpendicularX(dy, assist, map);
+    }
+    return false;
+}
+
+bool Tank::TrySlidePerpendicularY(float dx, float assist, const TileMap& map) {
+    const float rowTop = std::floor(y_);
+    const float fracBottom = y_ - rowTop; // fraccion del sprite metida en la fila de abajo
+
+    if (fracBottom > 0.001f && fracBottom < 0.5f) {
+        // Menos de la mitad choca contra la fila de abajo: deslizar hacia arriba.
+        if (TryMove(dx, std::max(-fracBottom, -assist), map)) {
+            return true;
         }
-    } else if (dy != 0.0f) {
-        const float offset = std::round(x_) - x_;
-        if (std::fabs(offset) > 0.001f && std::fabs(offset) <= kAlignAssistMaxOffset) {
-            const float nudgeX = std::clamp(offset, -assistDistance, assistDistance);
-            if (TryMove(nudgeX, dy, map)) {
-                return true;
-            }
+    }
+
+    const float fracTop = 1.0f - fracBottom; // fraccion metida en la fila de arriba
+    if (fracTop > 0.001f && fracTop < 0.5f) {
+        // Menos de la mitad choca contra la fila de arriba: deslizar hacia abajo.
+        if (TryMove(dx, std::min(fracTop, assist), map)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool Tank::TrySlidePerpendicularX(float dy, float assist, const TileMap& map) {
+    const float colLeft = std::floor(x_);
+    const float fracRight = x_ - colLeft; // fraccion del sprite metida en la columna de la derecha
+
+    if (fracRight > 0.001f && fracRight < 0.5f) {
+        if (TryMove(std::max(-fracRight, -assist), dy, map)) {
+            return true;
+        }
+    }
+
+    const float fracLeft = 1.0f - fracRight; // fraccion metida en la columna de la izquierda
+    if (fracLeft > 0.001f && fracLeft < 0.5f) {
+        if (TryMove(std::min(fracLeft, assist), dy, map)) {
+            return true;
         }
     }
 
