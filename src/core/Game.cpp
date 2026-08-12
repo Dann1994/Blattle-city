@@ -34,14 +34,24 @@ void Game::Init() {
 
     const LevelData level = LoadLevel(std::string(BC_ASSETS_DIR) + "levels/test_map.json");
     map_.LoadFrom(level);
+
+    player1Sprites_.LoadPlayer1(BC_ASSETS_DIR);
+    if (!level.player_spawns.empty()) {
+        player1_.SetPosition(static_cast<float>(level.player_spawns[0][0]), static_cast<float>(level.player_spawns[0][1]));
+    }
 }
 
 void Game::ProcessInput() {
-    // Fase 0: sin input de gameplay todavia (llega en Fase 1).
+    // Esquema de teclado WASD para P1 (seccion 9); mandos llegan en Fase 5.
+    input1_.moveUp = IsKeyDown(KEY_W);
+    input1_.moveDown = IsKeyDown(KEY_S);
+    input1_.moveLeft = IsKeyDown(KEY_A);
+    input1_.moveRight = IsKeyDown(KEY_D);
+    input1_.shoot = IsKeyDown(KEY_LEFT_CONTROL);
 }
 
-void Game::Update(double /*fixedDt*/) {
-    // Fase 0: sin simulacion todavia, solo carga y render del mapa de prueba.
+void Game::Update(double fixedDt) {
+    player1_.Update(fixedDt, input1_, map_);
 }
 
 void Game::Render(double /*interpolationAlpha*/) {
@@ -61,11 +71,17 @@ void Game::Render(double /*interpolationAlpha*/) {
         }
     }
 
+    const Texture2D tankTex = player1Sprites_.Get(player1_.Facing(), player1_.AnimFrame());
+    const Rectangle src{0.0f, 0.0f, static_cast<float>(tankTex.width), static_cast<float>(tankTex.height)};
+    const Rectangle dst{viewport.TileToScreenX(player1_.X()), viewport.TileToScreenY(player1_.Y()), viewport.tileScreenSize, viewport.tileScreenSize};
+    DrawTexturePro(tankTex, src, dst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+
     DrawFPS(10, 10);
     EndDrawing();
 }
 
 void Game::Shutdown() {
+    player1Sprites_.Unload();
     CloseWindow();
 }
 

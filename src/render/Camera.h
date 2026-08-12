@@ -11,8 +11,8 @@ struct MapViewport {
 
     static MapViewport Compute(int windowWidth, int windowHeight, int mapWidthCells, int mapHeightCells, int baseTileSize);
 
-    float TileToScreenX(int cellX) const { return offsetX + static_cast<float>(cellX) * tileScreenSize; }
-    float TileToScreenY(int cellY) const { return offsetY + static_cast<float>(cellY) * tileScreenSize; }
+    float TileToScreenX(float cellX) const { return offsetX + cellX * tileScreenSize; }
+    float TileToScreenY(float cellY) const { return offsetY + cellY * tileScreenSize; }
 };
 
 } // namespace bc

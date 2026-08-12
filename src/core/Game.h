@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Tank.h"
+#include "TankSprites.h"
 #include "TileMap.h"
 
 namespace bc {
@@ -16,6 +18,9 @@ private:
     void Shutdown();
 
     TileMap map_;
+    Tank player1_;
+    PlayerInput input1_;
+    TankSpriteSet player1Sprites_;
     int windowWidth_ = 0;
     int windowHeight_ = 0;
 };
