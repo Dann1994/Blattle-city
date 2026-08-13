@@ -24,6 +24,11 @@ struct PlayerInput {
     bool shoot = false;
 };
 
+// SinglePress: un disparo por cada pulsacion del boton (por defecto, como el original).
+// HoldToFire: dispara en cada oportunidad mientras el boton se mantiene apretado.
+// Pensado para exponerse como opcion de configuracion (ver seccion 12.5).
+enum class FireMode { SinglePress, HoldToFire };
+
 class Tank {
 public:
     void SetPosition(float cellX, float cellY) { x_ = cellX; y_ = cellY; }
@@ -37,6 +42,13 @@ public:
     // Punto desde donde salen las balas: el borde del tanque en la direccion que mira.
     void MuzzlePosition(float& outX, float& outY) const;
 
+    void SetFireMode(FireMode mode) { fireMode_ = mode; }
+    FireMode GetFireMode() const { return fireMode_; }
+
+    // Devuelve true en el frame exacto en que corresponde disparar, segun fireMode_.
+    // Hay que llamarla una vez por frame (consume el estado previo del boton).
+    bool ConsumeShootTrigger(const PlayerInput& input);
+
 private:
     bool TryMove(float dx, float dy, const TileMap& map);
     bool TryMoveWithAssist(float dx, float dy, double dt, const TileMap& map);
@@ -49,6 +61,8 @@ private:
     float speed_ = 3.5f; // celdas por segundo
     double animTimer_ = 0.0;
     int animFrame_ = 0;
+    FireMode fireMode_ = FireMode::SinglePress;
+    bool shootHeldLastFrame_ = false;
 };
 
 } // namespace bc

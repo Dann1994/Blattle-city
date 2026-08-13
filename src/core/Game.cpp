@@ -37,6 +37,10 @@ void Game::Init() {
 
     player1Sprites_.LoadPlayer1(BC_ASSETS_DIR);
     bulletSprites_.Load(BC_ASSETS_DIR);
+
+    // TODO: exponer como opcion en el menu de configuracion (seccion 12.5).
+    player1_.SetFireMode(FireMode::SinglePress);
+
     if (!level.player_spawns.empty()) {
         player1_.SetPosition(static_cast<float>(level.player_spawns[0][0]), static_cast<float>(level.player_spawns[0][1]));
     }
@@ -54,7 +58,7 @@ void Game::ProcessInput() {
 void Game::Update(double fixedDt) {
     player1_.Update(fixedDt, input1_, map_);
 
-    if (input1_.shoot) {
+    if (player1_.ConsumeShootTrigger(input1_)) {
         float muzzleX = 0.0f, muzzleY = 0.0f;
         player1_.MuzzlePosition(muzzleX, muzzleY);
         bullets_.TryShoot(kPlayer1Id, muzzleX, muzzleY, player1_.Facing());

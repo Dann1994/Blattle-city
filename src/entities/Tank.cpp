@@ -10,6 +10,17 @@ constexpr double kAnimFrameDuration = 0.1; // segundos por frame de animacion
 constexpr float kTankSize = 1.0f;          // el tanque ocupa 1 celda, como en el original
 }
 
+bool Tank::ConsumeShootTrigger(const PlayerInput& input) {
+    bool shouldFire = false;
+    if (fireMode_ == FireMode::HoldToFire) {
+        shouldFire = input.shoot;
+    } else {
+        shouldFire = input.shoot && !shootHeldLastFrame_;
+    }
+    shootHeldLastFrame_ = input.shoot;
+    return shouldFire;
+}
+
 void Tank::MuzzlePosition(float& outX, float& outY) const {
     float dx = 0.0f, dy = 0.0f;
     DirectionVector(facing_, dx, dy);
