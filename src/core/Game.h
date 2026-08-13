@@ -1,5 +1,6 @@
 #pragma once
 
+#include "BulletSprites.h"
 #include "BulletSystem.h"
 #include "Tank.h"
 #include "TankSprites.h"
@@ -25,6 +26,7 @@ private:
     PlayerInput input1_;
     TankSpriteSet player1Sprites_;
     BulletSystem bullets_;
+    BulletSpriteSet bulletSprites_;
     int windowWidth_ = 0;
     int windowHeight_ = 0;
 };

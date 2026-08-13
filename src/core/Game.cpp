@@ -36,6 +36,7 @@ void Game::Init() {
     map_.LoadFrom(level);
 
     player1Sprites_.LoadPlayer1(BC_ASSETS_DIR);
+    bulletSprites_.Load(BC_ASSETS_DIR);
     if (!level.player_spawns.empty()) {
         player1_.SetPosition(static_cast<float>(level.player_spawns[0][0]), static_cast<float>(level.player_spawns[0][1]));
     }
@@ -97,11 +98,14 @@ void Game::Render(double /*interpolationAlpha*/) {
     const Rectangle dst{viewport.TileToScreenX(player1_.X()), viewport.TileToScreenY(player1_.Y()), viewport.tileScreenSize, viewport.tileScreenSize};
     DrawTexturePro(tankTex, src, dst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
 
-    const float bulletScreenSize = viewport.tileScreenSize * 0.2f;
+    const float pixelScale = viewport.tileScreenSize / static_cast<float>(kTileSize);
     for (const Bullet& bullet : bullets_.Bullets()) {
-        const float screenX = viewport.TileToScreenX(bullet.x) - bulletScreenSize * 0.5f;
-        const float screenY = viewport.TileToScreenY(bullet.y) - bulletScreenSize * 0.5f;
-        DrawRectangleRec(Rectangle{screenX, screenY, bulletScreenSize, bulletScreenSize}, RAYWHITE);
+        const Texture2D bulletTex = bulletSprites_.Get(bullet.direction);
+        const float w = static_cast<float>(bulletTex.width) * pixelScale;
+        const float h = static_cast<float>(bulletTex.height) * pixelScale;
+        const Rectangle bulletSrc{0.0f, 0.0f, static_cast<float>(bulletTex.width), static_cast<float>(bulletTex.height)};
+        const Rectangle bulletDst{viewport.TileToScreenX(bullet.x) - w * 0.5f, viewport.TileToScreenY(bullet.y) - h * 0.5f, w, h};
+        DrawTexturePro(bulletTex, bulletSrc, bulletDst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
     }
 
     DrawFPS(10, 10);
@@ -109,6 +113,7 @@ void Game::Render(double /*interpolationAlpha*/) {
 }
 
 void Game::Shutdown() {
+    bulletSprites_.Unload();
     player1Sprites_.Unload();
     CloseWindow();
 }
