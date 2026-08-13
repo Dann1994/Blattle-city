@@ -10,6 +10,13 @@ constexpr double kAnimFrameDuration = 0.1; // segundos por frame de animacion
 constexpr float kTankSize = 1.0f;          // el tanque ocupa 1 celda, como en el original
 }
 
+void Tank::MuzzlePosition(float& outX, float& outY) const {
+    float dx = 0.0f, dy = 0.0f;
+    DirectionVector(facing_, dx, dy);
+    outX = x_ + 0.5f + dx * 0.5f;
+    outY = y_ + 0.5f + dy * 0.5f;
+}
+
 bool Tank::TryMove(float dx, float dy, const TileMap& map) {
     const float newX = x_ + dx;
     const float newY = y_ + dy;

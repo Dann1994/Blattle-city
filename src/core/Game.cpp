@@ -52,6 +52,14 @@ void Game::ProcessInput() {
 
 void Game::Update(double fixedDt) {
     player1_.Update(fixedDt, input1_, map_);
+
+    if (input1_.shoot) {
+        float muzzleX = 0.0f, muzzleY = 0.0f;
+        player1_.MuzzlePosition(muzzleX, muzzleY);
+        bullets_.TryShoot(kPlayer1Id, muzzleX, muzzleY, player1_.Facing());
+    }
+
+    bullets_.Update(fixedDt, map_);
 }
 
 void Game::Render(double /*interpolationAlpha*/) {
@@ -63,11 +71,24 @@ void Game::Render(double /*interpolationAlpha*/) {
     BeginDrawing();
     ClearBackground(BLACK);
 
+    const float halfTile = viewport.tileScreenSize * 0.5f;
+
     for (int y = 0; y < map_.Height(); ++y) {
         for (int x = 0; x < map_.Width(); ++x) {
             const Cell& cell = map_.At(x, y);
-            const Rectangle rect{viewport.TileToScreenX(x), viewport.TileToScreenY(y), viewport.tileScreenSize, viewport.tileScreenSize};
-            DrawRectangleRec(rect, ColorForTile(cell.type));
+            const float screenX = viewport.TileToScreenX(x);
+            const float screenY = viewport.TileToScreenY(y);
+
+            if (cell.type == TileType::Brick && cell.subMask != kSubCellMaskFull) {
+                const Color color = ColorForTile(cell.type);
+                if (cell.subMask & kSubCellTopLeft) DrawRectangleRec(Rectangle{screenX, screenY, halfTile, halfTile}, color);
+                if (cell.subMask & kSubCellTopRight) DrawRectangleRec(Rectangle{screenX + halfTile, screenY, halfTile, halfTile}, color);
+                if (cell.subMask & kSubCellBottomLeft) DrawRectangleRec(Rectangle{screenX, screenY + halfTile, halfTile, halfTile}, color);
+                if (cell.subMask & kSubCellBottomRight) DrawRectangleRec(Rectangle{screenX + halfTile, screenY + halfTile, halfTile, halfTile}, color);
+            } else {
+                const Rectangle rect{screenX, screenY, viewport.tileScreenSize, viewport.tileScreenSize};
+                DrawRectangleRec(rect, ColorForTile(cell.type));
+            }
         }
     }
 
@@ -75,6 +96,13 @@ void Game::Render(double /*interpolationAlpha*/) {
     const Rectangle src{0.0f, 0.0f, static_cast<float>(tankTex.width), static_cast<float>(tankTex.height)};
     const Rectangle dst{viewport.TileToScreenX(player1_.X()), viewport.TileToScreenY(player1_.Y()), viewport.tileScreenSize, viewport.tileScreenSize};
     DrawTexturePro(tankTex, src, dst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+
+    const float bulletScreenSize = viewport.tileScreenSize * 0.2f;
+    for (const Bullet& bullet : bullets_.Bullets()) {
+        const float screenX = viewport.TileToScreenX(bullet.x) - bulletScreenSize * 0.5f;
+        const float screenY = viewport.TileToScreenY(bullet.y) - bulletScreenSize * 0.5f;
+        DrawRectangleRec(Rectangle{screenX, screenY, bulletScreenSize, bulletScreenSize}, RAYWHITE);
+    }
 
     DrawFPS(10, 10);
     EndDrawing();

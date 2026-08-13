@@ -6,6 +6,15 @@ namespace bc {
 
 enum class Direction { Up, Down, Left, Right };
 
+inline void DirectionVector(Direction dir, float& outDx, float& outDy) {
+    switch (dir) {
+        case Direction::Up:    outDx = 0.0f;  outDy = -1.0f; break;
+        case Direction::Down:  outDx = 0.0f;  outDy = 1.0f;  break;
+        case Direction::Left:  outDx = -1.0f; outDy = 0.0f;  break;
+        case Direction::Right: outDx = 1.0f;  outDy = 0.0f;  break;
+    }
+}
+
 // Ver seccion 12.4: capa de input unica, sin distinguir origen local/remoto.
 struct PlayerInput {
     bool moveUp = false;
@@ -24,6 +33,9 @@ public:
     float Y() const { return y_; }
     Direction Facing() const { return facing_; }
     int AnimFrame() const { return animFrame_; }
+
+    // Punto desde donde salen las balas: el borde del tanque en la direccion que mira.
+    void MuzzlePosition(float& outX, float& outY) const;
 
 private:
     bool TryMove(float dx, float dy, const TileMap& map);
