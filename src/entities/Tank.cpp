@@ -82,66 +82,56 @@ bool Tank::TryMove(float dx, float dy, const TileMap& map) {
     return true;
 }
 
-bool Tank::TryMoveWithAssist(float dx, float dy, double dt, const TileMap& map) {
+bool Tank::TryMoveWithAssist(float dx, float dy, const TileMap& map) {
     if (TryMove(dx, dy, map)) {
         return true;
     }
 
-    // El movimiento recto choca. Si el tanque tiene menos de la mitad de sus
-    // pixeles metidos en la fila/columna que esta chocando, se lo desliza de a
-    // poco hacia el lado libre (la fila/columna donde esta la mayoria de su
-    // cuerpo) y se reintenta. TryMove sigue validando la colision real del
-    // destino, asi que esto nunca atraviesa una pared genuina.
-    const float assist = static_cast<float>(speed_ * dt);
-
+    // El movimiento recto choca contra una esquina/borde de bloque. Se prueba
+    // alinear del todo contra cada una de las dos filas/columnas que ocupa el
+    // tanque; si alguna de las dos hace que el movimiento funcione, esa era
+    // la que chocaba. Solo se acepta la correccion si lo que chocaba contra
+    // el bloque era menos de la mitad del sprite (si es mas de la mitad, no
+    // hay ajuste posible sin atravesar la pared: el jugador tiene que mover
+    // el tanque el mismo). Ver TryMove: sigue siendo la unica fuente de
+    // verdad sobre colision real, asi que esto nunca atraviesa una pared.
     if (dx != 0.0f) {
-        return TrySlidePerpendicularY(dx, assist, map);
+        return TrySlidePerpendicularY(dx, map);
     }
     if (dy != 0.0f) {
-        return TrySlidePerpendicularX(dy, assist, map);
+        return TrySlidePerpendicularX(dy, map);
     }
     return false;
 }
 
-bool Tank::TrySlidePerpendicularY(float dx, float assist, const TileMap& map) {
+bool Tank::TrySlidePerpendicularY(float dx, const TileMap& map) {
     const float rowTop = std::floor(y_);
-    const float fracBottom = y_ - rowTop; // fraccion del sprite metida en la fila de abajo
-
-    if (fracBottom > 0.001f && fracBottom < 0.5f) {
-        // Menos de la mitad choca contra la fila de abajo: deslizar hacia arriba.
-        if (TryMove(dx, std::max(-fracBottom, -assist), map)) {
-            return true;
-        }
-    }
-
+    const float fracBottom = y_ - rowTop;    // fraccion del sprite metida en la fila de abajo
     const float fracTop = 1.0f - fracBottom; // fraccion metida en la fila de arriba
-    if (fracTop > 0.001f && fracTop < 0.5f) {
-        // Menos de la mitad choca contra la fila de arriba: deslizar hacia abajo.
-        if (TryMove(dx, std::min(fracTop, assist), map)) {
-            return true;
-        }
-    }
 
+    // Probar alinear del todo a la fila de arriba: si funciona, la fila de
+    // abajo era la que chocaba, y solo se acepta si esa porcion era minoria.
+    if (fracBottom > 0.001f && fracBottom < 0.5f && TryMove(dx, -fracBottom, map)) {
+        return true;
+    }
+    // Simetrico: alinear a la fila de abajo si la de arriba era la que chocaba.
+    if (fracTop > 0.001f && fracTop < 0.5f && TryMove(dx, fracTop, map)) {
+        return true;
+    }
     return false;
 }
 
-bool Tank::TrySlidePerpendicularX(float dy, float assist, const TileMap& map) {
+bool Tank::TrySlidePerpendicularX(float dy, const TileMap& map) {
     const float colLeft = std::floor(x_);
-    const float fracRight = x_ - colLeft; // fraccion del sprite metida en la columna de la derecha
-
-    if (fracRight > 0.001f && fracRight < 0.5f) {
-        if (TryMove(std::max(-fracRight, -assist), dy, map)) {
-            return true;
-        }
-    }
-
+    const float fracRight = x_ - colLeft;    // fraccion del sprite metida en la columna de la derecha
     const float fracLeft = 1.0f - fracRight; // fraccion metida en la columna de la izquierda
-    if (fracLeft > 0.001f && fracLeft < 0.5f) {
-        if (TryMove(std::min(fracLeft, assist), dy, map)) {
-            return true;
-        }
-    }
 
+    if (fracRight > 0.001f && fracRight < 0.5f && TryMove(-fracRight, dy, map)) {
+        return true;
+    }
+    if (fracLeft > 0.001f && fracLeft < 0.5f && TryMove(fracLeft, dy, map)) {
+        return true;
+    }
     return false;
 }
 
@@ -153,16 +143,16 @@ void Tank::Update(double dt, const PlayerInput& input, const TileMap& map) {
     // direccion presionada, incluso si el movimiento queda bloqueado.
     if (input.moveUp) {
         facing_ = Direction::Up;
-        moved = TryMoveWithAssist(0.0f, -distance, dt, map);
+        moved = TryMoveWithAssist(0.0f, -distance, map);
     } else if (input.moveDown) {
         facing_ = Direction::Down;
-        moved = TryMoveWithAssist(0.0f, distance, dt, map);
+        moved = TryMoveWithAssist(0.0f, distance, map);
     } else if (input.moveLeft) {
         facing_ = Direction::Left;
-        moved = TryMoveWithAssist(-distance, 0.0f, dt, map);
+        moved = TryMoveWithAssist(-distance, 0.0f, map);
     } else if (input.moveRight) {
         facing_ = Direction::Right;
-        moved = TryMoveWithAssist(distance, 0.0f, dt, map);
+        moved = TryMoveWithAssist(distance, 0.0f, map);
     }
 
     if (moved) {
