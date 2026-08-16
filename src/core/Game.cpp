@@ -82,6 +82,15 @@ void Game::ProcessInput() {
     if (IsKeyPressed(KEY_R)) {
         RespawnPlayer1();
     }
+
+    // Botones de prueba: fuerzan la aparicion de cada power-up (F1 Estrella,
+    // F2 Casco, ...). No son mecanicas del juego final.
+    if (IsKeyPressed(KEY_F1)) {
+        powerUps_.ForceSpawn(PowerUpType::Star, map_);
+    }
+    if (IsKeyPressed(KEY_F2)) {
+        powerUps_.ForceSpawn(PowerUpType::Helmet, map_);
+    }
 }
 
 void Game::Update(double fixedDt) {

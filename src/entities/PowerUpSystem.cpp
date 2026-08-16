@@ -17,12 +17,12 @@ std::mt19937& Rng() {
 }
 } // namespace
 
-void PowerUpSystem::SpawnRandom(const TileMap& map) {
+void PowerUpSystem::SpawnAt(PowerUpType type, const TileMap& map) {
     std::vector<std::pair<int, int>> openCells;
     for (int y = 0; y < map.Height(); ++y) {
         for (int x = 0; x < map.Width(); ++x) {
-            const TileType type = map.At(x, y).type;
-            if (!TileBlocksMovement(type) && type != TileType::Base) {
+            const TileType cellType = map.At(x, y).type;
+            if (!TileBlocksMovement(cellType) && cellType != TileType::Base) {
                 openCells.emplace_back(x, y);
             }
         }
@@ -35,14 +35,17 @@ void PowerUpSystem::SpawnRandom(const TileMap& map) {
     const auto [cx, cy] = openCells[dist(Rng())];
     powerUp_.x = static_cast<float>(cx);
     powerUp_.y = static_cast<float>(cy);
-
-    std::uniform_int_distribution<int> typeDist(0, 1);
-    powerUp_.type = (typeDist(Rng()) == 0) ? PowerUpType::Star : PowerUpType::Helmet;
+    powerUp_.type = type;
 
     powerUp_.alive = true;
     lifeTimer_ = kLifetime;
     blinkTimer_ = 0.0;
     blinkVisible_ = true;
+}
+
+void PowerUpSystem::ForceSpawn(PowerUpType type, const TileMap& map) {
+    SpawnAt(type, map);
+    spawnTimer_ = kSpawnInterval;
 }
 
 void PowerUpSystem::Update(double dt, const TileMap& map) {
@@ -64,7 +67,8 @@ void PowerUpSystem::Update(double dt, const TileMap& map) {
 
     spawnTimer_ -= dt;
     if (spawnTimer_ <= 0.0) {
-        SpawnRandom(map);
+        std::uniform_int_distribution<int> typeDist(0, 1);
+        SpawnAt(typeDist(Rng()) == 0 ? PowerUpType::Star : PowerUpType::Helmet, map);
     }
 }
 

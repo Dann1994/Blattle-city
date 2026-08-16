@@ -24,8 +24,12 @@ public:
     // de dibujar el icono.
     bool IsBlinkVisible() const { return blinkVisible_; }
 
+    // Fuerza la aparicion de un tipo especifico en una celda abierta al azar,
+    // saltando el timer. Botones de prueba (F1, F2, ...).
+    void ForceSpawn(PowerUpType type, const TileMap& map);
+
 private:
-    void SpawnRandom(const TileMap& map);
+    void SpawnAt(PowerUpType type, const TileMap& map);
 
     PowerUp powerUp_;
     double spawnTimer_ = 5.0; // primera aparicion a los 5s de iniciada la partida

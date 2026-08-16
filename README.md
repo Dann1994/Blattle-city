@@ -43,11 +43,12 @@ El ejecutable queda en `build/bin/battlecity.exe`.
 ## Controles
 
 - Jugador 1: `W A S D` para moverse (sin diagonales), `Ctrl izquierdo` dispara.
-- `R`: repite el destello de aparición en la posición actual del tanque (botón de prueba, no es una mecánica del juego final).
+- `R`: repite el respawn en el punto de spawn inicial (botón de prueba).
+- `F1`: fuerza la aparición del power-up Estrella. `F2`: fuerza la aparición del power-up Casco (más power-ups usarán F3, F4... a medida que se agreguen). Botones de prueba, no son mecánicas del juego final.
 
 ## Estado
 
 Fases 0-2 completas (setup, movimiento/colisión, disparo y destrucción de terreno).
-Tanque protagonista con niveles de arma 1-4 (power-up Estrella) y destello de
-aparición. Ver Documentaciones/Documento_de_Diseno.md sección 14 para el plan
-completo por fases.
+Tanque protagonista con niveles de arma 1-4 (power-up Estrella), escudo de
+invencibilidad (power-up Casco y respawn) y destello de aparición. Ver
+Documentaciones/Documento_de_Diseno.md sección 14 para el plan completo por fases.
