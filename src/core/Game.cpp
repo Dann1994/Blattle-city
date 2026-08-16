@@ -133,7 +133,10 @@ void Game::Render(double /*interpolationAlpha*/) {
     const MapViewport viewport = MapViewport::Compute(windowWidth_, windowHeight_, map_.Width(), map_.Height(), kTileSize);
 
     BeginDrawing();
-    ClearBackground(BLACK);
+    // Mismo color que las celdas vacias (ColorForTile de Empty), asi una
+    // unidad de ladrillo destruida no deja un negro puro que desentona con
+    // el resto del fondo.
+    ClearBackground(ColorForTile(TileType::Empty));
 
     const float brickUnitDst = viewport.tileScreenSize / kBrickGridSize;
 
