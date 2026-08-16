@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include "BulletImpactSystem.h"
+
 namespace bc {
 
 namespace {
@@ -98,7 +100,7 @@ bool BulletSystem::HandleBrickHit(TileMap& map, int cellX, int cellY, float hitX
     return true;
 }
 
-void BulletSystem::Update(double dt, TileMap& map) {
+void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts) {
     for (Bullet& bullet : bullets_) {
         if (!bullet.alive) {
             continue;
@@ -121,6 +123,7 @@ void BulletSystem::Update(double dt, TileMap& map) {
         const TileType hitType = map.At(cellX, cellY).type;
         if (hitType == TileType::Brick) {
             if (HandleBrickHit(map, cellX, cellY, newX, newY, bullet.direction)) {
+                impacts.Spawn(newX, newY);
                 bullet.alive = false;
             } else {
                 // La unidad exacta del impacto ya estaba destruida: la bala sigue de largo.
@@ -134,6 +137,7 @@ void BulletSystem::Update(double dt, TileMap& map) {
             if (hitType == TileType::Steel && bullet.canDestroySteel) {
                 map.At(cellX, cellY).type = TileType::Empty;
             }
+            impacts.Spawn(newX, newY);
             bullet.alive = false;
             continue;
         }
@@ -154,6 +158,7 @@ void BulletSystem::Update(double dt, TileMap& map) {
             const float dx = bullets_[i].x - bullets_[j].x;
             const float dy = bullets_[i].y - bullets_[j].y;
             if (std::fabs(dx) <= kBulletHitRadius && std::fabs(dy) <= kBulletHitRadius) {
+                impacts.Spawn((bullets_[i].x + bullets_[j].x) * 0.5f, (bullets_[i].y + bullets_[j].y) * 0.5f);
                 bullets_[i].alive = false;
                 bullets_[j].alive = false;
             }

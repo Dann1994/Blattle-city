@@ -55,6 +55,7 @@ void Game::Init() {
     SetTextureFilter(brickUnitTextures_[1], TEXTURE_FILTER_POINT);
     spawnFlashSprites_.Load(BC_ASSETS_DIR);
     shieldSprites_.Load(BC_ASSETS_DIR);
+    bulletImpactSprites_.Load(BC_ASSETS_DIR);
 
     // TODO: exponer como opcion en el menu de configuracion (seccion 12.5).
     player1_.SetFireMode(FireMode::SinglePress);
@@ -122,7 +123,8 @@ void Game::Update(double fixedDt) {
         }
     }
 
-    bullets_.Update(fixedDt, map_);
+    bullets_.Update(fixedDt, map_, bulletImpacts_);
+    bulletImpacts_.Update(fixedDt);
     powerUps_.Update(fixedDt, map_);
 }
 
@@ -198,6 +200,16 @@ void Game::Render(double /*interpolationAlpha*/) {
         DrawTexturePro(bulletTex, bulletSrc, bulletDst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
     }
 
+    // Un poco mas grande que una celda: el estallido visualmente "sale" del
+    // tile donde impacto la bala.
+    const float impactSize = viewport.tileScreenSize * 1.4f;
+    for (const BulletImpact& impact : bulletImpacts_.Impacts()) {
+        const Texture2D impactTex = bulletImpactSprites_.Get(impact.frameIndex);
+        const Rectangle impactSrc{0.0f, 0.0f, static_cast<float>(impactTex.width), static_cast<float>(impactTex.height)};
+        const Rectangle impactDst{viewport.TileToScreenX(impact.x) - impactSize * 0.5f, viewport.TileToScreenY(impact.y) - impactSize * 0.5f, impactSize, impactSize};
+        DrawTexturePro(impactTex, impactSrc, impactDst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+    }
+
     if (powerUps_.Active().alive && powerUps_.IsBlinkVisible()) {
         const Texture2D iconTex = (powerUps_.Active().type == PowerUpType::Star) ? starTexture_ : helmetTexture_;
         const Rectangle iconSrc{0.0f, 0.0f, static_cast<float>(iconTex.width), static_cast<float>(iconTex.height)};
@@ -214,6 +226,7 @@ void Game::Render(double /*interpolationAlpha*/) {
 }
 
 void Game::Shutdown() {
+    bulletImpactSprites_.Unload();
     shieldSprites_.Unload();
     spawnFlashSprites_.Unload();
     UnloadTexture(starTexture_);

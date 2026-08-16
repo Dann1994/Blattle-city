@@ -2,6 +2,8 @@
 
 #include <raylib.h>
 
+#include "BulletImpactSprites.h"
+#include "BulletImpactSystem.h"
 #include "BulletSprites.h"
 #include "BulletSystem.h"
 #include "PowerUpSystem.h"
@@ -39,6 +41,8 @@ private:
     TankSpriteSet player1Sprites_;
     BulletSystem bullets_;
     BulletSpriteSet bulletSprites_;
+    BulletImpactSystem bulletImpacts_;
+    BulletImpactSprites bulletImpactSprites_;
     PowerUpSystem powerUps_;
     Texture2D starTexture_{};
     Texture2D helmetTexture_{};
