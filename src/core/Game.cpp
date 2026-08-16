@@ -104,7 +104,7 @@ void Game::Render(double /*interpolationAlpha*/) {
         }
     }
 
-    const Texture2D tankTex = player1Sprites_.Get(player1_.Facing(), player1_.AnimFrame());
+    const Texture2D tankTex = player1Sprites_.Get(player1_.WeaponLevel(), player1_.Facing(), player1_.AnimFrame());
     const Rectangle src{0.0f, 0.0f, static_cast<float>(tankTex.width), static_cast<float>(tankTex.height)};
     const Rectangle dst{viewport.TileToScreenX(player1_.X()), viewport.TileToScreenY(player1_.Y()), viewport.tileScreenSize, viewport.tileScreenSize};
     DrawTexturePro(tankTex, src, dst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
