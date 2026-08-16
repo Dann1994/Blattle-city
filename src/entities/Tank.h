@@ -49,6 +49,15 @@ public:
     // Hay que llamarla una vez por frame (consume el estado previo del boton).
     bool ConsumeShootTrigger(const PlayerInput& input);
 
+    // Niveles de mejora del power-up Estrella (seccion 4.3): 1 (base) a 4 (maximo).
+    int WeaponLevel() const { return weaponLevel_; }
+    void UpgradeWeapon();
+    void ResetWeaponLevel() { weaponLevel_ = 1; }
+
+    float BulletSpeed() const;
+    int MaxBullets() const;       // 1 salvo nivel 3+ (doble disparo)
+    bool CanDestroySteel() const; // desde nivel 3
+
 private:
     bool TryMove(float dx, float dy, const TileMap& map);
     bool TryMoveWithAssist(float dx, float dy, double dt, const TileMap& map);
@@ -63,6 +72,7 @@ private:
     int animFrame_ = 0;
     FireMode fireMode_ = FireMode::SinglePress;
     bool shootHeldLastFrame_ = false;
+    int weaponLevel_ = 1;
 };
 
 } // namespace bc

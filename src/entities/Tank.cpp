@@ -8,6 +8,29 @@ namespace bc {
 namespace {
 constexpr double kAnimFrameDuration = 0.1; // segundos por frame de animacion
 constexpr float kTankSize = 1.0f;          // el tanque ocupa 1 celda, como en el original
+
+// Indexado por nivel-1 (nivel 1..4). Ver seccion 4.3.
+constexpr float kBulletSpeedByLevel[4] = {8.0f, 10.0f, 10.0f, 13.0f};
+constexpr int kMaxBulletsByLevel[4] = {1, 1, 2, 2};
+constexpr int kMaxWeaponLevel = 4;
+}
+
+void Tank::UpgradeWeapon() {
+    if (weaponLevel_ < kMaxWeaponLevel) {
+        ++weaponLevel_;
+    }
+}
+
+float Tank::BulletSpeed() const {
+    return kBulletSpeedByLevel[weaponLevel_ - 1];
+}
+
+int Tank::MaxBullets() const {
+    return kMaxBulletsByLevel[weaponLevel_ - 1];
+}
+
+bool Tank::CanDestroySteel() const {
+    return weaponLevel_ >= 3;
 }
 
 bool Tank::ConsumeShootTrigger(const PlayerInput& input) {

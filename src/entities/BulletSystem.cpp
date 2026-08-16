@@ -9,7 +9,7 @@ namespace {
 constexpr float kBulletHitRadius = 0.2f; // celdas, para la anulacion bala-contra-bala (seccion 4.5)
 }
 
-bool BulletSystem::TryShoot(int ownerId, float muzzleX, float muzzleY, Direction direction, int maxPerOwner) {
+bool BulletSystem::TryShoot(int ownerId, float muzzleX, float muzzleY, Direction direction, float speed, bool canDestroySteel, int maxPerOwner) {
     int aliveCount = 0;
     for (const Bullet& b : bullets_) {
         if (b.alive && b.ownerId == ownerId) {
@@ -26,6 +26,8 @@ bool BulletSystem::TryShoot(int ownerId, float muzzleX, float muzzleY, Direction
     bullet.direction = direction;
     bullet.ownerId = ownerId;
     bullet.alive = true;
+    bullet.speed = speed;
+    bullet.canDestroySteel = canDestroySteel;
     bullets_.push_back(bullet);
     return true;
 }
@@ -48,8 +50,6 @@ void BulletSystem::DestroyBrickHalf(TileMap& map, int cellX, int cellY, Directio
 }
 
 void BulletSystem::Update(double dt, TileMap& map) {
-    const float distance = static_cast<float>(speed_ * dt);
-
     for (Bullet& bullet : bullets_) {
         if (!bullet.alive) {
             continue;
@@ -58,6 +58,7 @@ void BulletSystem::Update(double dt, TileMap& map) {
         float dx = 0.0f, dy = 0.0f;
         DirectionVector(bullet.direction, dx, dy);
 
+        const float distance = static_cast<float>(bullet.speed * dt);
         const float newX = bullet.x + dx * distance;
         const float newY = bullet.y + dy * distance;
         const int cellX = static_cast<int>(std::floor(newX));
@@ -72,6 +73,9 @@ void BulletSystem::Update(double dt, TileMap& map) {
         if (TileBlocksShots(hitType)) {
             if (hitType == TileType::Brick) {
                 DestroyBrickHalf(map, cellX, cellY, bullet.direction);
+            } else if (hitType == TileType::Steel && bullet.canDestroySteel) {
+                map.At(cellX, cellY).type = TileType::Empty;
+                map.At(cellX, cellY).subMask = 0;
             }
             bullet.alive = false;
             continue;

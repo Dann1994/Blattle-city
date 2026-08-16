@@ -1,7 +1,10 @@
 #pragma once
 
+#include <raylib.h>
+
 #include "BulletSprites.h"
 #include "BulletSystem.h"
+#include "PowerUpSystem.h"
 #include "Tank.h"
 #include "TankSprites.h"
 #include "TileMap.h"
@@ -27,6 +30,8 @@ private:
     TankSpriteSet player1Sprites_;
     BulletSystem bullets_;
     BulletSpriteSet bulletSprites_;
+    PowerUpSystem powerUps_;
+    Texture2D starTexture_{};
     int windowWidth_ = 0;
     int windowHeight_ = 0;
 };

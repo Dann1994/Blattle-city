@@ -37,6 +37,8 @@ void Game::Init() {
 
     player1Sprites_.LoadPlayer1(BC_ASSETS_DIR);
     bulletSprites_.Load(BC_ASSETS_DIR);
+    starTexture_ = LoadTexture((std::string(BC_ASSETS_DIR) + "sprites/powerup_star.png").c_str());
+    SetTextureFilter(starTexture_, TEXTURE_FILTER_POINT);
 
     // TODO: exponer como opcion en el menu de configuracion (seccion 12.5).
     player1_.SetFireMode(FireMode::SinglePress);
@@ -61,10 +63,15 @@ void Game::Update(double fixedDt) {
     if (player1_.ConsumeShootTrigger(input1_)) {
         float muzzleX = 0.0f, muzzleY = 0.0f;
         player1_.MuzzlePosition(muzzleX, muzzleY);
-        bullets_.TryShoot(kPlayer1Id, muzzleX, muzzleY, player1_.Facing());
+        bullets_.TryShoot(kPlayer1Id, muzzleX, muzzleY, player1_.Facing(), player1_.BulletSpeed(), player1_.CanDestroySteel(), player1_.MaxBullets());
     }
 
     bullets_.Update(fixedDt, map_);
+
+    powerUps_.Update(fixedDt, map_);
+    if (powerUps_.TryPickup(player1_.X(), player1_.Y())) {
+        player1_.UpgradeWeapon();
+    }
 }
 
 void Game::Render(double /*interpolationAlpha*/) {
@@ -112,11 +119,19 @@ void Game::Render(double /*interpolationAlpha*/) {
         DrawTexturePro(bulletTex, bulletSrc, bulletDst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
     }
 
+    if (powerUps_.Active().alive) {
+        const Rectangle starSrc{0.0f, 0.0f, static_cast<float>(starTexture_.width), static_cast<float>(starTexture_.height)};
+        const Rectangle starDst{viewport.TileToScreenX(powerUps_.Active().x), viewport.TileToScreenY(powerUps_.Active().y), viewport.tileScreenSize, viewport.tileScreenSize};
+        DrawTexturePro(starTexture_, starSrc, starDst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+    }
+
     DrawFPS(10, 10);
+    DrawText(TextFormat("Nivel de arma: %d", player1_.WeaponLevel()), 10, 30, 20, RAYWHITE);
     EndDrawing();
 }
 
 void Game::Shutdown() {
+    UnloadTexture(starTexture_);
     bulletSprites_.Unload();
     player1Sprites_.Unload();
     CloseWindow();
