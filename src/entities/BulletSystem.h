@@ -17,10 +17,13 @@ public:
     const std::vector<Bullet>& Bullets() const { return bullets_; }
 
 private:
-    // Destruye la unidad minima exacta del punto de impacto (hitX,hitY).
-    // Devuelve true si frena la bala (habia material ahi), false si esa
-    // unidad ya estaba destruida y la bala puede seguir de largo.
-    static bool HandleBrickHit(TileMap& map, int cellX, int cellY, float hitX, float hitY);
+    // Destruye unidades minimas alrededor del punto de impacto (hitX,hitY):
+    // si el golpe cae en una fila/columna central de la grilla 4x4, destruye
+    // toda esa fila/columna (4 unidades); si cae en el borde ("esquina"),
+    // destruye solo la mitad cercana (2 unidades). Devuelve true si frena la
+    // bala (habia material ahi), false si ya estaba todo destruido y la bala
+    // puede seguir de largo.
+    static bool HandleBrickHit(TileMap& map, int cellX, int cellY, float hitX, float hitY, Direction hitFrom);
 
     std::vector<Bullet> bullets_;
 };
