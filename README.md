@@ -40,12 +40,14 @@ cmake --build build
 
 El ejecutable queda en `build/bin/battlecity.exe`.
 
-## Controles (Fase 1)
+## Controles
 
-- Jugador 1: `W A S D` para moverse (sin diagonales).
+- Jugador 1: `W A S D` para moverse (sin diagonales), `Ctrl izquierdo` dispara.
+- `R`: repite el destello de aparición en la posición actual del tanque (botón de prueba, no es una mecánica del juego final).
 
 ## Estado
 
-Fase 0 completa y verificada (compila y corre). Fase 1 en curso: tanque del
-jugador 1 con movimiento y colisión contra el mapa — falta disparo (Fase 2).
-Ver Documentaciones/Documento_de_Diseno.md sección 14 para el plan completo por fases.
+Fases 0-2 completas (setup, movimiento/colisión, disparo y destrucción de terreno).
+Tanque protagonista con niveles de arma 1-4 (power-up Estrella) y destello de
+aparición. Ver Documentaciones/Documento_de_Diseno.md sección 14 para el plan
+completo por fases.

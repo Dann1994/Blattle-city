@@ -59,6 +59,12 @@ void Game::ProcessInput() {
     input1_.moveLeft = IsKeyDown(KEY_A);
     input1_.moveRight = IsKeyDown(KEY_D);
     input1_.shoot = IsKeyDown(KEY_LEFT_CONTROL);
+
+    // Boton de prueba: repite el destello de aparicion en la posicion actual
+    // del tanque, para poder verlo sin tener que reiniciar el juego.
+    if (IsKeyPressed(KEY_R)) {
+        player1Spawn_.Start(player1_.X(), player1_.Y());
+    }
 }
 
 void Game::Update(double fixedDt) {
