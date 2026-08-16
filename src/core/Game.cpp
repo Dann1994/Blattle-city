@@ -21,7 +21,6 @@ constexpr double kShieldBlinkInterval = 0.05; // segundos entre cada frame del e
 
 Color ColorForTile(TileType type) {
     switch (type) {
-        case TileType::Brick: return Color{0xB0, 0x60, 0x28, 0xFF};
         case TileType::Steel: return Color{0xA0, 0xA0, 0xA8, 0xFF};
         case TileType::Water: return Color{0x30, 0x60, 0xD0, 0xFF};
         case TileType::Trees: return Color{0x30, 0x90, 0x30, 0xFF};
@@ -50,6 +49,10 @@ void Game::Init() {
     SetTextureFilter(starTexture_, TEXTURE_FILTER_POINT);
     helmetTexture_ = LoadTexture((std::string(BC_ASSETS_DIR) + "sprites/powerup_helmet.png").c_str());
     SetTextureFilter(helmetTexture_, TEXTURE_FILTER_POINT);
+    brickUnitTextures_[0] = LoadTexture((std::string(BC_ASSETS_DIR) + "sprites/brick_unit_0.png").c_str());
+    brickUnitTextures_[1] = LoadTexture((std::string(BC_ASSETS_DIR) + "sprites/brick_unit_1.png").c_str());
+    SetTextureFilter(brickUnitTextures_[0], TEXTURE_FILTER_POINT);
+    SetTextureFilter(brickUnitTextures_[1], TEXTURE_FILTER_POINT);
     spawnFlashSprites_.Load(BC_ASSETS_DIR);
     shieldSprites_.Load(BC_ASSETS_DIR);
 
@@ -132,7 +135,7 @@ void Game::Render(double /*interpolationAlpha*/) {
     BeginDrawing();
     ClearBackground(BLACK);
 
-    const float halfTile = viewport.tileScreenSize * 0.5f;
+    const float brickUnitDst = viewport.tileScreenSize / kBrickGridSize;
 
     for (int y = 0; y < map_.Height(); ++y) {
         for (int x = 0; x < map_.Width(); ++x) {
@@ -140,12 +143,22 @@ void Game::Render(double /*interpolationAlpha*/) {
             const float screenX = viewport.TileToScreenX(x);
             const float screenY = viewport.TileToScreenY(y);
 
-            if (cell.type == TileType::Brick && cell.subMask != kSubCellMaskFull) {
-                const Color color = ColorForTile(cell.type);
-                if (cell.subMask & kSubCellTopLeft) DrawRectangleRec(Rectangle{screenX, screenY, halfTile, halfTile}, color);
-                if (cell.subMask & kSubCellTopRight) DrawRectangleRec(Rectangle{screenX + halfTile, screenY, halfTile, halfTile}, color);
-                if (cell.subMask & kSubCellBottomLeft) DrawRectangleRec(Rectangle{screenX, screenY + halfTile, halfTile, halfTile}, color);
-                if (cell.subMask & kSubCellBottomRight) DrawRectangleRec(Rectangle{screenX + halfTile, screenY + halfTile, halfTile, halfTile}, color);
+            if (cell.type == TileType::Brick) {
+                // El bloque se arma con una grilla de 4x4 unidades minimas
+                // (ver BrickUnit.h / Documentaciones/Ladrillos.png), cada una
+                // destruida de forma individual.
+                for (int row = 0; row < kBrickGridSize; ++row) {
+                    for (int col = 0; col < kBrickGridSize; ++col) {
+                        const BrickUnit& unit = cell.brickUnits[row * kBrickGridSize + col];
+                        if (!unit.alive) {
+                            continue;
+                        }
+                        const Texture2D unitTex = brickUnitTextures_[unit.frame];
+                        const Rectangle unitSrc{0.0f, 0.0f, static_cast<float>(unitTex.width), static_cast<float>(unitTex.height)};
+                        const Rectangle unitDst{screenX + col * brickUnitDst, screenY + row * brickUnitDst, brickUnitDst, brickUnitDst};
+                        DrawTexturePro(unitTex, unitSrc, unitDst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+                    }
+                }
             } else {
                 const Rectangle rect{screenX, screenY, viewport.tileScreenSize, viewport.tileScreenSize};
                 DrawRectangleRec(rect, ColorForTile(cell.type));
@@ -202,6 +215,8 @@ void Game::Shutdown() {
     spawnFlashSprites_.Unload();
     UnloadTexture(starTexture_);
     UnloadTexture(helmetTexture_);
+    UnloadTexture(brickUnitTextures_[0]);
+    UnloadTexture(brickUnitTextures_[1]);
     bulletSprites_.Unload();
     player1Sprites_.Unload();
     CloseWindow();

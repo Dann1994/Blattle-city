@@ -42,6 +42,7 @@ private:
     PowerUpSystem powerUps_;
     Texture2D starTexture_{};
     Texture2D helmetTexture_{};
+    Texture2D brickUnitTextures_[2]{}; // ver BrickUnit.h: 0 = liso, 1 = esquina/junta
     SpawnFlash player1Spawn_;
     SpawnFlashSprites spawnFlashSprites_;
     ShieldSprites shieldSprites_;

@@ -17,7 +17,10 @@ public:
     const std::vector<Bullet>& Bullets() const { return bullets_; }
 
 private:
-    static void DestroyBrickHalf(TileMap& map, int cellX, int cellY, Direction hitFrom);
+    // Destruye la unidad minima exacta del punto de impacto (hitX,hitY).
+    // Devuelve true si frena la bala (habia material ahi), false si esa
+    // unidad ya estaba destruida y la bala puede seguir de largo.
+    static bool HandleBrickHit(TileMap& map, int cellX, int cellY, float hitX, float hitY);
 
     std::vector<Bullet> bullets_;
 };

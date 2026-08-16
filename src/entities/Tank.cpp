@@ -70,17 +70,8 @@ bool Tank::TryMove(float dx, float dy, const TileMap& map) {
         return false;
     }
 
-    const int minCellX = static_cast<int>(std::floor(left));
-    const int maxCellX = static_cast<int>(std::ceil(right)) - 1;
-    const int minCellY = static_cast<int>(std::floor(top));
-    const int maxCellY = static_cast<int>(std::ceil(bottom)) - 1;
-
-    for (int cy = minCellY; cy <= maxCellY; ++cy) {
-        for (int cx = minCellX; cx <= maxCellX; ++cx) {
-            if (!map.InBounds(cx, cy) || TileBlocksMovement(map.At(cx, cy).type)) {
-                return false;
-            }
-        }
+    if (map.IsBoxBlocked(left, right, top, bottom)) {
+        return false;
     }
 
     x_ = newX;

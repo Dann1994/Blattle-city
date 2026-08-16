@@ -32,21 +32,26 @@ bool BulletSystem::TryShoot(int ownerId, float muzzleX, float muzzleY, Direction
     return true;
 }
 
-void BulletSystem::DestroyBrickHalf(TileMap& map, int cellX, int cellY, Direction hitFrom) {
+bool BulletSystem::HandleBrickHit(TileMap& map, int cellX, int cellY, float hitX, float hitY) {
     Cell& cell = map.At(cellX, cellY);
 
-    uint8_t clearMask = 0;
-    switch (hitFrom) {
-        case Direction::Right: clearMask = kSubCellLeftHalf; break;   // la bala viene desde la izquierda
-        case Direction::Left:  clearMask = kSubCellRightHalf; break;  // la bala viene desde la derecha
-        case Direction::Down:  clearMask = kSubCellTopHalf; break;    // la bala viene desde arriba
-        case Direction::Up:    clearMask = kSubCellBottomHalf; break; // la bala viene desde abajo
+    // Unidad exacta del punto de impacto (no toda la celda): asi el disparo
+    // solo destruye la unidad minima que efectivamente toco.
+    const float fracX = hitX - static_cast<float>(cellX);
+    const float fracY = hitY - static_cast<float>(cellY);
+    const int col = std::clamp(static_cast<int>(fracX * kBrickGridSize), 0, kBrickGridSize - 1);
+    const int row = std::clamp(static_cast<int>(fracY * kBrickGridSize), 0, kBrickGridSize - 1);
+
+    BrickUnit& unit = cell.brickUnits[row * kBrickGridSize + col];
+    if (!unit.alive) {
+        return false; // esa unidad ya estaba destruida: no frena la bala
     }
 
-    cell.subMask &= static_cast<uint8_t>(~clearMask);
-    if (cell.subMask == 0) {
+    unit.alive = false;
+    if (cell.BrickFullyDestroyed()) {
         cell.type = TileType::Empty;
     }
+    return true;
 }
 
 void BulletSystem::Update(double dt, TileMap& map) {
@@ -70,12 +75,20 @@ void BulletSystem::Update(double dt, TileMap& map) {
         }
 
         const TileType hitType = map.At(cellX, cellY).type;
+        if (hitType == TileType::Brick) {
+            if (HandleBrickHit(map, cellX, cellY, newX, newY)) {
+                bullet.alive = false;
+            } else {
+                // La unidad exacta del impacto ya estaba destruida: la bala sigue de largo.
+                bullet.x = newX;
+                bullet.y = newY;
+            }
+            continue;
+        }
+
         if (TileBlocksShots(hitType)) {
-            if (hitType == TileType::Brick) {
-                DestroyBrickHalf(map, cellX, cellY, bullet.direction);
-            } else if (hitType == TileType::Steel && bullet.canDestroySteel) {
+            if (hitType == TileType::Steel && bullet.canDestroySteel) {
                 map.At(cellX, cellY).type = TileType::Empty;
-                map.At(cellX, cellY).subMask = 0;
             }
             bullet.alive = false;
             continue;
