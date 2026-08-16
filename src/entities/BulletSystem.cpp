@@ -65,28 +65,26 @@ bool BulletSystem::HandleBrickHit(TileMap& map, int cellX, int cellY, float hitX
     bool destroyedAny = false;
 
     if (hitFrom == Direction::Left || hitFrom == Direction::Right) {
-        // La "capa" golpeada es la columna mas cercana a la cara de impacto
-        // (izquierda o derecha de la celda). La fila del impacto decide
-        // cuanto de esa capa se destruye: centro (filas 1,2) = capa entera
-        // (4 unidades); esquina (filas 0,3) = solo la mitad de esa capa,
-        // del lado (arriba/abajo) donde pego.
-        const int nearCol = (hitFrom == Direction::Right) ? 0 : kBrickGridSize - 1; // bala hacia la derecha entra por la izquierda
+        // La "capa" golpeada es la columna en la que esta la bala en este
+        // instante (col ya refleja cuanto penetro: si la capa de entrada
+        // esta vacia, la bala avanza y la siguiente llamada cae en la
+        // columna de al lado, nunca se queda pegada a la capa de entrada).
+        // La fila decide cuanto de esa capa se destruye: centro (filas 1,2)
+        // = capa entera (4 unidades); esquina (filas 0,3) = mitad de esa
+        // capa, del lado (arriba/abajo) donde pego.
         if (row == 1 || row == 2) {
-            destroyedAny = DestroyUnitSpan(cell, nearCol, /*fixedIsRow=*/false, 0, kBrickGridSize);
+            destroyedAny = DestroyUnitSpan(cell, col, /*fixedIsRow=*/false, 0, kBrickGridSize);
         } else {
             const int firstRow = (row == 0) ? 0 : kHalf;
-            destroyedAny = DestroyUnitSpan(cell, nearCol, /*fixedIsRow=*/false, firstRow, kHalf);
+            destroyedAny = DestroyUnitSpan(cell, col, /*fixedIsRow=*/false, firstRow, kHalf);
         }
     } else {
-        // Simetrico, con la capa siendo la fila mas cercana a la cara de
-        // impacto (arriba o abajo) y la columna del impacto decidiendo cuanto
-        // de esa capa se destruye.
-        const int nearRow = (hitFrom == Direction::Down) ? 0 : kBrickGridSize - 1; // bala hacia abajo entra por arriba
+        // Simetrico: la capa es la fila en la que esta la bala ahora mismo.
         if (col == 1 || col == 2) {
-            destroyedAny = DestroyUnitSpan(cell, nearRow, /*fixedIsRow=*/true, 0, kBrickGridSize);
+            destroyedAny = DestroyUnitSpan(cell, row, /*fixedIsRow=*/true, 0, kBrickGridSize);
         } else {
             const int firstCol = (col == 0) ? 0 : kHalf;
-            destroyedAny = DestroyUnitSpan(cell, nearRow, /*fixedIsRow=*/true, firstCol, kHalf);
+            destroyedAny = DestroyUnitSpan(cell, row, /*fixedIsRow=*/true, firstCol, kHalf);
         }
     }
 
