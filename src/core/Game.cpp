@@ -45,11 +45,15 @@ void Game::Init() {
     player1_.SetFireMode(FireMode::SinglePress);
 
     if (!level.player_spawns.empty()) {
-        const float spawnX = static_cast<float>(level.player_spawns[0][0]);
-        const float spawnY = static_cast<float>(level.player_spawns[0][1]);
-        player1_.SetPosition(spawnX, spawnY);
-        player1Spawn_.Start(spawnX, spawnY);
+        player1SpawnX_ = static_cast<float>(level.player_spawns[0][0]);
+        player1SpawnY_ = static_cast<float>(level.player_spawns[0][1]);
     }
+    RespawnPlayer1();
+}
+
+void Game::RespawnPlayer1() {
+    player1_.SetPosition(player1SpawnX_, player1SpawnY_);
+    player1Spawn_.Start(player1SpawnX_, player1SpawnY_);
 }
 
 void Game::ProcessInput() {
@@ -60,10 +64,10 @@ void Game::ProcessInput() {
     input1_.moveRight = IsKeyDown(KEY_D);
     input1_.shoot = IsKeyDown(KEY_LEFT_CONTROL);
 
-    // Boton de prueba: repite el destello de aparicion en la posicion actual
-    // del tanque, para poder verlo sin tener que reiniciar el juego.
+    // Boton de prueba: repite el respawn en el punto de spawn inicial, para
+    // poder ver el destello sin tener que reiniciar el juego.
     if (IsKeyPressed(KEY_R)) {
-        player1Spawn_.Start(player1_.X(), player1_.Y());
+        RespawnPlayer1();
     }
 }
 
