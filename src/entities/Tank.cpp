@@ -33,6 +33,12 @@ bool Tank::CanDestroySteel() const {
     return weaponLevel_ >= 3;
 }
 
+void Tank::TickShield(double dt) {
+    if (shieldTimer_ > 0.0) {
+        shieldTimer_ = std::max(0.0, shieldTimer_ - dt);
+    }
+}
+
 bool Tank::ConsumeShootTrigger(const PlayerInput& input) {
     bool shouldFire = false;
     if (fireMode_ == FireMode::HoldToFire) {

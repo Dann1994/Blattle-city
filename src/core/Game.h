@@ -5,6 +5,7 @@
 #include "BulletSprites.h"
 #include "BulletSystem.h"
 #include "PowerUpSystem.h"
+#include "ShieldSprites.h"
 #include "SpawnFlash.h"
 #include "SpawnFlashSprites.h"
 #include "Tank.h"
@@ -40,8 +41,10 @@ private:
     BulletSpriteSet bulletSprites_;
     PowerUpSystem powerUps_;
     Texture2D starTexture_{};
+    Texture2D helmetTexture_{};
     SpawnFlash player1Spawn_;
     SpawnFlashSprites spawnFlashSprites_;
+    ShieldSprites shieldSprites_;
     float player1SpawnX_ = 0.0f;
     float player1SpawnY_ = 0.0f;
     int windowWidth_ = 0;

@@ -58,6 +58,13 @@ public:
     int MaxBullets() const;       // 1 salvo nivel 3+ (doble disparo)
     bool CanDestroySteel() const; // desde nivel 3
 
+    // Escudo (power-up Casco / proteccion al aparecer, seccion 6). La duracion
+    // la decide quien llama (distinta si es respawn o si se agarro el item).
+    void ActivateShield(double durationSeconds) { shieldTimer_ = durationSeconds; }
+    void TickShield(double dt);
+    bool IsShielded() const { return shieldTimer_ > 0.0; }
+    double ShieldSecondsRemaining() const { return shieldTimer_; }
+
 private:
     bool TryMove(float dx, float dy, const TileMap& map);
     bool TryMoveWithAssist(float dx, float dy, const TileMap& map);
@@ -73,6 +80,7 @@ private:
     FireMode fireMode_ = FireMode::SinglePress;
     bool shootHeldLastFrame_ = false;
     int weaponLevel_ = 1;
+    double shieldTimer_ = 0.0;
 };
 
 } // namespace bc

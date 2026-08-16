@@ -13,8 +13,9 @@ class PowerUpSystem {
 public:
     void Update(double dt, const TileMap& map);
 
-    // Si el tanque (celda 1x1 en tankX,tankY) se solapa con el power-up activo, lo recoge.
-    bool TryPickup(float tankX, float tankY);
+    // Si el tanque (celda 1x1 en tankX,tankY) se solapa con el power-up activo,
+    // lo recoge y devuelve el tipo en outType.
+    bool TryPickup(float tankX, float tankY, PowerUpType& outType);
 
     const PowerUp& Active() const { return powerUp_; }
 

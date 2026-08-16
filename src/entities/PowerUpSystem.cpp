@@ -35,6 +35,10 @@ void PowerUpSystem::SpawnRandom(const TileMap& map) {
     const auto [cx, cy] = openCells[dist(Rng())];
     powerUp_.x = static_cast<float>(cx);
     powerUp_.y = static_cast<float>(cy);
+
+    std::uniform_int_distribution<int> typeDist(0, 1);
+    powerUp_.type = (typeDist(Rng()) == 0) ? PowerUpType::Star : PowerUpType::Helmet;
+
     powerUp_.alive = true;
     lifeTimer_ = kLifetime;
     blinkTimer_ = 0.0;
@@ -64,7 +68,7 @@ void PowerUpSystem::Update(double dt, const TileMap& map) {
     }
 }
 
-bool PowerUpSystem::TryPickup(float tankX, float tankY) {
+bool PowerUpSystem::TryPickup(float tankX, float tankY, PowerUpType& outType) {
     if (!powerUp_.alive) {
         return false;
     }
@@ -72,6 +76,7 @@ bool PowerUpSystem::TryPickup(float tankX, float tankY) {
     const bool overlapX = tankX < powerUp_.x + 1.0f && tankX + 1.0f > powerUp_.x;
     const bool overlapY = tankY < powerUp_.y + 1.0f && tankY + 1.0f > powerUp_.y;
     if (overlapX && overlapY) {
+        outType = powerUp_.type;
         powerUp_.alive = false;
         spawnTimer_ = kSpawnInterval;
         return true;

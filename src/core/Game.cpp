@@ -10,6 +10,15 @@ namespace bc {
 
 namespace {
 
+// Duraciones del escudo (seccion 6). No hay un numero exacto documentado del
+// juego original para la proteccion al aparecer; 10s para el item Casco esta
+// confirmado por una recreacion fiel del juego, y se uso como referencia
+// para elegir un valor mas corto (proporcional al tiempo del destello) para
+// el respawn, tal como se pidio.
+constexpr double kRespawnShieldDuration = 2.0;
+constexpr double kHelmetShieldDuration = 10.0;
+constexpr double kShieldBlinkInterval = 0.05; // segundos entre cada frame del escudo
+
 Color ColorForTile(TileType type) {
     switch (type) {
         case TileType::Brick: return Color{0xB0, 0x60, 0x28, 0xFF};
@@ -39,7 +48,10 @@ void Game::Init() {
     bulletSprites_.Load(BC_ASSETS_DIR);
     starTexture_ = LoadTexture((std::string(BC_ASSETS_DIR) + "sprites/powerup_star.png").c_str());
     SetTextureFilter(starTexture_, TEXTURE_FILTER_POINT);
+    helmetTexture_ = LoadTexture((std::string(BC_ASSETS_DIR) + "sprites/powerup_helmet.png").c_str());
+    SetTextureFilter(helmetTexture_, TEXTURE_FILTER_POINT);
     spawnFlashSprites_.Load(BC_ASSETS_DIR);
+    shieldSprites_.Load(BC_ASSETS_DIR);
 
     // TODO: exponer como opcion en el menu de configuracion (seccion 12.5).
     player1_.SetFireMode(FireMode::SinglePress);
@@ -54,6 +66,7 @@ void Game::Init() {
 void Game::RespawnPlayer1() {
     player1_.SetPosition(player1SpawnX_, player1SpawnY_);
     player1Spawn_.Start(player1SpawnX_, player1SpawnY_);
+    player1_.ActivateShield(kRespawnShieldDuration);
 }
 
 void Game::ProcessInput() {
@@ -72,6 +85,8 @@ void Game::ProcessInput() {
 }
 
 void Game::Update(double fixedDt) {
+    player1_.TickShield(fixedDt);
+
     if (player1Spawn_.IsActive()) {
         // Mientras dura el destello de aparicion, el tanque no se mueve ni
         // dispara ni puede ser tocado por power-ups (seccion 5 y 13).
@@ -85,8 +100,13 @@ void Game::Update(double fixedDt) {
             bullets_.TryShoot(kPlayer1Id, muzzleX, muzzleY, player1_.Facing(), player1_.BulletSpeed(), player1_.CanDestroySteel(), player1_.MaxBullets());
         }
 
-        if (powerUps_.TryPickup(player1_.X(), player1_.Y())) {
-            player1_.UpgradeWeapon();
+        PowerUpType pickedType{};
+        if (powerUps_.TryPickup(player1_.X(), player1_.Y(), pickedType)) {
+            if (pickedType == PowerUpType::Star) {
+                player1_.UpgradeWeapon();
+            } else if (pickedType == PowerUpType::Helmet) {
+                player1_.ActivateShield(kHelmetShieldDuration);
+            }
         }
     }
 
@@ -134,6 +154,13 @@ void Game::Render(double /*interpolationAlpha*/) {
         const Rectangle src{0.0f, 0.0f, static_cast<float>(tankTex.width), static_cast<float>(tankTex.height)};
         const Rectangle dst{viewport.TileToScreenX(player1_.X()), viewport.TileToScreenY(player1_.Y()), viewport.tileScreenSize, viewport.tileScreenSize};
         DrawTexturePro(tankTex, src, dst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+
+        if (player1_.IsShielded()) {
+            const int shieldFrame = static_cast<int>(GetTime() / kShieldBlinkInterval) % 2;
+            const Texture2D shieldTex = shieldSprites_.Get(shieldFrame);
+            const Rectangle shieldSrc{0.0f, 0.0f, static_cast<float>(shieldTex.width), static_cast<float>(shieldTex.height)};
+            DrawTexturePro(shieldTex, shieldSrc, dst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+        }
     }
 
     const float pixelScale = viewport.tileScreenSize / static_cast<float>(kTileSize);
@@ -147,19 +174,25 @@ void Game::Render(double /*interpolationAlpha*/) {
     }
 
     if (powerUps_.Active().alive && powerUps_.IsBlinkVisible()) {
-        const Rectangle starSrc{0.0f, 0.0f, static_cast<float>(starTexture_.width), static_cast<float>(starTexture_.height)};
-        const Rectangle starDst{viewport.TileToScreenX(powerUps_.Active().x), viewport.TileToScreenY(powerUps_.Active().y), viewport.tileScreenSize, viewport.tileScreenSize};
-        DrawTexturePro(starTexture_, starSrc, starDst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+        const Texture2D iconTex = (powerUps_.Active().type == PowerUpType::Star) ? starTexture_ : helmetTexture_;
+        const Rectangle iconSrc{0.0f, 0.0f, static_cast<float>(iconTex.width), static_cast<float>(iconTex.height)};
+        const Rectangle iconDst{viewport.TileToScreenX(powerUps_.Active().x), viewport.TileToScreenY(powerUps_.Active().y), viewport.tileScreenSize, viewport.tileScreenSize};
+        DrawTexturePro(iconTex, iconSrc, iconDst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
     }
 
     DrawFPS(10, 10);
     DrawText(TextFormat("Nivel de arma: %d", player1_.WeaponLevel()), 10, 30, 20, RAYWHITE);
+    if (player1_.IsShielded()) {
+        DrawText(TextFormat("Escudo: %.1fs", player1_.ShieldSecondsRemaining()), 10, 55, 20, RAYWHITE);
+    }
     EndDrawing();
 }
 
 void Game::Shutdown() {
+    shieldSprites_.Unload();
     spawnFlashSprites_.Unload();
     UnloadTexture(starTexture_);
+    UnloadTexture(helmetTexture_);
     bulletSprites_.Unload();
     player1Sprites_.Unload();
     CloseWindow();
