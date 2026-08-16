@@ -5,6 +5,7 @@
 
 #include "BrickUnit.h"
 #include "LevelFormat.h"
+#include "SteelUnit.h"
 #include "TileTypes.h"
 
 namespace bc {
@@ -14,9 +15,21 @@ struct Cell {
     // Solo tiene sentido cuando type == Brick (ver BrickUnit.h): grilla 4x4
     // de unidades minimas, indexada como fila*kBrickGridSize + columna.
     std::array<BrickUnit, kBrickUnitCount> brickUnits{};
+    // Solo tiene sentido cuando type == Steel (ver SteelUnit.h): grilla 2x2,
+    // indexada como fila*kSteelGridSize + columna.
+    std::array<SteelUnit, kSteelUnitCount> steelUnits{};
 
     bool BrickFullyDestroyed() const {
         for (const BrickUnit& unit : brickUnits) {
+            if (unit.alive) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool SteelFullyDestroyed() const {
+        for (const SteelUnit& unit : steelUnits) {
             if (unit.alive) {
                 return false;
             }

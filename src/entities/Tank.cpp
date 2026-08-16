@@ -10,14 +10,75 @@ constexpr double kAnimFrameDuration = 0.1; // segundos por frame de animacion
 constexpr float kTankSize = 1.0f;          // el tanque ocupa 1 celda, como en el original
 
 // Indexado por nivel-1 (nivel 1..4). Ver seccion 4.3.
-constexpr float kBulletSpeedByLevel[4] = {8.0f, 10.0f, 10.0f, 13.0f};
+// Nivel 2: velocidad de movimiento x1.5 y de disparo x2 respecto al nivel 1.
+// Nivel 3: velocidad de movimiento x0.75 y de disparo x1.5 respecto al nivel 1.
+// Nivel 4: velocidad de movimiento x0.5 y de disparo x1.75 respecto al nivel 1.
+constexpr float kMoveSpeedByLevel[4] = {3.5f, 5.25f, 2.625f, 1.75f};
+constexpr float kBulletSpeedByLevel[4] = {8.0f, 16.0f, 12.0f, 14.0f};
 constexpr int kMaxBulletsByLevel[4] = {1, 1, 2, 2};
 constexpr int kMaxWeaponLevel = 4;
+constexpr double kOverheatLockSeconds = 5.0;
+constexpr float kHeatPerShotByLevel[4] = {5.0f, 5.0f, 5.0f, 15.0f}; // nivel 4 calienta mas
+constexpr float kHeatMax = 100.0f;
+constexpr double kHeatDecayInterval = 0.5; // segundos entre cada paso de enfriado
+constexpr float kHeatDecayStep = 5.0f;
 }
 
-void Tank::UpgradeWeapon() {
+void Tank::PickupStar() {
     if (weaponLevel_ < kMaxWeaponLevel) {
         ++weaponLevel_;
+    } else {
+        specialShotCharges_ = 1; // maximo 1 carga, no se acumula
+    }
+}
+
+bool Tank::HasSpecialShotReady() const {
+    return weaponLevel_ == kMaxWeaponLevel && specialShotCharges_ > 0;
+}
+
+void Tank::ApplyWeaponLevelPenalty(int levels) {
+    weaponLevel_ = std::max(1, weaponLevel_ - levels);
+    if (weaponLevel_ < kMaxWeaponLevel) {
+        specialShotCharges_ = 0;
+    }
+}
+
+void Tank::RegisterNormalShotHeat() {
+    heatPercent_ = std::min(kHeatMax, heatPercent_ + kHeatPerShotByLevel[weaponLevel_ - 1]);
+    if (heatPercent_ >= kHeatMax) {
+        shootCooldownTimer_ = kOverheatLockSeconds; // se paso de calor: bloqueado, fijo en 100%
+    }
+}
+
+void Tank::RegisterSpecialShotHeat() {
+    heatPercent_ = kHeatMax; // el especial llena el contador de una
+    shootCooldownTimer_ = kOverheatLockSeconds;
+}
+
+void Tank::TickHeatDecay(double dt) {
+    if (shootCooldownTimer_ > 0.0 || heatPercent_ <= 0.0f) {
+        return; // bloqueado por sobrecalentamiento (se mantiene fijo) o ya en 0
+    }
+    heatDecayAccumulator_ += dt;
+    while (heatDecayAccumulator_ >= kHeatDecayInterval && heatPercent_ > 0.0f) {
+        heatDecayAccumulator_ -= kHeatDecayInterval;
+        heatPercent_ = std::max(0.0f, heatPercent_ - kHeatDecayStep);
+    }
+}
+
+void Tank::TickShootCooldown(double dt) {
+    if (shootCooldownTimer_ > 0.0) {
+        shootCooldownTimer_ = std::max(0.0, shootCooldownTimer_ - dt);
+        if (shootCooldownTimer_ <= 0.0) {
+            heatPercent_ = 0.0f; // termino el bloqueo: el contador vuelve a 0%
+            heatDecayAccumulator_ = 0.0;
+        }
+    }
+}
+
+void Tank::TickFreeze(double dt) {
+    if (freezeTimer_ > 0.0) {
+        freezeTimer_ = std::max(0.0, freezeTimer_ - dt);
     }
 }
 
@@ -27,10 +88,6 @@ float Tank::BulletSpeed() const {
 
 int Tank::MaxBullets() const {
     return kMaxBulletsByLevel[weaponLevel_ - 1];
-}
-
-bool Tank::CanDestroySteel() const {
-    return weaponLevel_ >= 3;
 }
 
 void Tank::TickShield(double dt) {
@@ -47,6 +104,12 @@ bool Tank::ConsumeShootTrigger(const PlayerInput& input) {
         shouldFire = input.shoot && !shootHeldLastFrame_;
     }
     shootHeldLastFrame_ = input.shoot;
+    return shouldFire;
+}
+
+bool Tank::ConsumeSpecialShotTrigger(const PlayerInput& input) {
+    const bool shouldFire = input.specialShoot && !specialShootHeldLastFrame_;
+    specialShootHeldLastFrame_ = input.specialShoot;
     return shouldFire;
 }
 
@@ -133,7 +196,12 @@ bool Tank::TrySlidePerpendicularX(float dy, const TileMap& map) {
 }
 
 void Tank::Update(double dt, const PlayerInput& input, const TileMap& map) {
-    const float distance = static_cast<float>(speed_ * dt);
+    if (freezeTimer_ > 0.0) {
+        animTimer_ = 0.0; // paralizado: no se mueve, no anima, mantiene la ultima direccion
+        return;
+    }
+
+    const float distance = static_cast<float>(kMoveSpeedByLevel[weaponLevel_ - 1] * dt);
     bool moved = false;
 
     // Sin diagonales (seccion 4.3): el tanque siempre rota hacia la ultima

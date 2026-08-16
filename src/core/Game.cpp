@@ -1,5 +1,7 @@
 #include "Game.h"
 
+#include <algorithm>
+
 #include <raylib.h>
 
 #include "Camera.h"
@@ -18,6 +20,12 @@ namespace {
 constexpr double kRespawnShieldDuration = 2.0;
 constexpr double kHelmetShieldDuration = 10.0;
 constexpr double kShieldBlinkInterval = 0.05; // segundos entre cada frame del escudo
+
+// Impacto del disparo especial: sacude toda la pantalla y paraliza a todos
+// los tanques (por ahora solo el jugador 1) durante el mismo tiempo.
+constexpr double kSpecialImpactFreezeDuration = 2.0;
+constexpr double kScreenShakeDuration = 2.0;
+constexpr float kScreenShakeMaxOffsetPx = 12.0f;
 
 Color ColorForTile(TileType type) {
     switch (type) {
@@ -39,9 +47,7 @@ void Game::Init() {
     InitWindow(windowWidth_, windowHeight_, "Battle City Clon - Fase 0");
     SetWindowState(FLAG_WINDOW_RESIZABLE);
     SetTargetFPS(60);
-
-    const LevelData level = LoadLevel(std::string(BC_ASSETS_DIR) + "levels/test_map.json");
-    map_.LoadFrom(level);
+    SetExitKey(KEY_NULL); // ESC ya no cierra la ventana: la usamos para reiniciar (ver ProcessInput)
 
     player1Sprites_.LoadPlayer1(BC_ASSETS_DIR);
     bulletSprites_.Load(BC_ASSETS_DIR);
@@ -53,17 +59,39 @@ void Game::Init() {
     brickUnitTextures_[1] = LoadTexture((std::string(BC_ASSETS_DIR) + "sprites/brick_unit_1.png").c_str());
     SetTextureFilter(brickUnitTextures_[0], TEXTURE_FILTER_POINT);
     SetTextureFilter(brickUnitTextures_[1], TEXTURE_FILTER_POINT);
+    steelUnitTexture_ = LoadTexture((std::string(BC_ASSETS_DIR) + "sprites/steel_unit.png").c_str());
+    SetTextureFilter(steelUnitTexture_, TEXTURE_FILTER_POINT);
     spawnFlashSprites_.Load(BC_ASSETS_DIR);
     shieldSprites_.Load(BC_ASSETS_DIR);
     bulletImpactSprites_.Load(BC_ASSETS_DIR);
+    specialExplosionSprites_.Load(BC_ASSETS_DIR);
 
-    // TODO: exponer como opcion en el menu de configuracion (seccion 12.5).
-    player1_.SetFireMode(FireMode::SinglePress);
+    ResetState();
+}
+
+// Vuelve a dejar la partida como recien arrancada: recarga el mapa (repone
+// los ladrillos rotos), y reinicia tanque, balas, explosiones y power-ups.
+// Pensado para probar rapido (ESC), sin tener que cerrar y volver a abrir.
+void Game::ResetState() {
+    const LevelData level = LoadLevel(std::string(BC_ASSETS_DIR) + "levels/test_map.json");
+    map_.LoadFrom(level);
 
     if (!level.player_spawns.empty()) {
         player1SpawnX_ = static_cast<float>(level.player_spawns[0][0]);
         player1SpawnY_ = static_cast<float>(level.player_spawns[0][1]);
     }
+
+    player1_ = Tank{};
+    // TODO: exponer como opcion en el menu de configuracion (seccion 12.5).
+    player1_.SetFireMode(FireMode::SinglePress);
+
+    bullets_ = BulletSystem{};
+    bulletImpacts_ = BulletImpactSystem{};
+    specialExplosions_ = SpecialExplosionSystem{};
+    specialExplosionEvents_.clear();
+    powerUps_ = PowerUpSystem{};
+    screenShakeTimer_ = 0.0;
+
     RespawnPlayer1();
 }
 
@@ -80,11 +108,17 @@ void Game::ProcessInput() {
     input1_.moveLeft = IsKeyDown(KEY_A);
     input1_.moveRight = IsKeyDown(KEY_D);
     input1_.shoot = IsKeyDown(KEY_LEFT_CONTROL);
+    input1_.specialShoot = IsKeyDown(KEY_SPACE);
 
     // Boton de prueba: repite el respawn en el punto de spawn inicial, para
     // poder ver el destello sin tener que reiniciar el juego.
     if (IsKeyPressed(KEY_R)) {
         RespawnPlayer1();
+    }
+
+    // Boton de prueba: reinicia toda la partida (mapa, tanque, balas, power-ups).
+    if (IsKeyPressed(KEY_ESCAPE)) {
+        ResetState();
     }
 
     // Botones de prueba: fuerzan la aparicion de cada power-up (F1 Estrella,
@@ -99,6 +133,12 @@ void Game::ProcessInput() {
 
 void Game::Update(double fixedDt) {
     player1_.TickShield(fixedDt);
+    player1_.TickShootCooldown(fixedDt);
+    player1_.TickHeatDecay(fixedDt);
+    player1_.TickFreeze(fixedDt);
+    if (screenShakeTimer_ > 0.0) {
+        screenShakeTimer_ = std::max(0.0, screenShakeTimer_ - fixedDt);
+    }
 
     if (player1Spawn_.IsActive()) {
         // Mientras dura el destello de aparicion, el tanque no se mueve ni
@@ -107,25 +147,64 @@ void Game::Update(double fixedDt) {
     } else {
         player1_.Update(fixedDt, input1_, map_);
 
-        if (player1_.ConsumeShootTrigger(input1_)) {
+        // Se consumen los dos triggers siempre (para no perder el flanco de
+        // subida del boton mientras hay cooldown), pero solo disparan de
+        // verdad si el tanque puede disparar. El especial tiene prioridad si
+        // ambos se piden en el mismo frame.
+        const bool normalTrigger = player1_.ConsumeShootTrigger(input1_);
+        const bool specialTrigger = player1_.ConsumeSpecialShotTrigger(input1_);
+
+        if (player1_.CanShoot() && !player1_.IsFrozen()) {
             float muzzleX = 0.0f, muzzleY = 0.0f;
             player1_.MuzzlePosition(muzzleX, muzzleY);
-            bullets_.TryShoot(kPlayer1Id, muzzleX, muzzleY, player1_.Facing(), player1_.BulletSpeed(), player1_.CanDestroySteel(), player1_.MaxBullets());
+            if (specialTrigger && player1_.HasSpecialShotReady()) {
+                bullets_.TryShootSpecial(kPlayer1Id, muzzleX, muzzleY, player1_.Facing());
+                player1_.ConsumeSpecialShot();
+                player1_.RegisterSpecialShotHeat();
+            } else if (normalTrigger) {
+                if (bullets_.TryShoot(kPlayer1Id, muzzleX, muzzleY, player1_.Facing(), player1_.BulletSpeed(), player1_.WeaponLevel(), player1_.MaxBullets())) {
+                    player1_.RegisterNormalShotHeat();
+                }
+            }
         }
 
         PowerUpType pickedType{};
         if (powerUps_.TryPickup(player1_.X(), player1_.Y(), pickedType)) {
             if (pickedType == PowerUpType::Star) {
-                player1_.UpgradeWeapon();
+                player1_.PickupStar();
             } else if (pickedType == PowerUpType::Helmet) {
                 player1_.ActivateShield(kHelmetShieldDuration);
             }
         }
     }
 
-    bullets_.Update(fixedDt, map_, bulletImpacts_);
+    bullets_.Update(fixedDt, map_, bulletImpacts_, specialExplosions_, specialExplosionEvents_);
     bulletImpacts_.Update(fixedDt);
+    specialExplosions_.Update(fixedDt);
     powerUps_.Update(fixedDt, map_);
+
+    if (!specialExplosionEvents_.empty()) {
+        // Efecto global, no depende de la distancia (a diferencia del dano):
+        // toda explosion especial sacude la pantalla y paraliza a TODOS los
+        // tanques (por ahora solo el jugador 1; al agregar enemigos/aliados,
+        // congelarlos aca tambien).
+        screenShakeTimer_ = kScreenShakeDuration;
+        player1_.Freeze(kSpecialImpactFreezeDuration);
+    }
+
+    // La explosion especial daña a quien alcance, incluido el propio tanque
+    // que la disparo (seccion pedida explicitamente: "amigo-enemigo" a
+    // proposito, es el riesgo de usar el disparo especial).
+    for (const SpecialExplosionEvent& event : specialExplosionEvents_) {
+        const float tankCenterX = player1_.X() + 0.5f;
+        const float tankCenterY = player1_.Y() + 0.5f;
+        const float dx = tankCenterX - event.x;
+        const float dy = tankCenterY - event.y;
+        const float hitRadius = event.radius + 0.5f; // + medio tanque de margen
+        if (dx * dx + dy * dy <= hitRadius * hitRadius) {
+            player1_.ApplyWeaponLevelPenalty(2);
+        }
+    }
 }
 
 void Game::Render(double /*interpolationAlpha*/) {
@@ -140,7 +219,21 @@ void Game::Render(double /*interpolationAlpha*/) {
     // el resto del fondo.
     ClearBackground(ColorForTile(TileType::Empty));
 
+    // Sacudida de pantalla (onda expansiva del disparo especial): desplaza
+    // todo el dibujado (mapa, tanque, UI incluida) con un offset aleatorio
+    // que decae a medida que pasa el tiempo.
+    Camera2D shakeCamera{};
+    shakeCamera.zoom = 1.0f;
+    if (screenShakeTimer_ > 0.0) {
+        const float magnitude = kScreenShakeMaxOffsetPx * static_cast<float>(screenShakeTimer_ / kScreenShakeDuration);
+        const float shakeX = (static_cast<float>(GetRandomValue(-100, 100)) / 100.0f) * magnitude;
+        const float shakeY = (static_cast<float>(GetRandomValue(-100, 100)) / 100.0f) * magnitude;
+        shakeCamera.target = Vector2{-shakeX, -shakeY};
+    }
+    BeginMode2D(shakeCamera);
+
     const float brickUnitDst = viewport.tileScreenSize / kBrickGridSize;
+    const float steelUnitDst = viewport.tileScreenSize / kSteelGridSize;
 
     for (int y = 0; y < map_.Height(); ++y) {
         for (int x = 0; x < map_.Width(); ++x) {
@@ -162,6 +255,20 @@ void Game::Render(double /*interpolationAlpha*/) {
                         const Rectangle unitSrc{0.0f, 0.0f, static_cast<float>(unitTex.width), static_cast<float>(unitTex.height)};
                         const Rectangle unitDst{screenX + col * brickUnitDst, screenY + row * brickUnitDst, brickUnitDst, brickUnitDst};
                         DrawTexturePro(unitTex, unitSrc, unitDst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+                    }
+                }
+            } else if (cell.type == TileType::Steel) {
+                // El bloque se arma con una grilla de 2x2 unidades minimas
+                // (ver SteelUnit.h), cada una con su propia resistencia.
+                const Rectangle steelSrc{0.0f, 0.0f, static_cast<float>(steelUnitTexture_.width), static_cast<float>(steelUnitTexture_.height)};
+                for (int row = 0; row < kSteelGridSize; ++row) {
+                    for (int col = 0; col < kSteelGridSize; ++col) {
+                        const SteelUnit& unit = cell.steelUnits[row * kSteelGridSize + col];
+                        if (!unit.alive) {
+                            continue;
+                        }
+                        const Rectangle unitDst{screenX + col * steelUnitDst, screenY + row * steelUnitDst, steelUnitDst, steelUnitDst};
+                        DrawTexturePro(steelUnitTexture_, steelSrc, unitDst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
                     }
                 }
             } else {
@@ -200,14 +307,21 @@ void Game::Render(double /*interpolationAlpha*/) {
         DrawTexturePro(bulletTex, bulletSrc, bulletDst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
     }
 
-    // Un poco mas grande que una celda: el estallido visualmente "sale" del
-    // tile donde impacto la bala.
-    const float impactSize = viewport.tileScreenSize * 1.4f;
+    const float impactSize = viewport.tileScreenSize * 0.9f;
     for (const BulletImpact& impact : bulletImpacts_.Impacts()) {
         const Texture2D impactTex = bulletImpactSprites_.Get(impact.frameIndex);
         const Rectangle impactSrc{0.0f, 0.0f, static_cast<float>(impactTex.width), static_cast<float>(impactTex.height)};
         const Rectangle impactDst{viewport.TileToScreenX(impact.x) - impactSize * 0.5f, viewport.TileToScreenY(impact.y) - impactSize * 0.5f, impactSize, impactSize};
         DrawTexturePro(impactTex, impactSrc, impactDst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+    }
+
+    // Diametro del radio de la explosion especial, en pantalla.
+    const float specialExplosionSize = viewport.tileScreenSize * kSpecialExplosionRadius * 2.0f;
+    for (const SpecialExplosion& explosion : specialExplosions_.Explosions()) {
+        const Texture2D explosionTex = specialExplosionSprites_.Get(explosion.frameIndex);
+        const Rectangle explosionSrc{0.0f, 0.0f, static_cast<float>(explosionTex.width), static_cast<float>(explosionTex.height)};
+        const Rectangle explosionDst{viewport.TileToScreenX(explosion.x) - specialExplosionSize * 0.5f, viewport.TileToScreenY(explosion.y) - specialExplosionSize * 0.5f, specialExplosionSize, specialExplosionSize};
+        DrawTexturePro(explosionTex, explosionSrc, explosionDst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
     }
 
     if (powerUps_.Active().alive && powerUps_.IsBlinkVisible()) {
@@ -222,10 +336,35 @@ void Game::Render(double /*interpolationAlpha*/) {
     if (player1_.IsShielded()) {
         DrawText(TextFormat("Escudo: %.1fs", player1_.ShieldSecondsRemaining()), 10, 55, 20, RAYWHITE);
     }
+    if (player1_.WeaponLevel() == 4) {
+        DrawText(TextFormat("Disparo especial: %d/1", player1_.HasSpecialShotReady() ? 1 : 0), 10, 80, 20, RAYWHITE);
+    }
+
+    {
+        constexpr int kHeatBarX = 10;
+        constexpr int kHeatBarY = 105;
+        constexpr int kHeatBarWidth = 200;
+        constexpr int kHeatBarHeight = 16;
+        const float heatPercent = player1_.HeatPercent();
+        DrawRectangle(kHeatBarX, kHeatBarY, kHeatBarWidth, kHeatBarHeight, DARKGRAY);
+        const int filledWidth = static_cast<int>(kHeatBarWidth * (heatPercent / 100.0f));
+        DrawRectangle(kHeatBarX, kHeatBarY, filledWidth, kHeatBarHeight, heatPercent >= 100.0f ? RED : ORANGE);
+        DrawRectangleLines(kHeatBarX, kHeatBarY, kHeatBarWidth, kHeatBarHeight, RAYWHITE);
+        DrawText(TextFormat("Calor: %.0f%%", heatPercent), kHeatBarX + kHeatBarWidth + 10, kHeatBarY - 2, 20, RAYWHITE);
+    }
+    if (!player1_.CanShoot()) {
+        DrawText(TextFormat("Sin poder disparar: %.1fs", player1_.ShootCooldownRemaining()), 10, 130, 20, RAYWHITE);
+    }
+    if (player1_.IsFrozen()) {
+        DrawText("PARALIZADO", 10, 155, 20, RED);
+    }
+
+    EndMode2D();
     EndDrawing();
 }
 
 void Game::Shutdown() {
+    specialExplosionSprites_.Unload();
     bulletImpactSprites_.Unload();
     shieldSprites_.Unload();
     spawnFlashSprites_.Unload();
@@ -233,6 +372,7 @@ void Game::Shutdown() {
     UnloadTexture(helmetTexture_);
     UnloadTexture(brickUnitTextures_[0]);
     UnloadTexture(brickUnitTextures_[1]);
+    UnloadTexture(steelUnitTexture_);
     bulletSprites_.Unload();
     player1Sprites_.Unload();
     CloseWindow();

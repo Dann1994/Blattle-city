@@ -23,6 +23,11 @@ void TileMap::LoadFrom(const LevelData& level) {
                         unit.frame = BrickUnit::FrameFor(r, c);
                     }
                 }
+            } else if (type == TileType::Steel) {
+                for (SteelUnit& unit : cell.steelUnits) {
+                    unit.alive = true;
+                    unit.hp = kSteelUnitMaxHp;
+                }
             }
         }
     }
@@ -39,7 +44,8 @@ bool TileMap::IsBoxBlocked(float left, float right, float top, float bottom) con
     const int minCellY = static_cast<int>(std::floor(top));
     const int maxCellY = static_cast<int>(std::ceil(bottom)) - 1;
 
-    constexpr float kUnitSize = 1.0f / kBrickGridSize;
+    constexpr float kBrickUnitSize = 1.0f / kBrickGridSize;
+    constexpr float kSteelUnitSize = 1.0f / kSteelGridSize;
 
     for (int cy = minCellY; cy <= maxCellY; ++cy) {
         for (int cx = minCellX; cx <= maxCellX; ++cx) {
@@ -55,9 +61,23 @@ bool TileMap::IsBoxBlocked(float left, float right, float top, float bottom) con
                         if (!unit.alive) {
                             continue;
                         }
-                        const float unitLeft = cx + c * kUnitSize;
-                        const float unitTop = cy + r * kUnitSize;
-                        if (left < unitLeft + kUnitSize && right > unitLeft && top < unitTop + kUnitSize && bottom > unitTop) {
+                        const float unitLeft = cx + c * kBrickUnitSize;
+                        const float unitTop = cy + r * kBrickUnitSize;
+                        if (left < unitLeft + kBrickUnitSize && right > unitLeft && top < unitTop + kBrickUnitSize && bottom > unitTop) {
+                            return true;
+                        }
+                    }
+                }
+            } else if (cell.type == TileType::Steel) {
+                for (int r = 0; r < kSteelGridSize; ++r) {
+                    for (int c = 0; c < kSteelGridSize; ++c) {
+                        const SteelUnit& unit = cell.steelUnits[r * kSteelGridSize + c];
+                        if (!unit.alive) {
+                            continue;
+                        }
+                        const float unitLeft = cx + c * kSteelUnitSize;
+                        const float unitTop = cy + r * kSteelUnitSize;
+                        if (left < unitLeft + kSteelUnitSize && right > unitLeft && top < unitTop + kSteelUnitSize && bottom > unitTop) {
                             return true;
                         }
                     }

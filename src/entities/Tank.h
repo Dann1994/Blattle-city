@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+
 #include "TileMap.h"
 
 namespace bc {
@@ -22,6 +24,7 @@ struct PlayerInput {
     bool moveLeft = false;
     bool moveRight = false;
     bool shoot = false;
+    bool specialShoot = false; // disparo especial (nivel 4 + carga de estrella extra)
 };
 
 // SinglePress: un disparo por cada pulsacion del boton (por defecto, como el original).
@@ -51,12 +54,36 @@ public:
 
     // Niveles de mejora del power-up Estrella (seccion 4.3): 1 (base) a 4 (maximo).
     int WeaponLevel() const { return weaponLevel_; }
-    void UpgradeWeapon();
-    void ResetWeaponLevel() { weaponLevel_ = 1; }
+    void ResetWeaponLevel() { weaponLevel_ = 1; specialShotCharges_ = 0; }
+
+    // Llamar al agarrar el item Estrella: sube de nivel si no esta al maximo;
+    // si ya esta en nivel 4, en cambio carga el disparo especial (maximo 1).
+    void PickupStar();
 
     float BulletSpeed() const;
-    int MaxBullets() const;       // 1 salvo nivel 3+ (doble disparo)
-    bool CanDestroySteel() const; // desde nivel 3
+    int MaxBullets() const; // 1 salvo nivel 3+ (doble disparo)
+
+    // Disparo especial: solo en nivel 4 y con una carga disponible (se gana
+    // al agarrar una estrella estando ya en nivel 4). Su explosion es capaz
+    // de dañar al propio tanque, quitandole niveles de arma.
+    bool HasSpecialShotReady() const;
+    void ConsumeSpecialShot() { specialShotCharges_ = 0; }
+    bool ConsumeSpecialShotTrigger(const PlayerInput& input);
+    void ApplyWeaponLevelPenalty(int levels);
+
+    // Contador de calor (0-100%, seccion custom): cada disparo normal suma
+    // 5% (niveles 1-3) o 10% (nivel 4); se enfria solo, 5% cada medio
+    // segundo. Si llega a 100% (o se dispara el especial, que lo llena de
+    // una), el tanque queda sin poder disparar 5 segundos con el contador
+    // fijo en 100%; pasados esos 5 segundos, vuelve a 0%.
+    float HeatPercent() const { return heatPercent_; }
+    void RegisterNormalShotHeat();
+    void RegisterSpecialShotHeat();
+    void TickHeatDecay(double dt);
+
+    bool CanShoot() const { return shootCooldownTimer_ <= 0.0; }
+    double ShootCooldownRemaining() const { return shootCooldownTimer_; }
+    void TickShootCooldown(double dt);
 
     // Escudo (power-up Casco / proteccion al aparecer, seccion 6). La duracion
     // la decide quien llama (distinta si es respawn o si se agarro el item).
@@ -64,6 +91,12 @@ public:
     void TickShield(double dt);
     bool IsShielded() const { return shieldTimer_ > 0.0; }
     double ShieldSecondsRemaining() const { return shieldTimer_; }
+
+    // Paralisis (onda expansiva del disparo especial): bloquea movimiento y
+    // disparo mientras dura. Freeze() extiende, nunca acorta, una paralisis en curso.
+    void Freeze(double durationSeconds) { freezeTimer_ = std::max(freezeTimer_, durationSeconds); }
+    void TickFreeze(double dt);
+    bool IsFrozen() const { return freezeTimer_ > 0.0; }
 
 private:
     bool TryMove(float dx, float dy, const TileMap& map);
@@ -74,13 +107,18 @@ private:
     float x_ = 0.0f;
     float y_ = 0.0f;
     Direction facing_ = Direction::Up;
-    float speed_ = 3.5f; // celdas por segundo
     double animTimer_ = 0.0;
     int animFrame_ = 0;
     FireMode fireMode_ = FireMode::SinglePress;
     bool shootHeldLastFrame_ = false;
+    bool specialShootHeldLastFrame_ = false;
     int weaponLevel_ = 1;
+    int specialShotCharges_ = 0; // 0 o 1
+    double shootCooldownTimer_ = 0.0;
+    float heatPercent_ = 0.0f;
+    double heatDecayAccumulator_ = 0.0;
     double shieldTimer_ = 0.0;
+    double freezeTimer_ = 0.0;
 };
 
 } // namespace bc

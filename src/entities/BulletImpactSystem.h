@@ -11,7 +11,7 @@ namespace bc {
 // uno solo por tanque.
 class BulletImpactSystem {
 public:
-    void Spawn(float x, float y);
+    void Spawn(float x, float y, bool bigExplosion = false);
     void Update(double dt);
 
     const std::vector<BulletImpact>& Impacts() const { return impacts_; }
