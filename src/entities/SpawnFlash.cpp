@@ -3,7 +3,7 @@
 namespace bc {
 
 namespace {
-constexpr double kFrameDuration = 0.125; // segundos por frame
+constexpr double kFrameDuration = 0.08; // segundos por frame
 constexpr int kFrameCount = 4;
 constexpr int kLoops = 2; // vueltas completas del rebote 1-4-1
 } // namespace
