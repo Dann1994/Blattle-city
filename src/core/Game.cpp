@@ -39,12 +39,16 @@ void Game::Init() {
     bulletSprites_.Load(BC_ASSETS_DIR);
     starTexture_ = LoadTexture((std::string(BC_ASSETS_DIR) + "sprites/powerup_star.png").c_str());
     SetTextureFilter(starTexture_, TEXTURE_FILTER_POINT);
+    spawnFlashSprites_.Load(BC_ASSETS_DIR);
 
     // TODO: exponer como opcion en el menu de configuracion (seccion 12.5).
     player1_.SetFireMode(FireMode::SinglePress);
 
     if (!level.player_spawns.empty()) {
-        player1_.SetPosition(static_cast<float>(level.player_spawns[0][0]), static_cast<float>(level.player_spawns[0][1]));
+        const float spawnX = static_cast<float>(level.player_spawns[0][0]);
+        const float spawnY = static_cast<float>(level.player_spawns[0][1]);
+        player1_.SetPosition(spawnX, spawnY);
+        player1Spawn_.Start(spawnX, spawnY);
     }
 }
 
@@ -58,20 +62,26 @@ void Game::ProcessInput() {
 }
 
 void Game::Update(double fixedDt) {
-    player1_.Update(fixedDt, input1_, map_);
+    if (player1Spawn_.IsActive()) {
+        // Mientras dura el destello de aparicion, el tanque no se mueve ni
+        // dispara ni puede ser tocado por power-ups (seccion 5 y 13).
+        player1Spawn_.Update(fixedDt);
+    } else {
+        player1_.Update(fixedDt, input1_, map_);
 
-    if (player1_.ConsumeShootTrigger(input1_)) {
-        float muzzleX = 0.0f, muzzleY = 0.0f;
-        player1_.MuzzlePosition(muzzleX, muzzleY);
-        bullets_.TryShoot(kPlayer1Id, muzzleX, muzzleY, player1_.Facing(), player1_.BulletSpeed(), player1_.CanDestroySteel(), player1_.MaxBullets());
+        if (player1_.ConsumeShootTrigger(input1_)) {
+            float muzzleX = 0.0f, muzzleY = 0.0f;
+            player1_.MuzzlePosition(muzzleX, muzzleY);
+            bullets_.TryShoot(kPlayer1Id, muzzleX, muzzleY, player1_.Facing(), player1_.BulletSpeed(), player1_.CanDestroySteel(), player1_.MaxBullets());
+        }
+
+        if (powerUps_.TryPickup(player1_.X(), player1_.Y())) {
+            player1_.UpgradeWeapon();
+        }
     }
 
     bullets_.Update(fixedDt, map_);
-
     powerUps_.Update(fixedDt, map_);
-    if (powerUps_.TryPickup(player1_.X(), player1_.Y())) {
-        player1_.UpgradeWeapon();
-    }
 }
 
 void Game::Render(double /*interpolationAlpha*/) {
@@ -104,10 +114,17 @@ void Game::Render(double /*interpolationAlpha*/) {
         }
     }
 
-    const Texture2D tankTex = player1Sprites_.Get(player1_.WeaponLevel(), player1_.Facing(), player1_.AnimFrame());
-    const Rectangle src{0.0f, 0.0f, static_cast<float>(tankTex.width), static_cast<float>(tankTex.height)};
-    const Rectangle dst{viewport.TileToScreenX(player1_.X()), viewport.TileToScreenY(player1_.Y()), viewport.tileScreenSize, viewport.tileScreenSize};
-    DrawTexturePro(tankTex, src, dst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+    if (player1Spawn_.IsActive()) {
+        const Texture2D flashTex = spawnFlashSprites_.Get(player1Spawn_.FrameIndex());
+        const Rectangle flashSrc{0.0f, 0.0f, static_cast<float>(flashTex.width), static_cast<float>(flashTex.height)};
+        const Rectangle flashDst{viewport.TileToScreenX(player1Spawn_.X()), viewport.TileToScreenY(player1Spawn_.Y()), viewport.tileScreenSize, viewport.tileScreenSize};
+        DrawTexturePro(flashTex, flashSrc, flashDst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+    } else {
+        const Texture2D tankTex = player1Sprites_.Get(player1_.WeaponLevel(), player1_.Facing(), player1_.AnimFrame());
+        const Rectangle src{0.0f, 0.0f, static_cast<float>(tankTex.width), static_cast<float>(tankTex.height)};
+        const Rectangle dst{viewport.TileToScreenX(player1_.X()), viewport.TileToScreenY(player1_.Y()), viewport.tileScreenSize, viewport.tileScreenSize};
+        DrawTexturePro(tankTex, src, dst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+    }
 
     const float pixelScale = viewport.tileScreenSize / static_cast<float>(kTileSize);
     for (const Bullet& bullet : bullets_.Bullets()) {
@@ -131,6 +148,7 @@ void Game::Render(double /*interpolationAlpha*/) {
 }
 
 void Game::Shutdown() {
+    spawnFlashSprites_.Unload();
     UnloadTexture(starTexture_);
     bulletSprites_.Unload();
     player1Sprites_.Unload();
@@ -140,9 +158,21 @@ void Game::Shutdown() {
 void Game::Run() {
     Init();
 
+    // Limite al salto de tiempo de un frame a otro. Sin esto, el primer frame
+    // despues de Init() (que puede tardar varios cientos de ms en cargar
+    // texturas) se reporta como un unico salto enorme, y el bucle de paso
+    // fijo "recupera" todo ese tiempo de una sola vez antes de dibujar nada:
+    // animaciones cortas como el destello de aparicion terminarian antes de
+    // que se vea un solo frame en pantalla.
+    constexpr double kMaxFrameTime = 0.25;
+
     double accumulator = 0.0;
     while (!WindowShouldClose()) {
-        accumulator += GetFrameTime();
+        double frameTime = GetFrameTime();
+        if (frameTime > kMaxFrameTime) {
+            frameTime = kMaxFrameTime;
+        }
+        accumulator += frameTime;
 
         while (accumulator >= kFixedTimestep) {
             ProcessInput();

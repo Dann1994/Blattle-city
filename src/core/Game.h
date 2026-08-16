@@ -5,6 +5,8 @@
 #include "BulletSprites.h"
 #include "BulletSystem.h"
 #include "PowerUpSystem.h"
+#include "SpawnFlash.h"
+#include "SpawnFlashSprites.h"
 #include "Tank.h"
 #include "TankSprites.h"
 #include "TileMap.h"
@@ -32,6 +34,8 @@ private:
     BulletSpriteSet bulletSprites_;
     PowerUpSystem powerUps_;
     Texture2D starTexture_{};
+    SpawnFlash player1Spawn_;
+    SpawnFlashSprites spawnFlashSprites_;
     int windowWidth_ = 0;
     int windowHeight_ = 0;
 };
