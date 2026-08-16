@@ -9,6 +9,7 @@ namespace bc {
 namespace {
 constexpr double kSpawnInterval = 12.0; // segundos entre apariciones
 constexpr double kLifetime = 10.0;      // segundos que permanece antes de desaparecer sin recoger
+constexpr double kBlinkInterval = 0.15; // segundos entre cada toggle de visibilidad
 
 std::mt19937& Rng() {
     static std::mt19937 engine(std::random_device{}());
@@ -36,11 +37,20 @@ void PowerUpSystem::SpawnRandom(const TileMap& map) {
     powerUp_.y = static_cast<float>(cy);
     powerUp_.alive = true;
     lifeTimer_ = kLifetime;
+    blinkTimer_ = 0.0;
+    blinkVisible_ = true;
 }
 
 void PowerUpSystem::Update(double dt, const TileMap& map) {
     if (powerUp_.alive) {
         lifeTimer_ -= dt;
+
+        blinkTimer_ += dt;
+        if (blinkTimer_ >= kBlinkInterval) {
+            blinkTimer_ -= kBlinkInterval;
+            blinkVisible_ = !blinkVisible_;
+        }
+
         if (lifeTimer_ <= 0.0) {
             powerUp_.alive = false;
             spawnTimer_ = kSpawnInterval;

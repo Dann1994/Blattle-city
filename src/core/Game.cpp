@@ -119,7 +119,7 @@ void Game::Render(double /*interpolationAlpha*/) {
         DrawTexturePro(bulletTex, bulletSrc, bulletDst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
     }
 
-    if (powerUps_.Active().alive) {
+    if (powerUps_.Active().alive && powerUps_.IsBlinkVisible()) {
         const Rectangle starSrc{0.0f, 0.0f, static_cast<float>(starTexture_.width), static_cast<float>(starTexture_.height)};
         const Rectangle starDst{viewport.TileToScreenX(powerUps_.Active().x), viewport.TileToScreenY(powerUps_.Active().y), viewport.tileScreenSize, viewport.tileScreenSize};
         DrawTexturePro(starTexture_, starSrc, starDst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
