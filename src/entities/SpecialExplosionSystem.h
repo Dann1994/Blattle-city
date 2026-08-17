@@ -10,7 +10,7 @@ namespace bc {
 // especial: distinta duracion/cantidad de frames y sprites propios.
 class SpecialExplosionSystem {
 public:
-    void Spawn(float x, float y);
+    void Spawn(float x, float y, bool nativeScale = false);
     void Update(double dt);
 
     const std::vector<SpecialExplosion>& Explosions() const { return explosions_; }

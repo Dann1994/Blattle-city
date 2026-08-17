@@ -35,15 +35,30 @@ enum class FireMode { SinglePress, HoldToFire };
 class Tank {
 public:
     void SetPosition(float cellX, float cellY) { x_ = cellX; y_ = cellY; }
-    void Update(double dt, const PlayerInput& input, const TileMap& map);
+    void SetFacing(Direction facing) { facing_ = facing; }
+
+    // other es el otro tanque contra el que colisionar (puede ser nullptr):
+    // no se pueden atravesar entre si, sin excepcion (sin empuje).
+    void Update(double dt, const PlayerInput& input, const TileMap& map, Tank* other);
 
     float X() const { return x_; }
     float Y() const { return y_; }
     Direction Facing() const { return facing_; }
     int AnimFrame() const { return animFrame_; }
 
+    // Caja de colision actual (en celdas), para que otro tanque chequee solapamiento.
+    void GetBounds(float& outLeft, float& outRight, float& outTop, float& outBottom) const;
+
     // Punto desde donde salen las balas: el borde del tanque en la direccion que mira.
     void MuzzlePosition(float& outX, float& outY) const;
+
+    // Retroceso progresivo (p.ej. al disparar el especial): arranca un
+    // desplazamiento de distanceCells celdas hacia atras (opuesto a donde
+    // miraba en el momento de disparar), que se anima solo a lo largo de
+    // varios frames via TickRecoil (no es un salto instantaneo). Si algo lo
+    // bloquea a mitad de camino (mapa u otro tanque), se corta ahi.
+    void StartRecoil(float distanceCells);
+    void TickRecoil(double dt, const TileMap& map, Tank* other);
 
     void SetFireMode(FireMode mode) { fireMode_ = mode; }
     FireMode GetFireMode() const { return fireMode_; }
@@ -54,7 +69,7 @@ public:
 
     // Niveles de mejora del power-up Estrella (seccion 4.3): 1 (base) a 4 (maximo).
     int WeaponLevel() const { return weaponLevel_; }
-    void ResetWeaponLevel() { weaponLevel_ = 1; specialShotCharges_ = 0; }
+    void ResetWeaponLevel() { weaponLevel_ = 1; specialShotCharges_ = 0; chipHitCount_ = 0; }
 
     // Llamar al agarrar el item Estrella: sube de nivel si no esta al maximo;
     // si ya esta en nivel 4, en cambio carga el disparo especial (maximo 1).
@@ -70,6 +85,12 @@ public:
     void ConsumeSpecialShot() { specialShotCharges_ = 0; }
     bool ConsumeSpecialShotTrigger(const PlayerInput& input);
     void ApplyWeaponLevelPenalty(int levels);
+
+    // Fuego amigo nivel 2 contra un disparo de nivel 2 (seccion custom):
+    // cada golpe de este tipo es "medio nivel"; hacen falta 2 para bajar 1
+    // nivel de verdad. Devuelve true si este golpe fue el que hizo bajar el
+    // nivel (el contador se reinicia despues).
+    bool RegisterChipHit();
 
     // Contador de calor (0-100%, seccion custom): cada disparo normal suma
     // 5% (niveles 1-3) o 10% (nivel 4); se enfria solo, 5% cada medio
@@ -99,10 +120,11 @@ public:
     bool IsFrozen() const { return freezeTimer_ > 0.0; }
 
 private:
-    bool TryMove(float dx, float dy, const TileMap& map);
-    bool TryMoveWithAssist(float dx, float dy, const TileMap& map);
-    bool TrySlidePerpendicularY(float dx, const TileMap& map);
-    bool TrySlidePerpendicularX(float dy, const TileMap& map);
+    bool IsPositionBlocked(float newX, float newY, const TileMap& map, const Tank* other) const;
+    bool TryMove(float dx, float dy, const TileMap& map, Tank* other);
+    bool TryMoveWithAssist(float dx, float dy, const TileMap& map, Tank* other);
+    bool TrySlidePerpendicularY(float dx, const TileMap& map, Tank* other);
+    bool TrySlidePerpendicularX(float dy, const TileMap& map, Tank* other);
 
     float x_ = 0.0f;
     float y_ = 0.0f;
@@ -113,12 +135,16 @@ private:
     bool shootHeldLastFrame_ = false;
     bool specialShootHeldLastFrame_ = false;
     int weaponLevel_ = 1;
+    int chipHitCount_ = 0; // ver RegisterChipHit
     int specialShotCharges_ = 0; // 0 o 1
     double shootCooldownTimer_ = 0.0;
     float heatPercent_ = 0.0f;
     double heatDecayAccumulator_ = 0.0;
     double shieldTimer_ = 0.0;
     double freezeTimer_ = 0.0;
+    float recoilRemaining_ = 0.0f; // celdas que le quedan por retroceder (ver StartRecoil/TickRecoil)
+    float recoilDx_ = 0.0f;
+    float recoilDy_ = 0.0f;
 };
 
 } // namespace bc

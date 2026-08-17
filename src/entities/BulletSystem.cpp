@@ -74,9 +74,87 @@ bool DestroyUnitSpan(Cell& cell, int fixedIndex, bool fixedIsRow, int firstIndex
     return destroyedAny;
 }
 
+// Le pega a la mitad de esa capa mas cercana a la costura compartida con la
+// celda que realmente recibio el impacto, en la celda vecina (neighborX,
+// neighborY) — igual que un golpe de esquina normal, pero del lado de afuera.
+// Para hierro (grilla 2x2) esa "mitad" ya es 1 sola unidad; para ladrillo
+// (grilla 4x4) son 2, asi que entre el golpe de esquina del lado propio (2
+// unidades) y este graze del vecino (2 unidades) se completa una capa de 4
+// unidades repartida entre ambos bloques. "along" es la posicion (0..1) a lo
+// largo del eje compartido con esa vecina (fracY si la vecina esta a
+// izq/der, fracX si esta arriba/abajo); neighborRowIsAlong indica si esa
+// posicion cae en la fila o la columna de la vecina; nearIsMaxIndex indica
+// si su borde pegado a la costura es el ultimo indice de su grilla
+// (derecha/abajo) o el primero (izquierda/arriba).
+void GrazeNeighborCorner(TileMap& map, int neighborX, int neighborY, float along, bool neighborRowIsAlong, bool nearIsMaxIndex, int steelDamage) {
+    if (!map.InBounds(neighborX, neighborY)) {
+        return;
+    }
+    Cell& cell = map.At(neighborX, neighborY);
+    if (cell.type == TileType::Brick) {
+        const int alongIndex = std::clamp(static_cast<int>(along * kBrickGridSize), 0, kBrickGridSize - 1);
+        constexpr int kHalf = kBrickGridSize / 2;
+        const int firstNear = nearIsMaxIndex ? kHalf : 0;
+        bool destroyedAny = false;
+        for (int i = firstNear; i < firstNear + kHalf; ++i) {
+            const int row = neighborRowIsAlong ? alongIndex : i;
+            const int col = neighborRowIsAlong ? i : alongIndex;
+            BrickUnit& unit = cell.brickUnits[row * kBrickGridSize + col];
+            if (unit.alive) {
+                unit.alive = false;
+                destroyedAny = true;
+            }
+        }
+        if (destroyedAny && cell.BrickFullyDestroyed()) {
+            cell.type = TileType::Empty;
+        }
+    } else if (cell.type == TileType::Steel) {
+        const int alongIndex = std::clamp(static_cast<int>(along * kSteelGridSize), 0, kSteelGridSize - 1);
+        const int nearIndex = nearIsMaxIndex ? (kSteelGridSize - 1) : 0;
+        SteelUnit& unit = cell.steelUnits[(neighborRowIsAlong ? alongIndex : nearIndex) * kSteelGridSize + (neighborRowIsAlong ? nearIndex : alongIndex)];
+        if (unit.alive) {
+            unit.hp -= steelDamage;
+            if (unit.hp <= 0) {
+                unit.alive = false;
+            }
+            if (cell.SteelFullyDestroyed()) {
+                cell.type = TileType::Empty;
+            }
+        }
+    }
+}
+
+// Bloques pegados uno al lado del otro: si el impacto cae en la franja
+// angosta pegada al borde compartido con la celda vecina (no toda la mitad
+// "esquina", solo bien cerca de la costura) y esa vecina tambien es
+// destructible, tambien le pega a su unidad mas cercana a la costura.
+void CheckSeamGraze(TileMap& map, int cellX, int cellY, bool horizontalHit, float fracX, float fracY, int weaponLevel) {
+    constexpr float kSeamBand = 0.15f;
+    const int steelDamage = kSteelDamageByLevel[weaponLevel - 1];
+    if (horizontalHit) {
+        // La bala penetro por la cara izq/der: la costura relevante es
+        // arriba/abajo, decidida por fracY. La vecina comparte columna, y
+        // "along" (que fila de la vecina) es fracX.
+        if (fracY < kSeamBand) {
+            GrazeNeighborCorner(map, cellX, cellY - 1, fracX, /*neighborRowIsAlong=*/false, /*nearIsMaxIndex=*/true, steelDamage);
+        } else if (fracY > 1.0f - kSeamBand) {
+            GrazeNeighborCorner(map, cellX, cellY + 1, fracX, /*neighborRowIsAlong=*/false, /*nearIsMaxIndex=*/false, steelDamage);
+        }
+    } else {
+        // La bala penetro por la cara de arriba/abajo: la costura relevante
+        // es izq/der, decidida por fracX. La vecina comparte fila, y
+        // "along" (que columna de la vecina) es fracY.
+        if (fracX < kSeamBand) {
+            GrazeNeighborCorner(map, cellX - 1, cellY, fracY, /*neighborRowIsAlong=*/true, /*nearIsMaxIndex=*/true, steelDamage);
+        } else if (fracX > 1.0f - kSeamBand) {
+            GrazeNeighborCorner(map, cellX + 1, cellY, fracY, /*neighborRowIsAlong=*/true, /*nearIsMaxIndex=*/false, steelDamage);
+        }
+    }
+}
+
 } // namespace
 
-bool BulletSystem::HandleBrickHit(TileMap& map, int cellX, int cellY, float hitX, float hitY, Direction hitFrom, bool doubleLayer) {
+bool BulletSystem::HandleBrickHit(TileMap& map, int cellX, int cellY, float oldX, float oldY, float hitX, float hitY, Direction hitFrom, bool doubleLayer, int weaponLevel) {
     Cell& cell = map.At(cellX, cellY);
 
     const float fracX = hitX - static_cast<float>(cellX);
@@ -91,36 +169,58 @@ bool BulletSystem::HandleBrickHit(TileMap& map, int cellX, int cellY, float hitX
     // Destruye la capa "layerIndex" (columna si horizontalHit, fila si no).
     // La fila/columna fija decide cuanto de esa capa: centro = capa entera
     // (4 unidades); esquina = mitad de esa capa, del lado donde pego.
+    // Devuelve si esa capa en particular tenia algo vivo.
     auto destroyLayer = [&](int layerIndex) {
         if (layerIndex < 0 || layerIndex >= kBrickGridSize) {
-            return;
+            return false;
         }
+        bool did = false;
         if (horizontalHit) {
             if (row == 1 || row == 2) {
-                destroyedAny |= DestroyUnitSpan(cell, layerIndex, /*fixedIsRow=*/false, 0, kBrickGridSize);
+                did = DestroyUnitSpan(cell, layerIndex, /*fixedIsRow=*/false, 0, kBrickGridSize);
             } else {
                 const int firstRow = (row == 0) ? 0 : kHalf;
-                destroyedAny |= DestroyUnitSpan(cell, layerIndex, /*fixedIsRow=*/false, firstRow, kHalf);
+                did = DestroyUnitSpan(cell, layerIndex, /*fixedIsRow=*/false, firstRow, kHalf);
             }
         } else {
             if (col == 1 || col == 2) {
-                destroyedAny |= DestroyUnitSpan(cell, layerIndex, /*fixedIsRow=*/true, 0, kBrickGridSize);
+                did = DestroyUnitSpan(cell, layerIndex, /*fixedIsRow=*/true, 0, kBrickGridSize);
             } else {
                 const int firstCol = (col == 0) ? 0 : kHalf;
-                destroyedAny |= DestroyUnitSpan(cell, layerIndex, /*fixedIsRow=*/true, firstCol, kHalf);
+                did = DestroyUnitSpan(cell, layerIndex, /*fixedIsRow=*/true, firstCol, kHalf);
             }
         }
+        if (did) {
+            destroyedAny = true;
+        }
+        return did;
     };
 
-    // La capa de entrada es la columna/fila en la que esta la bala en este
-    // instante (col/row ya reflejan cuanto penetro: si la capa de entrada
-    // esta vacia, la bala avanza y la siguiente llamada cae en la capa de al
-    // lado, nunca se queda pegada a la ya destruida).
-    const int entryLayer = horizontalHit ? col : row;
-    destroyLayer(entryLayer);
+    // Capas que la bala atraveso este frame, desde donde estaba hasta donde
+    // penetro (no solo la de llegada): con velocidades altas (nivel 2, cuyo
+    // paso por frame es mas ancho que una capa de 0.25) un solo frame puede
+    // saltearse una capa entera de otro modo, y si esa capa ya no vuelve a
+    // chequearse queda indestructible para siempre. Se para en la primera
+    // capa viva que encuentra en ese rango; si estaban todas vacias, la bala
+    // sigue de largo.
+    const float travelOld = std::clamp(horizontalHit ? (oldX - static_cast<float>(cellX)) : (oldY - static_cast<float>(cellY)), 0.0f, 0.999f);
+    const int layerFrom = std::clamp(static_cast<int>(travelOld * kBrickGridSize), 0, kBrickGridSize - 1);
+    const int layerTo = horizontalHit ? col : row;
+    const int travelStep = (layerTo >= layerFrom) ? 1 : -1;
 
-    if (!destroyedAny) {
-        return false; // ahi ya estaba todo destruido: no frena la bala
+    int stoppedAtLayer = -1;
+    for (int layer = layerFrom; ; layer += travelStep) {
+        if (destroyLayer(layer)) {
+            stoppedAtLayer = layer;
+            break;
+        }
+        if (layer == layerTo) {
+            break;
+        }
+    }
+
+    if (stoppedAtLayer < 0) {
+        return false; // todo el tramo ya estaba vacio: no frena la bala
     }
 
     if (doubleLayer) {
@@ -132,12 +232,14 @@ bool BulletSystem::HandleBrickHit(TileMap& map, int cellX, int cellY, float hitX
             case Direction::Down:  step = 1; break;
             case Direction::Up:    step = -1; break;
         }
-        destroyLayer(entryLayer + step);
+        destroyLayer(stoppedAtLayer + step);
     }
 
     if (cell.BrickFullyDestroyed()) {
         cell.type = TileType::Empty;
     }
+
+    CheckSeamGraze(map, cellX, cellY, horizontalHit, fracX, fracY, weaponLevel);
     return true;
 }
 
@@ -190,10 +292,12 @@ bool BulletSystem::HandleSteelHit(TileMap& map, int cellX, int cellY, float hitX
     if (cell.SteelFullyDestroyed()) {
         cell.type = TileType::Empty;
     }
+
+    CheckSeamGraze(map, cellX, cellY, horizontalHit, fracX, fracY, weaponLevel);
     return true;
 }
 
-void BulletSystem::TriggerSpecialExplosion(TileMap& map, float x, float y, int ownerId, SpecialExplosionSystem& specialExplosions, std::vector<SpecialExplosionEvent>& explosionEvents) {
+void BulletSystem::TriggerSpecialExplosion(TileMap& map, float x, float y, int ownerId, SpecialExplosionSystem& specialExplosions, std::vector<SpecialExplosionEvent>& explosionEvents, int directHitOwnerId) {
     const int minX = std::max(0, static_cast<int>(std::floor(x - kSpecialExplosionRadius)));
     const int maxX = std::min(map.Width() - 1, static_cast<int>(std::floor(x + kSpecialExplosionRadius)));
     const int minY = std::max(0, static_cast<int>(std::floor(y - kSpecialExplosionRadius)));
@@ -220,11 +324,12 @@ void BulletSystem::TriggerSpecialExplosion(TileMap& map, float x, float y, int o
     }
 
     specialExplosions.Spawn(x, y);
-    explosionEvents.push_back(SpecialExplosionEvent{x, y, kSpecialExplosionRadius, ownerId});
+    explosionEvents.push_back(SpecialExplosionEvent{x, y, kSpecialExplosionRadius, ownerId, directHitOwnerId});
 }
 
-void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, SpecialExplosionSystem& specialExplosions, std::vector<SpecialExplosionEvent>& explosionEvents) {
+void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, SpecialExplosionSystem& specialExplosions, std::vector<SpecialExplosionEvent>& explosionEvents, const std::vector<TankCombatState>& tanks, std::vector<SpecialDirectKillEvent>& directKillEvents) {
     explosionEvents.clear();
+    directKillEvents.clear();
 
     for (Bullet& bullet : bullets_) {
         if (!bullet.alive) {
@@ -239,6 +344,30 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
         const float newY = bullet.y + dy * distance;
         const int cellX = static_cast<int>(std::floor(newX));
         const int cellY = static_cast<int>(std::floor(newY));
+
+        // Si la bala recien entra a esta celda (la posicion de ANTES de
+        // este paso todavia no habia cruzado el borde de entrada), la capa
+        // que "toca" es siempre la de entrada, nunca el punto al que
+        // sobrepaso el movimiento de este frame. Con velocidades altas
+        // (p.ej. nivel 2) un solo paso puede ser mas ancho que una capa
+        // entera, y disparando pegado al bloque la bala ya arranca en el
+        // borde mismo (mismo indice de celda desde el primer frame), asi
+        // que comparar indices de celda no alcanza: hay que comparar contra
+        // el borde real. hitX/hitY son solo para decidir la capa/unidad de
+        // ladrillo o hierro; newX/newY (la posicion real) se siguen usando
+        // para todo lo demas.
+        float hitX = newX;
+        float hitY = newY;
+        if (dx > 0.0f && bullet.x <= static_cast<float>(cellX)) {
+            hitX = static_cast<float>(cellX);
+        } else if (dx < 0.0f && bullet.x >= static_cast<float>(cellX) + 1.0f) {
+            hitX = static_cast<float>(cellX) + 0.999f;
+        }
+        if (dy > 0.0f && bullet.y <= static_cast<float>(cellY)) {
+            hitY = static_cast<float>(cellY);
+        } else if (dy < 0.0f && bullet.y >= static_cast<float>(cellY) + 1.0f) {
+            hitY = static_cast<float>(cellY) + 0.999f;
+        }
 
         if (!map.InBounds(cellX, cellY)) {
             // Borde del escenario: no hay tile ahi, pero igual es un impacto.
@@ -256,10 +385,32 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
         const TileType hitType = map.At(cellX, cellY).type;
 
         if (bullet.isSpecial) {
+            // Choque directo contra un tanque (que no sea el propio dueño):
+            // nivel 1-3 sin escudo se destruye directo y la bala sigue de
+            // largo (no explota); con escudo o nivel 4, la bala explota.
+            const TankCombatState* hitTank = nullptr;
+            for (const TankCombatState& t : tanks) {
+                if (t.ownerId == bullet.ownerId) {
+                    continue;
+                }
+                if (newX >= t.left && newX <= t.right && newY >= t.top && newY <= t.bottom) {
+                    hitTank = &t;
+                    break;
+                }
+            }
+
+            if (hitTank != nullptr && !hitTank->shielded && hitTank->weaponLevel != 4) {
+                directKillEvents.push_back(SpecialDirectKillEvent{hitTank->ownerId});
+                bullet.x = newX;
+                bullet.y = newY;
+                continue;
+            }
+
             // El especial no distingue capas ni tipo de bloqueo: cualquier
             // cosa solida lo hace explotar y la explosion se lleva todo.
-            if (TileBlocksShots(hitType)) {
-                TriggerSpecialExplosion(map, newX, newY, bullet.ownerId, specialExplosions, explosionEvents);
+            if (hitTank != nullptr || TileBlocksShots(hitType)) {
+                const int directHitOwnerId = (hitTank != nullptr) ? hitTank->ownerId : -1;
+                TriggerSpecialExplosion(map, newX, newY, bullet.ownerId, specialExplosions, explosionEvents, directHitOwnerId);
                 bullet.alive = false;
             } else {
                 bullet.x = newX;
@@ -269,7 +420,7 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
         }
 
         if (hitType == TileType::Brick) {
-            if (HandleBrickHit(map, cellX, cellY, newX, newY, bullet.direction, bullet.weaponLevel == 4)) {
+            if (HandleBrickHit(map, cellX, cellY, bullet.x, bullet.y, hitX, hitY, bullet.direction, bullet.weaponLevel == 4, bullet.weaponLevel)) {
                 impacts.Spawn(newX, newY, bullet.weaponLevel == 4);
                 bullet.alive = false;
             } else {
@@ -281,7 +432,7 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
         }
 
         if (hitType == TileType::Steel) {
-            if (HandleSteelHit(map, cellX, cellY, newX, newY, bullet.direction, bullet.weaponLevel)) {
+            if (HandleSteelHit(map, cellX, cellY, hitX, hitY, bullet.direction, bullet.weaponLevel)) {
                 impacts.Spawn(newX, newY, bullet.weaponLevel == 4);
                 bullet.alive = false;
             } else {
@@ -303,27 +454,72 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
     }
 
     // Dos balas que chocan de frente se anulan mutuamente (seccion 4.5). El
-    // disparo especial no participa: detona solo por choque directo.
+    // disparo especial es distinto: las balas de nivel 1-2 no lo frenan (se
+    // destruyen ellas solas, el especial sigue de largo); solo las de nivel
+    // 3-4 lo detienen (ahi si se destruyen ambas y el especial explota).
     for (size_t i = 0; i < bullets_.size(); ++i) {
-        if (!bullets_[i].alive || bullets_[i].isSpecial) {
+        if (!bullets_[i].alive) {
             continue;
         }
         for (size_t j = i + 1; j < bullets_.size(); ++j) {
-            if (!bullets_[j].alive || bullets_[j].isSpecial) {
+            if (!bullets_[j].alive) {
                 continue;
             }
             const float dx = bullets_[i].x - bullets_[j].x;
             const float dy = bullets_[i].y - bullets_[j].y;
-            if (std::fabs(dx) <= kBulletHitRadius && std::fabs(dy) <= kBulletHitRadius) {
-                const bool bigExplosion = bullets_[i].weaponLevel == 4 || bullets_[j].weaponLevel == 4;
-                impacts.Spawn((bullets_[i].x + bullets_[j].x) * 0.5f, (bullets_[i].y + bullets_[j].y) * 0.5f, bigExplosion);
-                bullets_[i].alive = false;
-                bullets_[j].alive = false;
+            if (std::fabs(dx) > kBulletHitRadius || std::fabs(dy) > kBulletHitRadius) {
+                continue;
             }
+
+            Bullet& a = bullets_[i];
+            Bullet& b = bullets_[j];
+            const float midX = (a.x + b.x) * 0.5f;
+            const float midY = (a.y + b.y) * 0.5f;
+
+            if (a.isSpecial != b.isSpecial) {
+                Bullet& special = a.isSpecial ? a : b;
+                Bullet& normal = a.isSpecial ? b : a;
+                if (normal.weaponLevel >= 3) {
+                    // La detiene: se destruyen las dos y el especial explota ahi.
+                    TriggerSpecialExplosion(map, midX, midY, special.ownerId, specialExplosions, explosionEvents);
+                    normal.alive = false;
+                    special.alive = false;
+                } else {
+                    // Nivel 1-2: se destruye solo ella, el especial sigue de largo.
+                    impacts.Spawn(normal.x, normal.y, normal.weaponLevel == 4);
+                    normal.alive = false;
+                }
+                continue;
+            }
+
+            if (a.isSpecial && b.isSpecial) {
+                continue; // caso raro (cada jugador solo tiene un especial a la vez): no se anulan
+            }
+
+            const bool bigExplosion = a.weaponLevel == 4 || b.weaponLevel == 4;
+            impacts.Spawn(midX, midY, bigExplosion);
+            a.alive = false;
+            b.alive = false;
         }
     }
 
     bullets_.erase(std::remove_if(bullets_.begin(), bullets_.end(), [](const Bullet& b) { return !b.alive; }), bullets_.end());
+}
+
+bool BulletSystem::KillBulletsHittingBox(int excludeOwnerId, float left, float right, float top, float bottom, BulletImpactSystem& impacts, std::vector<int>& outShooterWeaponLevels) {
+    bool hitAny = false;
+    for (Bullet& bullet : bullets_) {
+        if (!bullet.alive || bullet.isSpecial || bullet.ownerId == excludeOwnerId) {
+            continue;
+        }
+        if (bullet.x >= left && bullet.x <= right && bullet.y >= top && bullet.y <= bottom) {
+            impacts.Spawn(bullet.x, bullet.y, bullet.weaponLevel == 4);
+            outShooterWeaponLevels.push_back(bullet.weaponLevel);
+            bullet.alive = false;
+            hitAny = true;
+        }
+    }
+    return hitAny;
 }
 
 } // namespace bc

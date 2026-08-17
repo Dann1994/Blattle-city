@@ -11,6 +11,10 @@ struct SpecialExplosion {
     double frameTimer = 0.0;
     int frameIndex = 0;
     bool alive = false;
+    // false (disparo especial): tamano fijo, segun el radio de la explosion.
+    // true (tanque destruido): cada frame se dibuja a su tamano nativo en
+    // pixeles, escalado igual que los sprites de los tanques (mas chica).
+    bool nativeScale = false;
 };
 
 } // namespace bc

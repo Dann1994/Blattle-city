@@ -9,11 +9,12 @@ constexpr double kFrameDuration = 0.08; // segundos por frame
 constexpr int kFrameCount = 5;
 } // namespace
 
-void SpecialExplosionSystem::Spawn(float x, float y) {
+void SpecialExplosionSystem::Spawn(float x, float y, bool nativeScale) {
     SpecialExplosion explosion;
     explosion.x = x;
     explosion.y = y;
     explosion.alive = true;
+    explosion.nativeScale = nativeScale;
     explosions_.push_back(explosion);
 }
 

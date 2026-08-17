@@ -22,6 +22,8 @@ constexpr float kHeatPerShotByLevel[4] = {5.0f, 5.0f, 5.0f, 15.0f}; // nivel 4 c
 constexpr float kHeatMax = 100.0f;
 constexpr double kHeatDecayInterval = 0.5; // segundos entre cada paso de enfriado
 constexpr float kHeatDecayStep = 5.0f;
+constexpr int kChipHitsPerLevel = 2; // fuego amigo nivel 2 disparado por un rival nivel 2
+constexpr float kRecoilSpeed = 5.0f; // celdas por segundo a las que se anima el retroceso
 }
 
 void Tank::PickupStar() {
@@ -41,6 +43,16 @@ void Tank::ApplyWeaponLevelPenalty(int levels) {
     if (weaponLevel_ < kMaxWeaponLevel) {
         specialShotCharges_ = 0;
     }
+}
+
+bool Tank::RegisterChipHit() {
+    ++chipHitCount_;
+    if (chipHitCount_ >= kChipHitsPerLevel) {
+        chipHitCount_ = 0;
+        ApplyWeaponLevelPenalty(1);
+        return true;
+    }
+    return false;
 }
 
 void Tank::RegisterNormalShotHeat() {
@@ -120,20 +132,68 @@ void Tank::MuzzlePosition(float& outX, float& outY) const {
     outY = y_ + 0.5f + dy * 0.5f;
 }
 
-bool Tank::TryMove(float dx, float dy, const TileMap& map) {
-    const float newX = x_ + dx;
-    const float newY = y_ + dy;
+void Tank::GetBounds(float& outLeft, float& outRight, float& outTop, float& outBottom) const {
+    outLeft = x_;
+    outRight = x_ + kTankSize;
+    outTop = y_;
+    outBottom = y_ + kTankSize;
+}
 
+void Tank::StartRecoil(float distanceCells) {
+    // Direccion opuesta a donde mira EN ESTE MOMENTO (se dispara); se guarda
+    // fija para toda la animacion, aunque el jugador gire despues.
+    float dx = 0.0f, dy = 0.0f;
+    DirectionVector(facing_, dx, dy);
+    recoilDx_ = -dx;
+    recoilDy_ = -dy;
+    recoilRemaining_ = distanceCells;
+}
+
+void Tank::TickRecoil(double dt, const TileMap& map, Tank* other) {
+    if (recoilRemaining_ <= 0.0f) {
+        return;
+    }
+    const float step = std::min(recoilRemaining_, static_cast<float>(kRecoilSpeed * dt));
+    if (TryMove(recoilDx_ * step, recoilDy_ * step, map, other)) {
+        recoilRemaining_ -= step;
+    } else {
+        recoilRemaining_ = 0.0f; // choco contra algo (pared, bloque u otro tanque): se corta ahi
+    }
+}
+
+bool Tank::IsPositionBlocked(float newX, float newY, const TileMap& map, const Tank* other) const {
     const float left = newX;
     const float right = newX + kTankSize;
     const float top = newY;
     const float bottom = newY + kTankSize;
 
     if (left < 0.0f || top < 0.0f || right > static_cast<float>(map.Width()) || bottom > static_cast<float>(map.Height())) {
-        return false;
+        return true;
     }
 
     if (map.IsBoxBlocked(left, right, top, bottom)) {
+        return true;
+    }
+
+    // No se pueden atravesar entre tanques: si la posicion nueva se solapa
+    // con el otro, queda bloqueado (sin empuje, ver feedback: traia problemas).
+    if (other != nullptr) {
+        float oLeft = 0.0f, oRight = 0.0f, oTop = 0.0f, oBottom = 0.0f;
+        other->GetBounds(oLeft, oRight, oTop, oBottom);
+        const bool overlaps = left < oRight && right > oLeft && top < oBottom && bottom > oTop;
+        if (overlaps) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool Tank::TryMove(float dx, float dy, const TileMap& map, Tank* other) {
+    const float newX = x_ + dx;
+    const float newY = y_ + dy;
+
+    if (IsPositionBlocked(newX, newY, map, other)) {
         return false;
     }
 
@@ -142,8 +202,8 @@ bool Tank::TryMove(float dx, float dy, const TileMap& map) {
     return true;
 }
 
-bool Tank::TryMoveWithAssist(float dx, float dy, const TileMap& map) {
-    if (TryMove(dx, dy, map)) {
+bool Tank::TryMoveWithAssist(float dx, float dy, const TileMap& map, Tank* other) {
+    if (TryMove(dx, dy, map, other)) {
         return true;
     }
 
@@ -156,46 +216,61 @@ bool Tank::TryMoveWithAssist(float dx, float dy, const TileMap& map) {
     // el tanque el mismo). Ver TryMove: sigue siendo la unica fuente de
     // verdad sobre colision real, asi que esto nunca atraviesa una pared.
     if (dx != 0.0f) {
-        return TrySlidePerpendicularY(dx, map);
+        return TrySlidePerpendicularY(dx, map, other);
     }
     if (dy != 0.0f) {
-        return TrySlidePerpendicularX(dy, map);
+        return TrySlidePerpendicularX(dy, map, other);
     }
     return false;
 }
 
-bool Tank::TrySlidePerpendicularY(float dx, const TileMap& map) {
+bool Tank::TrySlidePerpendicularY(float dx, const TileMap& map, Tank* other) {
     const float rowTop = std::floor(y_);
     const float fracBottom = y_ - rowTop;    // fraccion del sprite metida en la fila de abajo
     const float fracTop = 1.0f - fracBottom; // fraccion metida en la fila de arriba
 
     // Probar alinear del todo a la fila de arriba: si funciona, la fila de
     // abajo era la que chocaba, y solo se acepta si esa porcion era minoria.
-    if (fracBottom > 0.001f && fracBottom < 0.5f && TryMove(dx, -fracBottom, map)) {
+    if (fracBottom > 0.001f && fracBottom < 0.5f && TryMove(dx, -fracBottom, map, other)) {
         return true;
     }
     // Simetrico: alinear a la fila de abajo si la de arriba era la que chocaba.
-    if (fracTop > 0.001f && fracTop < 0.5f && TryMove(dx, fracTop, map)) {
+    if (fracTop > 0.001f && fracTop < 0.5f && TryMove(dx, fracTop, map, other)) {
+        return true;
+    }
+    // Huecos a caballo entre 2 celdas (p.ej. rebajados por igual de dos
+    // bloques pegados, ver graze de costura): ni el alineado de arriba ni el
+    // de abajo entran, pero centrado justo en el borde entre filas si puede
+    // haber lugar. Se prueba al final, solo si las dos alineaciones enteras
+    // ya fallaron.
+    const float deltaToCenter = 0.5f - fracBottom;
+    if (std::fabs(deltaToCenter) > 0.001f && TryMove(dx, deltaToCenter, map, other)) {
         return true;
     }
     return false;
 }
 
-bool Tank::TrySlidePerpendicularX(float dy, const TileMap& map) {
+bool Tank::TrySlidePerpendicularX(float dy, const TileMap& map, Tank* other) {
     const float colLeft = std::floor(x_);
     const float fracRight = x_ - colLeft;    // fraccion del sprite metida en la columna de la derecha
     const float fracLeft = 1.0f - fracRight; // fraccion metida en la columna de la izquierda
 
-    if (fracRight > 0.001f && fracRight < 0.5f && TryMove(-fracRight, dy, map)) {
+    if (fracRight > 0.001f && fracRight < 0.5f && TryMove(-fracRight, dy, map, other)) {
         return true;
     }
-    if (fracLeft > 0.001f && fracLeft < 0.5f && TryMove(fracLeft, dy, map)) {
+    if (fracLeft > 0.001f && fracLeft < 0.5f && TryMove(fracLeft, dy, map, other)) {
+        return true;
+    }
+    // Simetrico al caso de TrySlidePerpendicularY: hueco a caballo entre 2
+    // columnas, centrado en el borde entre ellas.
+    const float deltaToCenter = 0.5f - fracRight;
+    if (std::fabs(deltaToCenter) > 0.001f && TryMove(deltaToCenter, dy, map, other)) {
         return true;
     }
     return false;
 }
 
-void Tank::Update(double dt, const PlayerInput& input, const TileMap& map) {
+void Tank::Update(double dt, const PlayerInput& input, const TileMap& map, Tank* other) {
     if (freezeTimer_ > 0.0) {
         animTimer_ = 0.0; // paralizado: no se mueve, no anima, mantiene la ultima direccion
         return;
@@ -208,16 +283,16 @@ void Tank::Update(double dt, const PlayerInput& input, const TileMap& map) {
     // direccion presionada, incluso si el movimiento queda bloqueado.
     if (input.moveUp) {
         facing_ = Direction::Up;
-        moved = TryMoveWithAssist(0.0f, -distance, map);
+        moved = TryMoveWithAssist(0.0f, -distance, map, other);
     } else if (input.moveDown) {
         facing_ = Direction::Down;
-        moved = TryMoveWithAssist(0.0f, distance, map);
+        moved = TryMoveWithAssist(0.0f, distance, map, other);
     } else if (input.moveLeft) {
         facing_ = Direction::Left;
-        moved = TryMoveWithAssist(-distance, 0.0f, map);
+        moved = TryMoveWithAssist(-distance, 0.0f, map, other);
     } else if (input.moveRight) {
         facing_ = Direction::Right;
-        moved = TryMoveWithAssist(distance, 0.0f, map);
+        moved = TryMoveWithAssist(distance, 0.0f, map, other);
     }
 
     if (moved) {
