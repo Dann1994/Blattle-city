@@ -32,6 +32,21 @@ constexpr float kSpecialShotRecoilDistance = 0.75f; // celdas que retrocede el t
 constexpr double kFriendlyFireParalyzeDuration = 5.0;
 constexpr double kFrozenBlinkInterval = 0.1; // segundos entre cada parpadeo mientras esta paralizado
 
+// HUD: parpadeo de texto (calor al 100% / municion especial lista).
+constexpr double kHudTextBlinkInterval = 0.3;
+
+// Escenario rectangular (seccion custom): el campo de juego (ahora un mapa
+// rectangular, ver test_map.json) se encaja en el area central, con una
+// barra gris arriba (justo lo alto necesario para los datos de los
+// jugadores: P1/P2 agrupados a la izquierda, P3/P4 agrupados a la derecha) y
+// un marco gris delgado en los otros 3 lados.
+constexpr float kHudTopBarHeight = 85.0f;
+constexpr float kHudThinBorder = 8.0f;
+constexpr float kHudPanelMargin = 10.0f;
+constexpr float kHudColumnWidth = 280.0f; // ancho de cada columna dentro de un grupo de 2 jugadores
+constexpr Color kHudPanelColor = Color{45, 45, 48, 255};
+constexpr Color kHudPanelBorderColor = Color{90, 90, 96, 255};
+
 Color ColorForTile(TileType type) {
     switch (type) {
         case TileType::Steel: return Color{0xA0, 0xA0, 0xA8, 0xFF};
@@ -56,11 +71,17 @@ void Game::Init() {
 
     player1Sprites_.LoadPlayer1(BC_ASSETS_DIR);
     player2Sprites_.LoadPlayer2(BC_ASSETS_DIR);
+    player3Sprites_.LoadPlayer3(BC_ASSETS_DIR);
+    player4Sprites_.LoadPlayer4(BC_ASSETS_DIR);
     bulletSprites_.Load(BC_ASSETS_DIR);
     starTexture_ = LoadTexture((std::string(BC_ASSETS_DIR) + "sprites/powerup_star.png").c_str());
     SetTextureFilter(starTexture_, TEXTURE_FILTER_POINT);
     helmetTexture_ = LoadTexture((std::string(BC_ASSETS_DIR) + "sprites/powerup_helmet.png").c_str());
     SetTextureFilter(helmetTexture_, TEXTURE_FILTER_POINT);
+    gunTexture_ = LoadTexture((std::string(BC_ASSETS_DIR) + "sprites/powerup_gun.png").c_str());
+    SetTextureFilter(gunTexture_, TEXTURE_FILTER_POINT);
+    lifeTexture_ = LoadTexture((std::string(BC_ASSETS_DIR) + "sprites/powerup_life.png").c_str());
+    SetTextureFilter(lifeTexture_, TEXTURE_FILTER_POINT);
     brickUnitTextures_[0] = LoadTexture((std::string(BC_ASSETS_DIR) + "sprites/brick_unit_0.png").c_str());
     brickUnitTextures_[1] = LoadTexture((std::string(BC_ASSETS_DIR) + "sprites/brick_unit_1.png").c_str());
     SetTextureFilter(brickUnitTextures_[0], TEXTURE_FILTER_POINT);
@@ -93,12 +114,30 @@ void Game::ResetState() {
         player2SpawnX_ = player1SpawnX_;
         player2SpawnY_ = player1SpawnY_;
     }
+    if (level.player_spawns.size() > 2) {
+        player3SpawnX_ = static_cast<float>(level.player_spawns[2][0]);
+        player3SpawnY_ = static_cast<float>(level.player_spawns[2][1]);
+    } else {
+        player3SpawnX_ = player1SpawnX_;
+        player3SpawnY_ = player1SpawnY_;
+    }
+    if (level.player_spawns.size() > 3) {
+        player4SpawnX_ = static_cast<float>(level.player_spawns[3][0]);
+        player4SpawnY_ = static_cast<float>(level.player_spawns[3][1]);
+    } else {
+        player4SpawnX_ = player1SpawnX_;
+        player4SpawnY_ = player1SpawnY_;
+    }
 
     player1_ = Tank{};
     player2_ = Tank{};
+    player3_ = Tank{};
+    player4_ = Tank{};
     // TODO: exponer como opcion en el menu de configuracion (seccion 12.5).
     player1_.SetFireMode(FireMode::SinglePress);
     player2_.SetFireMode(FireMode::SinglePress);
+    player3_.SetFireMode(FireMode::SinglePress);
+    player4_.SetFireMode(FireMode::SinglePress);
 
     bullets_ = BulletSystem{};
     bulletImpacts_ = BulletImpactSystem{};
@@ -107,8 +146,14 @@ void Game::ResetState() {
     powerUps_ = PowerUpSystem{};
     screenShakeTimer_ = 0.0;
 
+    // Al empezar (o reiniciar con ESC) solo esta presente el jugador 1; P2/P3/P4
+    // se traen con las teclas 1/2/3/4 (ver ProcessInput y SetPlayerActive).
+    player1Active_ = true;
+    player2Active_ = false;
+    player3Active_ = false;
+    player4Active_ = false;
+
     RespawnPlayer1();
-    RespawnPlayer2();
 }
 
 void Game::RespawnPlayer1() {
@@ -123,6 +168,45 @@ void Game::RespawnPlayer2() {
     player2_.SetFacing(Direction::Up);
     player2Spawn_.Start(player2SpawnX_, player2SpawnY_);
     player2_.ActivateShield(kRespawnShieldDuration);
+}
+
+void Game::RespawnPlayer3() {
+    player3_.SetPosition(player3SpawnX_, player3SpawnY_);
+    player3_.SetFacing(Direction::Up);
+    player3Spawn_.Start(player3SpawnX_, player3SpawnY_);
+    player3_.ActivateShield(kRespawnShieldDuration);
+}
+
+void Game::RespawnPlayer4() {
+    player4_.SetPosition(player4SpawnX_, player4SpawnY_);
+    player4_.SetFacing(Direction::Up);
+    player4Spawn_.Start(player4SpawnX_, player4SpawnY_);
+    player4_.ActivateShield(kRespawnShieldDuration);
+}
+
+void Game::RespawnByOwnerId(int ownerId) {
+    if (ownerId == kPlayer1Id) {
+        RespawnPlayer1();
+    } else if (ownerId == kPlayer2Id) {
+        RespawnPlayer2();
+    } else if (ownerId == kPlayer3Id) {
+        RespawnPlayer3();
+    } else if (ownerId == kPlayer4Id) {
+        RespawnPlayer4();
+    }
+}
+
+void Game::SetPlayerActive(bool& activeFlag, Tank& tank, SpawnFlash& spawn, float spawnX, float spawnY, bool active) {
+    activeFlag = active;
+    if (!active) {
+        return; // Update()/Render() ya no lo van a tocar mientras este en false
+    }
+    tank = Tank{};
+    tank.SetFireMode(FireMode::SinglePress);
+    tank.SetPosition(spawnX, spawnY);
+    tank.SetFacing(Direction::Up);
+    spawn.Start(spawnX, spawnY);
+    tank.ActivateShield(kRespawnShieldDuration);
 }
 
 void Game::ProcessInput() {
@@ -142,11 +226,45 @@ void Game::ProcessInput() {
     input2_.shoot = IsKeyDown(KEY_RIGHT_CONTROL);
     input2_.specialShoot = IsKeyDown(KEY_RIGHT_SHIFT);
 
+    // Esquema IJKL para P3.
+    input3_.moveUp = IsKeyDown(KEY_I);
+    input3_.moveDown = IsKeyDown(KEY_K);
+    input3_.moveLeft = IsKeyDown(KEY_J);
+    input3_.moveRight = IsKeyDown(KEY_L);
+    input3_.shoot = IsKeyDown(KEY_U);
+    input3_.specialShoot = IsKeyDown(KEY_O);
+
+    // Esquema numpad (8456) para P4.
+    input4_.moveUp = IsKeyDown(KEY_KP_8);
+    input4_.moveDown = IsKeyDown(KEY_KP_5);
+    input4_.moveLeft = IsKeyDown(KEY_KP_4);
+    input4_.moveRight = IsKeyDown(KEY_KP_6);
+    input4_.shoot = IsKeyDown(KEY_KP_0);
+    input4_.specialShoot = IsKeyDown(KEY_KP_ENTER);
+
+    // Botones de prueba: traen o hacen desaparecer a cada jugador (al
+    // arrancar solo esta presente el jugador 1, ver ResetState).
+    if (IsKeyPressed(KEY_ONE)) {
+        SetPlayerActive(player1Active_, player1_, player1Spawn_, player1SpawnX_, player1SpawnY_, !player1Active_);
+    }
+    if (IsKeyPressed(KEY_TWO)) {
+        SetPlayerActive(player2Active_, player2_, player2Spawn_, player2SpawnX_, player2SpawnY_, !player2Active_);
+    }
+    if (IsKeyPressed(KEY_THREE)) {
+        SetPlayerActive(player3Active_, player3_, player3Spawn_, player3SpawnX_, player3SpawnY_, !player3Active_);
+    }
+    if (IsKeyPressed(KEY_FOUR)) {
+        SetPlayerActive(player4Active_, player4_, player4Spawn_, player4SpawnX_, player4SpawnY_, !player4Active_);
+    }
+
     // Boton de prueba: repite el respawn en el punto de spawn inicial, para
-    // poder ver el destello sin tener que reiniciar el juego.
+    // poder ver el destello sin tener que reiniciar el juego (solo a los
+    // jugadores presentes).
     if (IsKeyPressed(KEY_R)) {
-        RespawnPlayer1();
-        RespawnPlayer2();
+        if (player1Active_) RespawnPlayer1();
+        if (player2Active_) RespawnPlayer2();
+        if (player3Active_) RespawnPlayer3();
+        if (player4Active_) RespawnPlayer4();
     }
 
     // Boton de prueba: reinicia toda la partida (mapa, tanque, balas, power-ups).
@@ -162,6 +280,12 @@ void Game::ProcessInput() {
     if (IsKeyPressed(KEY_F2)) {
         powerUps_.ForceSpawn(PowerUpType::Helmet, map_);
     }
+    if (IsKeyPressed(KEY_F4)) {
+        powerUps_.ForceSpawn(PowerUpType::Gun, map_);
+    }
+    if (IsKeyPressed(KEY_F5)) {
+        powerUps_.ForceSpawn(PowerUpType::Life, map_);
+    }
 
     // Boton de prueba: rota el modo de fuego amigo Off -> nivel 1 -> nivel 2 -> Off.
     if (IsKeyPressed(KEY_F3)) {
@@ -173,12 +297,16 @@ void Game::ProcessInput() {
     }
 }
 
-void Game::UpdatePlayer(Tank& tank, PlayerInput& input, SpawnFlash& spawn, int ownerId, Tank* other, double fixedDt) {
+void Game::UpdatePlayer(Tank& tank, PlayerInput& input, SpawnFlash& spawn, int ownerId, const std::vector<Tank*>& others, double fixedDt) {
+    if (tank.IsEliminated()) {
+        return; // sin vidas: fuera de la partida, no se mueve ni dispara
+    }
+
     tank.TickShield(fixedDt);
     tank.TickShootCooldown(fixedDt);
     tank.TickHeatDecay(fixedDt);
     tank.TickFreeze(fixedDt);
-    tank.TickRecoil(fixedDt, map_, other);
+    tank.TickRecoil(fixedDt, map_, others);
 
     if (spawn.IsActive()) {
         // Mientras dura el destello de aparicion, el tanque no se mueve ni
@@ -187,7 +315,7 @@ void Game::UpdatePlayer(Tank& tank, PlayerInput& input, SpawnFlash& spawn, int o
         return;
     }
 
-    tank.Update(fixedDt, input, map_, other);
+    tank.Update(fixedDt, input, map_, others);
 
     // Se consumen los dos triggers siempre (para no perder el flanco de
     // subida del boton mientras hay cooldown), pero solo disparan de verdad
@@ -217,8 +345,39 @@ void Game::UpdatePlayer(Tank& tank, PlayerInput& input, SpawnFlash& spawn, int o
             tank.PickupStar();
         } else if (pickedType == PowerUpType::Helmet) {
             tank.ActivateShield(kHelmetShieldDuration);
+        } else if (pickedType == PowerUpType::Gun) {
+            tank.PickupGun();
+        } else if (pickedType == PowerUpType::Life) {
+            tank.AddLife();
         }
     }
+}
+
+void Game::HandlePlayerDeath(Tank& tank, int ownerId) {
+    tank.LoseLife();
+    if (tank.IsOutOfLives()) {
+        tank.Eliminate();
+        return;
+    }
+    RespawnByOwnerId(ownerId);
+}
+
+std::vector<Tank*> Game::ActiveOthers(int excludeOwnerId) {
+    std::vector<Tank*> others;
+    others.reserve(3);
+    if (player1Active_ && excludeOwnerId != kPlayer1Id) {
+        others.push_back(&player1_);
+    }
+    if (player2Active_ && excludeOwnerId != kPlayer2Id) {
+        others.push_back(&player2_);
+    }
+    if (player3Active_ && excludeOwnerId != kPlayer3Id) {
+        others.push_back(&player3_);
+    }
+    if (player4Active_ && excludeOwnerId != kPlayer4Id) {
+        others.push_back(&player4_);
+    }
+    return others;
 }
 
 void Game::DestroyTank(Tank& tank) {
@@ -229,6 +388,9 @@ void Game::DestroyTank(Tank& tank) {
 }
 
 bool Game::ApplyExplosionSelfDamage(Tank& tank, int ownerId) {
+    if (tank.IsEliminated()) {
+        return false; // fuera de la partida: no le pasa nada mas
+    }
     bool destroyed = false;
     for (const SpecialExplosionEvent& event : specialExplosionEvents_) {
         const bool directHit = (event.directHitOwnerId == ownerId);
@@ -275,6 +437,9 @@ bool Game::ApplyExplosionSelfDamage(Tank& tank, int ownerId) {
 }
 
 bool Game::ApplyFriendlyFire(Tank& tank, int ownerId) {
+    if (tank.IsEliminated()) {
+        return false; // fuera de la partida: no le pasa nada mas
+    }
     if (friendlyFireMode_ == FriendlyFireMode::Off) {
         return false; // las balas del otro jugador atraviesan sin chequeo alguno
     }
@@ -353,20 +518,31 @@ void Game::Update(double fixedDt) {
         screenShakeTimer_ = std::max(0.0, screenShakeTimer_ - fixedDt);
     }
 
-    UpdatePlayer(player1_, input1_, player1Spawn_, kPlayer1Id, &player2_, fixedDt);
-    UpdatePlayer(player2_, input2_, player2Spawn_, kPlayer2Id, &player1_, fixedDt);
+    if (player1Active_) UpdatePlayer(player1_, input1_, player1Spawn_, kPlayer1Id, ActiveOthers(kPlayer1Id), fixedDt);
+    if (player2Active_) UpdatePlayer(player2_, input2_, player2Spawn_, kPlayer2Id, ActiveOthers(kPlayer2Id), fixedDt);
+    if (player3Active_) UpdatePlayer(player3_, input3_, player3Spawn_, kPlayer3Id, ActiveOthers(kPlayer3Id), fixedDt);
+    if (player4Active_) UpdatePlayer(player4_, input4_, player4Spawn_, kPlayer4Id, ActiveOthers(kPlayer4Id), fixedDt);
 
-    // Estado actual de ambos tanques para que BulletSystem resuelva un
-    // choque directo del disparo especial (ver TankCombatState).
+    // Estado actual de los tanques presentes para que BulletSystem resuelva
+    // un choque directo del disparo especial (ver TankCombatState).
     std::vector<TankCombatState> tanks;
-    tanks.reserve(2);
-    for (int i = 0; i < 2; ++i) {
-        Tank& tank = (i == 0) ? player1_ : player2_;
+    tanks.reserve(4);
+    struct ActivePlayerRef { int ownerId; Tank* tank; bool active; };
+    const ActivePlayerRef activePlayers[4] = {
+        {kPlayer1Id, &player1_, player1Active_},
+        {kPlayer2Id, &player2_, player2Active_},
+        {kPlayer3Id, &player3_, player3Active_},
+        {kPlayer4Id, &player4_, player4Active_},
+    };
+    for (const ActivePlayerRef& ref : activePlayers) {
+        if (!ref.active || ref.tank->IsEliminated()) {
+            continue; // ausente o fuera de la partida: no es un blanco valido
+        }
         TankCombatState state;
-        state.ownerId = (i == 0) ? kPlayer1Id : kPlayer2Id;
-        tank.GetBounds(state.left, state.right, state.top, state.bottom);
-        state.shielded = tank.IsShielded();
-        state.weaponLevel = tank.WeaponLevel();
+        state.ownerId = ref.ownerId;
+        ref.tank->GetBounds(state.left, state.right, state.top, state.bottom);
+        state.shielded = ref.tank->IsShielded();
+        state.weaponLevel = ref.tank->WeaponLevel();
         tanks.push_back(state);
     }
 
@@ -375,47 +551,58 @@ void Game::Update(double fixedDt) {
     specialExplosions_.Update(fixedDt);
     powerUps_.Update(fixedDt, map_);
 
-    if (ApplyFriendlyFire(player1_, kPlayer1Id)) {
-        RespawnPlayer1();
-    }
-    if (ApplyFriendlyFire(player2_, kPlayer2Id)) {
-        RespawnPlayer2();
+    for (const ActivePlayerRef& ref : activePlayers) {
+        if (!ref.active) {
+            continue;
+        }
+        if (ApplyFriendlyFire(*ref.tank, ref.ownerId)) {
+            HandlePlayerDeath(*ref.tank, ref.ownerId);
+        }
     }
 
     // Choque directo del especial contra un tanque nivel 1-3 sin escudo: se
     // destruye y la bala seguia de largo (ver BulletSystem::Update), asi que
     // no paso por ninguna explosion.
     for (const SpecialDirectKillEvent& kill : specialDirectKillEvents_) {
-        if (kill.targetOwnerId == kPlayer1Id) {
-            DestroyTank(player1_);
-            RespawnPlayer1();
-        } else if (kill.targetOwnerId == kPlayer2Id) {
-            DestroyTank(player2_);
-            RespawnPlayer2();
+        for (const ActivePlayerRef& ref : activePlayers) {
+            if (ref.active && kill.targetOwnerId == ref.ownerId) {
+                DestroyTank(*ref.tank);
+                HandlePlayerDeath(*ref.tank, ref.ownerId);
+                break;
+            }
         }
     }
 
     if (!specialExplosionEvents_.empty()) {
         // Efecto global, no depende de la distancia (a diferencia del dano):
         // toda explosion especial sacude la pantalla y paraliza a TODOS los
-        // tanques.
+        // tanques presentes.
         screenShakeTimer_ = kScreenShakeDuration;
-        player1_.Freeze(kSpecialImpactFreezeDuration);
-        player2_.Freeze(kSpecialImpactFreezeDuration);
+        for (const ActivePlayerRef& ref : activePlayers) {
+            if (ref.active) {
+                ref.tank->Freeze(kSpecialImpactFreezeDuration);
+            }
+        }
     }
 
     // La explosion especial daña a quien alcance, incluido el propio tanque
     // que la disparo (seccion pedida explicitamente: "amigo-enemigo" a
     // proposito, es el riesgo de usar el disparo especial).
-    if (ApplyExplosionSelfDamage(player1_, kPlayer1Id)) {
-        RespawnPlayer1();
-    }
-    if (ApplyExplosionSelfDamage(player2_, kPlayer2Id)) {
-        RespawnPlayer2();
+    for (const ActivePlayerRef& ref : activePlayers) {
+        if (!ref.active) {
+            continue;
+        }
+        if (ApplyExplosionSelfDamage(*ref.tank, ref.ownerId)) {
+            HandlePlayerDeath(*ref.tank, ref.ownerId);
+        }
     }
 }
 
 void Game::RenderTank(const Tank& tank, const SpawnFlash& spawn, const TankSpriteSet& sprites, const MapViewport& viewport) {
+    if (tank.IsEliminated()) {
+        return; // sin vidas: no se dibuja mas
+    }
+
     if (spawn.IsActive()) {
         const Texture2D flashTex = spawnFlashSprites_.Get(spawn.FrameIndex());
         const Rectangle flashSrc{0.0f, 0.0f, static_cast<float>(flashTex.width), static_cast<float>(flashTex.height)};
@@ -479,30 +666,35 @@ void Game::RenderTank(const Tank& tank, const SpawnFlash& spawn, const TankSprit
 }
 
 void Game::RenderPlayerHud(const Tank& tank, const char* label, int x, int y) {
-    DrawText(TextFormat("%s - Nivel de arma: %d", label, tank.WeaponLevel()), x, y, 20, RAYWHITE);
-    if (tank.IsShielded()) {
-        DrawText(TextFormat("Escudo: %.1fs", tank.ShieldSecondsRemaining()), x, y + 25, 20, RAYWHITE);
-    }
-    if (tank.WeaponLevel() == 4) {
-        DrawText(TextFormat("Disparo especial: %d/1", tank.HasSpecialShotReady() ? 1 : 0), x, y + 50, 20, RAYWHITE);
+    // Parpadeo de texto (calor al 100% / municion especial lista): mismo
+    // criterio de "visible la mitad del tiempo" que ya se usa para el tanque
+    // paralizado (ver kFrozenBlinkInterval), pero un poco mas lento porque es
+    // texto de HUD, no el sprite del tanque.
+    const bool textBlinkOn = static_cast<int>(GetTime() / kHudTextBlinkInterval) % 2 == 0;
+
+    if (tank.IsEliminated()) {
+        DrawText(TextFormat("%s - SIN VIDAS", label), x, y, 20, RED);
+        return;
     }
 
-    {
-        constexpr int kHeatBarWidth = 200;
-        constexpr int kHeatBarHeight = 16;
-        const int heatBarY = y + 75;
-        const float heatPercent = tank.HeatPercent();
-        DrawRectangle(x, heatBarY, kHeatBarWidth, kHeatBarHeight, DARKGRAY);
-        const int filledWidth = static_cast<int>(kHeatBarWidth * (heatPercent / 100.0f));
-        DrawRectangle(x, heatBarY, filledWidth, kHeatBarHeight, heatPercent >= 100.0f ? RED : ORANGE);
-        DrawRectangleLines(x, heatBarY, kHeatBarWidth, kHeatBarHeight, RAYWHITE);
-        DrawText(TextFormat("Calor: %.0f%%", heatPercent), x, heatBarY + kHeatBarHeight + 2, 20, RAYWHITE);
+    DrawText(TextFormat("%s X %d - Nivel %d", label, tank.Lives(), tank.WeaponLevel()), x, y, 20, RAYWHITE);
+
+    constexpr int kHeatBarWidth = 160;
+    constexpr int kHeatBarHeight = 14;
+    constexpr int kLinePitch = 20; // alto de renglon + separacion minima entre lineas de texto
+    const int heatBarY = y + kLinePitch;
+    const float heatPercent = tank.HeatPercent();
+    const bool overheated = heatPercent >= 100.0f;
+    DrawRectangle(x, heatBarY, kHeatBarWidth, kHeatBarHeight, DARKGRAY);
+    const int filledWidth = static_cast<int>(kHeatBarWidth * (heatPercent / 100.0f));
+    DrawRectangle(x, heatBarY, filledWidth, kHeatBarHeight, overheated ? RED : ORANGE);
+    DrawRectangleLines(x, heatBarY, kHeatBarWidth, kHeatBarHeight, RAYWHITE);
+    if (!overheated || textBlinkOn) {
+        DrawText(TextFormat(":%.0f%%", heatPercent), x + kHeatBarWidth + 6, heatBarY - 2, 18, overheated ? RED : RAYWHITE);
     }
-    if (!tank.CanShoot()) {
-        DrawText(TextFormat("Sin poder disparar: %.1fs", tank.ShootCooldownRemaining()), x, y + 120, 20, RAYWHITE);
-    }
-    if (tank.IsFrozen()) {
-        DrawText("PARALIZADO", x, y + 145, 20, RED);
+
+    if (tank.HasSpecialShotReady() && textBlinkOn) {
+        DrawText("Municion especial lista!", x, heatBarY + kLinePitch, 18, RED);
     }
 }
 
@@ -510,7 +702,16 @@ void Game::Render(double /*interpolationAlpha*/) {
     windowWidth_ = GetScreenWidth();
     windowHeight_ = GetScreenHeight();
 
-    const MapViewport viewport = MapViewport::Compute(windowWidth_, windowHeight_, map_.Width(), map_.Height(), kTileSize);
+    // El campo de juego (rectangular, ver test_map.json) se encaja en el area
+    // central: barra gris gruesa arriba (datos de jugadores) y marco gris
+    // delgado en los otros 3 lados.
+    const int topBarH = static_cast<int>(kHudTopBarHeight);
+    const int thinBorder = static_cast<int>(kHudThinBorder);
+    const float playAreaWidth = static_cast<float>(windowWidth_) - kHudThinBorder * 2.0f;
+    const float playAreaHeight = static_cast<float>(windowHeight_) - kHudTopBarHeight - kHudThinBorder;
+    MapViewport viewport = MapViewport::Compute(static_cast<int>(playAreaWidth), static_cast<int>(playAreaHeight), map_.Width(), map_.Height(), kTileSize);
+    viewport.offsetX += kHudThinBorder;
+    viewport.offsetY += kHudTopBarHeight;
 
     BeginDrawing();
     // Mismo color que las celdas vacias (ColorForTile de Empty), asi una
@@ -518,9 +719,20 @@ void Game::Render(double /*interpolationAlpha*/) {
     // el resto del fondo.
     ClearBackground(ColorForTile(TileType::Empty));
 
-    // Sacudida de pantalla (onda expansiva del disparo especial): desplaza
-    // todo el dibujado (mapa, tanque, UI incluida) con un offset aleatorio
-    // que decae a medida que pasa el tiempo.
+    // Marco gris (barra superior gruesa + bordes delgados en los otros 3
+    // lados), fijo y fuera de la sacudida de pantalla para que el texto no salte.
+    DrawRectangle(0, 0, windowWidth_, topBarH, kHudPanelColor);
+    DrawRectangle(0, topBarH, thinBorder, windowHeight_ - topBarH, kHudPanelColor);
+    DrawRectangle(windowWidth_ - thinBorder, topBarH, thinBorder, windowHeight_ - topBarH, kHudPanelColor);
+    DrawRectangle(0, windowHeight_ - thinBorder, windowWidth_, thinBorder, kHudPanelColor);
+    DrawLine(0, topBarH, windowWidth_, topBarH, kHudPanelBorderColor);
+    DrawLine(thinBorder, topBarH, thinBorder, windowHeight_, kHudPanelBorderColor);
+    DrawLine(windowWidth_ - thinBorder, topBarH, windowWidth_ - thinBorder, windowHeight_, kHudPanelBorderColor);
+    DrawLine(0, windowHeight_ - thinBorder, windowWidth_, windowHeight_ - thinBorder, kHudPanelBorderColor);
+
+    // Sacudida de pantalla (onda expansiva del disparo especial): desplaza el
+    // campo de juego (mapa, tanques, balas) con un offset aleatorio que decae
+    // a medida que pasa el tiempo. Los paneles laterales quedan fijos.
     Camera2D shakeCamera{};
     shakeCamera.zoom = 1.0f;
     if (screenShakeTimer_ > 0.0) {
@@ -577,8 +789,10 @@ void Game::Render(double /*interpolationAlpha*/) {
         }
     }
 
-    RenderTank(player1_, player1Spawn_, player1Sprites_, viewport);
-    RenderTank(player2_, player2Spawn_, player2Sprites_, viewport);
+    if (player1Active_) RenderTank(player1_, player1Spawn_, player1Sprites_, viewport);
+    if (player2Active_) RenderTank(player2_, player2Spawn_, player2Sprites_, viewport);
+    if (player3Active_) RenderTank(player3_, player3Spawn_, player3Sprites_, viewport);
+    if (player4Active_) RenderTank(player4_, player4Spawn_, player4Sprites_, viewport);
 
     const float pixelScale = viewport.tileScreenSize / static_cast<float>(kTileSize);
     for (const Bullet& bullet : bullets_.Bullets()) {
@@ -613,15 +827,32 @@ void Game::Render(double /*interpolationAlpha*/) {
     }
 
     if (powerUps_.Active().alive && powerUps_.IsBlinkVisible()) {
-        const Texture2D iconTex = (powerUps_.Active().type == PowerUpType::Star) ? starTexture_ : helmetTexture_;
+        Texture2D iconTex = starTexture_;
+        if (powerUps_.Active().type == PowerUpType::Helmet) {
+            iconTex = helmetTexture_;
+        } else if (powerUps_.Active().type == PowerUpType::Gun) {
+            iconTex = gunTexture_;
+        } else if (powerUps_.Active().type == PowerUpType::Life) {
+            iconTex = lifeTexture_;
+        }
         const Rectangle iconSrc{0.0f, 0.0f, static_cast<float>(iconTex.width), static_cast<float>(iconTex.height)};
         const Rectangle iconDst{viewport.TileToScreenX(powerUps_.Active().x), viewport.TileToScreenY(powerUps_.Active().y), viewport.tileScreenSize, viewport.tileScreenSize};
         DrawTexturePro(iconTex, iconSrc, iconDst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
     }
 
-    DrawFPS(10, 10);
-    RenderPlayerHud(player1_, "P1", 10, 30);
-    RenderPlayerHud(player2_, "P2", windowWidth_ - 270, 30);
+    EndMode2D();
+
+    // Texto de UI (barra superior + aviso de fuego amigo): dibujado fuera de
+    // la sacudida de pantalla, para que quede fijo mientras el campo de
+    // juego tiembla. P1/P2 agrupados en el borde izquierdo, P3/P4 agrupados
+    // en el borde derecho.
+    const int hudMargin = static_cast<int>(kHudPanelMargin);
+    const int columnW = static_cast<int>(kHudColumnWidth);
+    if (player1Active_) RenderPlayerHud(player1_, "P1", hudMargin, hudMargin);
+    if (player2Active_) RenderPlayerHud(player2_, "P2", columnW + hudMargin, hudMargin);
+    if (player3Active_) RenderPlayerHud(player3_, "P3", windowWidth_ - hudMargin - columnW * 2, hudMargin);
+    if (player4Active_) RenderPlayerHud(player4_, "P4", windowWidth_ - hudMargin - columnW, hudMargin);
+    DrawText(TextFormat("FPS: %d", GetFPS()), windowWidth_ - 90, 2, 12, RAYWHITE);
 
     const char* friendlyFireLabel = "Apagado";
     if (friendlyFireMode_ == FriendlyFireMode::Paralyze) {
@@ -630,9 +861,9 @@ void Game::Render(double /*interpolationAlpha*/) {
         friendlyFireLabel = "Nivel 2 (dana)";
     }
     const char* friendlyFireText = TextFormat("Fuego amigo (F3): %s", friendlyFireLabel);
-    DrawText(friendlyFireText, (windowWidth_ - MeasureText(friendlyFireText, 20)) / 2, 10, 20, RAYWHITE);
+    const int friendlyFireTextX = (windowWidth_ - MeasureText(friendlyFireText, 20)) / 2;
+    DrawText(friendlyFireText, friendlyFireTextX, topBarH - 25, 20, RAYWHITE);
 
-    EndMode2D();
     EndDrawing();
 }
 
@@ -643,12 +874,16 @@ void Game::Shutdown() {
     spawnFlashSprites_.Unload();
     UnloadTexture(starTexture_);
     UnloadTexture(helmetTexture_);
+    UnloadTexture(gunTexture_);
+    UnloadTexture(lifeTexture_);
     UnloadTexture(brickUnitTextures_[0]);
     UnloadTexture(brickUnitTextures_[1]);
     UnloadTexture(steelUnitTexture_);
     bulletSprites_.Unload();
     player1Sprites_.Unload();
     player2Sprites_.Unload();
+    player3Sprites_.Unload();
+    player4Sprites_.Unload();
     CloseWindow();
 }
 

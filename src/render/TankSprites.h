@@ -14,6 +14,8 @@ class TankSpriteSet {
 public:
     void LoadPlayer1(const std::string& assetsDir) { Load(assetsDir, "p1"); }
     void LoadPlayer2(const std::string& assetsDir) { Load(assetsDir, "p2"); }
+    void LoadPlayer3(const std::string& assetsDir) { Load(assetsDir, "p3"); }
+    void LoadPlayer4(const std::string& assetsDir) { Load(assetsDir, "p4"); }
     void Unload();
 
     Texture2D Get(int weaponLevel, Direction dir, int frame) const;

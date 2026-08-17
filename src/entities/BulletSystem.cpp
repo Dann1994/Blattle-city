@@ -331,6 +331,17 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
     explosionEvents.clear();
     directKillEvents.clear();
 
+    // Posicion antes de moverse este frame, para la deteccion de cruce
+    // bala-contra-bala de mas abajo (ver comentario ahi: a velocidades
+    // altas dos balas pueden atravesarse en un solo frame sin quedar nunca
+    // dentro del radio de choque al final del paso).
+    std::vector<float> preMoveX(bullets_.size());
+    std::vector<float> preMoveY(bullets_.size());
+    for (size_t i = 0; i < bullets_.size(); ++i) {
+        preMoveX[i] = bullets_[i].x;
+        preMoveY[i] = bullets_[i].y;
+    }
+
     for (Bullet& bullet : bullets_) {
         if (!bullet.alive) {
             continue;
@@ -453,6 +464,20 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
         bullet.y = newY;
     }
 
+    // Se solaparon en algun momento de este frame en un eje: o terminaron
+    // cerca, o venian de lados opuestos y se cruzaron en el medio (a
+    // velocidades altas, p.ej. dos especiales a 24 celdas/seg cerrando a 48
+    // combinadas, pueden pasar de largo una a la otra sin que al final del
+    // paso queden nunca dentro del radio de choque).
+    auto axisCrossedOrClose = [](float o1, float n1, float o2, float n2, float radius) {
+        const float rel0 = o1 - o2;
+        const float rel1 = n1 - n2;
+        if ((rel0 > 0.0f) != (rel1 > 0.0f)) {
+            return true; // la distancia relativa cambio de signo: paso por 0
+        }
+        return std::min(std::fabs(rel0), std::fabs(rel1)) <= radius;
+    };
+
     // Dos balas que chocan de frente se anulan mutuamente (seccion 4.5). El
     // disparo especial es distinto: las balas de nivel 1-2 no lo frenan (se
     // destruyen ellas solas, el especial sigue de largo); solo las de nivel
@@ -465,9 +490,8 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
             if (!bullets_[j].alive) {
                 continue;
             }
-            const float dx = bullets_[i].x - bullets_[j].x;
-            const float dy = bullets_[i].y - bullets_[j].y;
-            if (std::fabs(dx) > kBulletHitRadius || std::fabs(dy) > kBulletHitRadius) {
+            if (!axisCrossedOrClose(preMoveX[i], bullets_[i].x, preMoveX[j], bullets_[j].x, kBulletHitRadius) ||
+                !axisCrossedOrClose(preMoveY[i], bullets_[i].y, preMoveY[j], bullets_[j].y, kBulletHitRadius)) {
                 continue;
             }
 
@@ -493,7 +517,14 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
             }
 
             if (a.isSpecial && b.isSpecial) {
-                continue; // caso raro (cada jugador solo tiene un especial a la vez): no se anulan
+                // Caso raro (cada jugador solo tiene un especial a la vez):
+                // si chocan entre si, explotan las dos, cada una con su
+                // propio dueño para el dano directo que corresponda.
+                TriggerSpecialExplosion(map, midX, midY, a.ownerId, specialExplosions, explosionEvents);
+                TriggerSpecialExplosion(map, midX, midY, b.ownerId, specialExplosions, explosionEvents);
+                a.alive = false;
+                b.alive = false;
+                continue;
             }
 
             const bool bigExplosion = a.weaponLevel == 4 || b.weaponLevel == 4;

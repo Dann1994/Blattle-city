@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <vector>
 
 #include "TileMap.h"
 
@@ -37,9 +38,10 @@ public:
     void SetPosition(float cellX, float cellY) { x_ = cellX; y_ = cellY; }
     void SetFacing(Direction facing) { facing_ = facing; }
 
-    // other es el otro tanque contra el que colisionar (puede ser nullptr):
-    // no se pueden atravesar entre si, sin excepcion (sin empuje).
-    void Update(double dt, const PlayerInput& input, const TileMap& map, Tank* other);
+    // others son los demas tanques contra los que colisionar (activos, sin
+    // contarse a si mismo): no se pueden atravesar entre si, sin excepcion
+    // (sin empuje).
+    void Update(double dt, const PlayerInput& input, const TileMap& map, const std::vector<Tank*>& others);
 
     float X() const { return x_; }
     float Y() const { return y_; }
@@ -58,7 +60,7 @@ public:
     // varios frames via TickRecoil (no es un salto instantaneo). Si algo lo
     // bloquea a mitad de camino (mapa u otro tanque), se corta ahi.
     void StartRecoil(float distanceCells);
-    void TickRecoil(double dt, const TileMap& map, Tank* other);
+    void TickRecoil(double dt, const TileMap& map, const std::vector<Tank*>& others);
 
     void SetFireMode(FireMode mode) { fireMode_ = mode; }
     FireMode GetFireMode() const { return fireMode_; }
@@ -74,6 +76,11 @@ public:
     // Llamar al agarrar el item Estrella: sube de nivel si no esta al maximo;
     // si ya esta en nivel 4, en cambio carga el disparo especial (maximo 1).
     void PickupStar();
+
+    // Item Pistola (seccion custom): sube directo a nivel 4 y deja cargado
+    // el disparo especial de una, sin importar el nivel que tuviera antes.
+    // Si ya estaba en nivel 4, esto es lo que habilita el disparo especial.
+    void PickupGun();
 
     float BulletSpeed() const;
     int MaxBullets() const; // 1 salvo nivel 3+ (doble disparo)
@@ -119,12 +126,30 @@ public:
     void TickFreeze(double dt);
     bool IsFrozen() const { return freezeTimer_ > 0.0; }
 
+    // Vidas (item Tanque/Vida extra, seccion 6): arranca en 3. Al morir se
+    // llama LoseLife(); si ya no quedan, el tanque queda Eliminate()d (fuera
+    // de la partida, no vuelve a respawnear) y quien llama debe manejarlo.
+    int Lives() const { return lives_; }
+    void AddLife() { lives_ = std::min(lives_ + 1, 9); }
+    void LoseLife() {
+        if (lives_ > 0) {
+            --lives_;
+        }
+    }
+    bool IsOutOfLives() const { return lives_ <= 0; }
+
+    // Fuera de la partida (se quedo sin vidas): no se mueve, no dispara, no
+    // se dibuja. No hay forma de volver de este estado (habria que arrancar
+    // partida de nuevo, ver Game::ResetState).
+    void Eliminate() { eliminated_ = true; }
+    bool IsEliminated() const { return eliminated_; }
+
 private:
-    bool IsPositionBlocked(float newX, float newY, const TileMap& map, const Tank* other) const;
-    bool TryMove(float dx, float dy, const TileMap& map, Tank* other);
-    bool TryMoveWithAssist(float dx, float dy, const TileMap& map, Tank* other);
-    bool TrySlidePerpendicularY(float dx, const TileMap& map, Tank* other);
-    bool TrySlidePerpendicularX(float dy, const TileMap& map, Tank* other);
+    bool IsPositionBlocked(float newX, float newY, const TileMap& map, const std::vector<Tank*>& others) const;
+    bool TryMove(float dx, float dy, const TileMap& map, const std::vector<Tank*>& others);
+    bool TryMoveWithAssist(float dx, float dy, const TileMap& map, const std::vector<Tank*>& others);
+    bool TrySlidePerpendicularY(float dx, const TileMap& map, const std::vector<Tank*>& others);
+    bool TrySlidePerpendicularX(float dy, const TileMap& map, const std::vector<Tank*>& others);
 
     float x_ = 0.0f;
     float y_ = 0.0f;
@@ -145,6 +170,8 @@ private:
     float recoilRemaining_ = 0.0f; // celdas que le quedan por retroceder (ver StartRecoil/TickRecoil)
     float recoilDx_ = 0.0f;
     float recoilDy_ = 0.0f;
+    int lives_ = 3;
+    bool eliminated_ = false;
 };
 
 } // namespace bc

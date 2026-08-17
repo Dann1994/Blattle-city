@@ -67,8 +67,9 @@ void PowerUpSystem::Update(double dt, const TileMap& map) {
 
     spawnTimer_ -= dt;
     if (spawnTimer_ <= 0.0) {
-        std::uniform_int_distribution<int> typeDist(0, 1);
-        SpawnAt(typeDist(Rng()) == 0 ? PowerUpType::Star : PowerUpType::Helmet, map);
+        constexpr PowerUpType kTypes[4] = {PowerUpType::Star, PowerUpType::Helmet, PowerUpType::Gun, PowerUpType::Life};
+        std::uniform_int_distribution<int> typeDist(0, 3);
+        SpawnAt(kTypes[typeDist(Rng())], map);
     }
 }
 

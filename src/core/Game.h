@@ -47,12 +47,29 @@ private:
     // (ver Game.cpp). Llamada desde Init() y desde el boton de prueba ESC.
     void ResetState();
 
-    // Reutilizable: vuelve a ubicar al jugador 1/2 en su punto de spawn
+    // Reutilizable: vuelve a ubicar al jugador 1/2/3 en su punto de spawn
     // inicial y dispara el destello ahi. Pensado para reusarse al iniciar un
     // nivel o cuando el jugador pierde una vida (Fase 3/4), ademas del boton
     // de prueba (R) y de la destruccion por la propia explosion especial.
     void RespawnPlayer1();
     void RespawnPlayer2();
+    void RespawnPlayer3();
+    void RespawnPlayer4();
+    void RespawnByOwnerId(int ownerId);
+
+    // Activa o desactiva un jugador (teclas 1/2/3, seccion de prueba): al
+    // activarlo, reinicia su tanque de cero y lo respawnea; al desactivarlo,
+    // el flag pasa a false y Update()/Render() simplemente dejan de tocar a
+    // ese jugador (no se mueve, no dispara, no es blanco de nada, no se
+    // dibuja) hasta que se vuelva a activar. Distinto de Eliminate(): esto es
+    // reversible, pensado solo para probar con menos jugadores en pantalla.
+    void SetPlayerActive(bool& activeFlag, Tank& tank, SpawnFlash& spawn, float spawnX, float spawnY, bool active);
+
+    // Punto unico al que llegan todas las formas de morir (fuego amigo,
+    // explosion especial, choque directo del especial): resta 1 vida y, si
+    // todavia le quedan, respawnea; si no, Eliminate() (no vuelve a jugar
+    // hasta reiniciar la partida).
+    void HandlePlayerDeath(Tank& tank, int ownerId);
 
     // Aplica el dano de las explosiones especiales de este frame a un
     // tanque (ownerId identifica cual, para reconocer un choque directo -
@@ -81,10 +98,15 @@ private:
     bool ProcessFriendlyFireDamageHit(Tank& tank, int shooterWeaponLevel);
 
     // Movimiento, disparo (normal y especial) y recogida de power-ups de un
-    // tanque para este frame; comun a P1 y P2. No toca nada relacionado con
-    // las balas ya en vuelo ni las explosiones (eso se procesa una sola vez
-    // para todos los tanques, ver Update()).
-    void UpdatePlayer(Tank& tank, PlayerInput& input, SpawnFlash& spawn, int ownerId, Tank* other, double fixedDt);
+    // tanque para este frame; comun a todos los jugadores activos. No toca
+    // nada relacionado con las balas ya en vuelo ni las explosiones (eso se
+    // procesa una sola vez para todos los tanques, ver Update()). others son
+    // los demas tanques activos (para colision), sin contarse a si mismo.
+    void UpdatePlayer(Tank& tank, PlayerInput& input, SpawnFlash& spawn, int ownerId, const std::vector<Tank*>& others, double fixedDt);
+
+    // Arma la lista de tanques activos (para colision con others) excluyendo
+    // al de excludeOwnerId, ver UpdatePlayer.
+    std::vector<Tank*> ActiveOthers(int excludeOwnerId);
 
     // Dibuja el destello de aparicion (mientras dura) o el tanque + escudo.
     void RenderTank(const Tank& tank, const SpawnFlash& spawn, const TankSpriteSet& sprites, const MapViewport& viewport);
@@ -95,6 +117,8 @@ private:
 
     static constexpr int kPlayer1Id = 0;
     static constexpr int kPlayer2Id = 1;
+    static constexpr int kPlayer3Id = 2;
+    static constexpr int kPlayer4Id = 3;
 
     TileMap map_;
     Tank player1_;
@@ -103,12 +127,28 @@ private:
     SpawnFlash player1Spawn_;
     float player1SpawnX_ = 0.0f;
     float player1SpawnY_ = 0.0f;
+    bool player1Active_ = true;
     Tank player2_;
     PlayerInput input2_;
     TankSpriteSet player2Sprites_;
     SpawnFlash player2Spawn_;
     float player2SpawnX_ = 0.0f;
     float player2SpawnY_ = 0.0f;
+    bool player2Active_ = false;
+    Tank player3_;
+    PlayerInput input3_;
+    TankSpriteSet player3Sprites_;
+    SpawnFlash player3Spawn_;
+    float player3SpawnX_ = 0.0f;
+    float player3SpawnY_ = 0.0f;
+    bool player3Active_ = false;
+    Tank player4_;
+    PlayerInput input4_;
+    TankSpriteSet player4Sprites_;
+    SpawnFlash player4Spawn_;
+    float player4SpawnX_ = 0.0f;
+    float player4SpawnY_ = 0.0f;
+    bool player4Active_ = false;
     BulletSystem bullets_;
     BulletSpriteSet bulletSprites_;
     BulletImpactSystem bulletImpacts_;
@@ -120,6 +160,8 @@ private:
     PowerUpSystem powerUps_;
     Texture2D starTexture_{};
     Texture2D helmetTexture_{};
+    Texture2D gunTexture_{};
+    Texture2D lifeTexture_{};
     Texture2D brickUnitTextures_[2]{}; // ver BrickUnit.h: 0 = liso, 1 = esquina/junta
     Texture2D steelUnitTexture_{};      // ver SteelUnit.h: unico frame, se repite en la grilla 2x2
     SpawnFlashSprites spawnFlashSprites_;

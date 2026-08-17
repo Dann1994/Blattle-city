@@ -34,6 +34,11 @@ void Tank::PickupStar() {
     }
 }
 
+void Tank::PickupGun() {
+    weaponLevel_ = kMaxWeaponLevel;
+    specialShotCharges_ = 1;
+}
+
 bool Tank::HasSpecialShotReady() const {
     return weaponLevel_ == kMaxWeaponLevel && specialShotCharges_ > 0;
 }
@@ -149,19 +154,19 @@ void Tank::StartRecoil(float distanceCells) {
     recoilRemaining_ = distanceCells;
 }
 
-void Tank::TickRecoil(double dt, const TileMap& map, Tank* other) {
+void Tank::TickRecoil(double dt, const TileMap& map, const std::vector<Tank*>& others) {
     if (recoilRemaining_ <= 0.0f) {
         return;
     }
     const float step = std::min(recoilRemaining_, static_cast<float>(kRecoilSpeed * dt));
-    if (TryMove(recoilDx_ * step, recoilDy_ * step, map, other)) {
+    if (TryMove(recoilDx_ * step, recoilDy_ * step, map, others)) {
         recoilRemaining_ -= step;
     } else {
         recoilRemaining_ = 0.0f; // choco contra algo (pared, bloque u otro tanque): se corta ahi
     }
 }
 
-bool Tank::IsPositionBlocked(float newX, float newY, const TileMap& map, const Tank* other) const {
+bool Tank::IsPositionBlocked(float newX, float newY, const TileMap& map, const std::vector<Tank*>& others) const {
     const float left = newX;
     const float right = newX + kTankSize;
     const float top = newY;
@@ -176,8 +181,11 @@ bool Tank::IsPositionBlocked(float newX, float newY, const TileMap& map, const T
     }
 
     // No se pueden atravesar entre tanques: si la posicion nueva se solapa
-    // con el otro, queda bloqueado (sin empuje, ver feedback: traia problemas).
-    if (other != nullptr) {
+    // con alguno de los otros, queda bloqueado (sin empuje, ver feedback: traia problemas).
+    for (const Tank* other : others) {
+        if (other == nullptr) {
+            continue;
+        }
         float oLeft = 0.0f, oRight = 0.0f, oTop = 0.0f, oBottom = 0.0f;
         other->GetBounds(oLeft, oRight, oTop, oBottom);
         const bool overlaps = left < oRight && right > oLeft && top < oBottom && bottom > oTop;
@@ -189,11 +197,11 @@ bool Tank::IsPositionBlocked(float newX, float newY, const TileMap& map, const T
     return false;
 }
 
-bool Tank::TryMove(float dx, float dy, const TileMap& map, Tank* other) {
+bool Tank::TryMove(float dx, float dy, const TileMap& map, const std::vector<Tank*>& others) {
     const float newX = x_ + dx;
     const float newY = y_ + dy;
 
-    if (IsPositionBlocked(newX, newY, map, other)) {
+    if (IsPositionBlocked(newX, newY, map, others)) {
         return false;
     }
 
@@ -202,8 +210,8 @@ bool Tank::TryMove(float dx, float dy, const TileMap& map, Tank* other) {
     return true;
 }
 
-bool Tank::TryMoveWithAssist(float dx, float dy, const TileMap& map, Tank* other) {
-    if (TryMove(dx, dy, map, other)) {
+bool Tank::TryMoveWithAssist(float dx, float dy, const TileMap& map, const std::vector<Tank*>& others) {
+    if (TryMove(dx, dy, map, others)) {
         return true;
     }
 
@@ -216,26 +224,26 @@ bool Tank::TryMoveWithAssist(float dx, float dy, const TileMap& map, Tank* other
     // el tanque el mismo). Ver TryMove: sigue siendo la unica fuente de
     // verdad sobre colision real, asi que esto nunca atraviesa una pared.
     if (dx != 0.0f) {
-        return TrySlidePerpendicularY(dx, map, other);
+        return TrySlidePerpendicularY(dx, map, others);
     }
     if (dy != 0.0f) {
-        return TrySlidePerpendicularX(dy, map, other);
+        return TrySlidePerpendicularX(dy, map, others);
     }
     return false;
 }
 
-bool Tank::TrySlidePerpendicularY(float dx, const TileMap& map, Tank* other) {
+bool Tank::TrySlidePerpendicularY(float dx, const TileMap& map, const std::vector<Tank*>& others) {
     const float rowTop = std::floor(y_);
     const float fracBottom = y_ - rowTop;    // fraccion del sprite metida en la fila de abajo
     const float fracTop = 1.0f - fracBottom; // fraccion metida en la fila de arriba
 
     // Probar alinear del todo a la fila de arriba: si funciona, la fila de
     // abajo era la que chocaba, y solo se acepta si esa porcion era minoria.
-    if (fracBottom > 0.001f && fracBottom < 0.5f && TryMove(dx, -fracBottom, map, other)) {
+    if (fracBottom > 0.001f && fracBottom < 0.5f && TryMove(dx, -fracBottom, map, others)) {
         return true;
     }
     // Simetrico: alinear a la fila de abajo si la de arriba era la que chocaba.
-    if (fracTop > 0.001f && fracTop < 0.5f && TryMove(dx, fracTop, map, other)) {
+    if (fracTop > 0.001f && fracTop < 0.5f && TryMove(dx, fracTop, map, others)) {
         return true;
     }
     // Huecos a caballo entre 2 celdas (p.ej. rebajados por igual de dos
@@ -244,33 +252,33 @@ bool Tank::TrySlidePerpendicularY(float dx, const TileMap& map, Tank* other) {
     // haber lugar. Se prueba al final, solo si las dos alineaciones enteras
     // ya fallaron.
     const float deltaToCenter = 0.5f - fracBottom;
-    if (std::fabs(deltaToCenter) > 0.001f && TryMove(dx, deltaToCenter, map, other)) {
+    if (std::fabs(deltaToCenter) > 0.001f && TryMove(dx, deltaToCenter, map, others)) {
         return true;
     }
     return false;
 }
 
-bool Tank::TrySlidePerpendicularX(float dy, const TileMap& map, Tank* other) {
+bool Tank::TrySlidePerpendicularX(float dy, const TileMap& map, const std::vector<Tank*>& others) {
     const float colLeft = std::floor(x_);
     const float fracRight = x_ - colLeft;    // fraccion del sprite metida en la columna de la derecha
     const float fracLeft = 1.0f - fracRight; // fraccion metida en la columna de la izquierda
 
-    if (fracRight > 0.001f && fracRight < 0.5f && TryMove(-fracRight, dy, map, other)) {
+    if (fracRight > 0.001f && fracRight < 0.5f && TryMove(-fracRight, dy, map, others)) {
         return true;
     }
-    if (fracLeft > 0.001f && fracLeft < 0.5f && TryMove(fracLeft, dy, map, other)) {
+    if (fracLeft > 0.001f && fracLeft < 0.5f && TryMove(fracLeft, dy, map, others)) {
         return true;
     }
     // Simetrico al caso de TrySlidePerpendicularY: hueco a caballo entre 2
     // columnas, centrado en el borde entre ellas.
     const float deltaToCenter = 0.5f - fracRight;
-    if (std::fabs(deltaToCenter) > 0.001f && TryMove(deltaToCenter, dy, map, other)) {
+    if (std::fabs(deltaToCenter) > 0.001f && TryMove(deltaToCenter, dy, map, others)) {
         return true;
     }
     return false;
 }
 
-void Tank::Update(double dt, const PlayerInput& input, const TileMap& map, Tank* other) {
+void Tank::Update(double dt, const PlayerInput& input, const TileMap& map, const std::vector<Tank*>& others) {
     if (freezeTimer_ > 0.0) {
         animTimer_ = 0.0; // paralizado: no se mueve, no anima, mantiene la ultima direccion
         return;
@@ -283,16 +291,16 @@ void Tank::Update(double dt, const PlayerInput& input, const TileMap& map, Tank*
     // direccion presionada, incluso si el movimiento queda bloqueado.
     if (input.moveUp) {
         facing_ = Direction::Up;
-        moved = TryMoveWithAssist(0.0f, -distance, map, other);
+        moved = TryMoveWithAssist(0.0f, -distance, map, others);
     } else if (input.moveDown) {
         facing_ = Direction::Down;
-        moved = TryMoveWithAssist(0.0f, distance, map, other);
+        moved = TryMoveWithAssist(0.0f, distance, map, others);
     } else if (input.moveLeft) {
         facing_ = Direction::Left;
-        moved = TryMoveWithAssist(-distance, 0.0f, map, other);
+        moved = TryMoveWithAssist(-distance, 0.0f, map, others);
     } else if (input.moveRight) {
         facing_ = Direction::Right;
-        moved = TryMoveWithAssist(distance, 0.0f, map, other);
+        moved = TryMoveWithAssist(distance, 0.0f, map, others);
     }
 
     if (moved) {
