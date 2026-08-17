@@ -353,8 +353,36 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
         const float distance = static_cast<float>(bullet.speed * dt);
         const float newX = bullet.x + dx * distance;
         const float newY = bullet.y + dy * distance;
-        const int cellX = static_cast<int>(std::floor(newX));
-        const int cellY = static_cast<int>(std::floor(newY));
+        int cellX = static_cast<int>(std::floor(newX));
+        int cellY = static_cast<int>(std::floor(newY));
+
+        // El sprite de la bala tiene un poco de ancho real (bullet_*.png,
+        // ~3-4px en una celda de 16px) pero la colision solo miraba el punto
+        // central: si la bala pasaba muy pegada al borde de un bloque, el
+        // sprite lo rozaba visualmente sin que el punto central llegara a
+        // entrar en esa celda, y el impacto nunca se registraba. Si la celda
+        // central esta vacia pero el margen del sprite (perpendicular al
+        // movimiento) roza la celda de al lado y esa si bloquea, se usa esa
+        // celda en su lugar.
+        constexpr float kBulletHitHalfWidth = 0.09f;
+        const bool centerBlocks = map.InBounds(cellX, cellY) && TileBlocksShots(map.At(cellX, cellY).type);
+        if (!centerBlocks && dx != 0.0f) {
+            const int cellYLow = static_cast<int>(std::floor(newY - kBulletHitHalfWidth));
+            const int cellYHigh = static_cast<int>(std::floor(newY + kBulletHitHalfWidth));
+            if (cellYLow != cellY && map.InBounds(cellX, cellYLow) && TileBlocksShots(map.At(cellX, cellYLow).type)) {
+                cellY = cellYLow;
+            } else if (cellYHigh != cellY && map.InBounds(cellX, cellYHigh) && TileBlocksShots(map.At(cellX, cellYHigh).type)) {
+                cellY = cellYHigh;
+            }
+        } else if (!centerBlocks && dy != 0.0f) {
+            const int cellXLow = static_cast<int>(std::floor(newX - kBulletHitHalfWidth));
+            const int cellXHigh = static_cast<int>(std::floor(newX + kBulletHitHalfWidth));
+            if (cellXLow != cellX && map.InBounds(cellXLow, cellY) && TileBlocksShots(map.At(cellXLow, cellY).type)) {
+                cellX = cellXLow;
+            } else if (cellXHigh != cellX && map.InBounds(cellXHigh, cellY) && TileBlocksShots(map.At(cellXHigh, cellY).type)) {
+                cellX = cellXHigh;
+            }
+        }
 
         // Si la bala recien entra a esta celda (la posicion de ANTES de
         // este paso todavia no habia cruzado el borde de entrada), la capa
@@ -454,6 +482,17 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
             continue;
         }
 
+        if (hitType == TileType::Base) {
+            // El aguila: un solo impacto (de cualquier nivel de arma) la
+            // destruye, sin capas ni HP como ladrillo/hierro. Quien llama
+            // (Game::Update) detecta que la celda dejo de ser Base y termina
+            // la partida.
+            map.At(cellX, cellY).type = TileType::Empty;
+            impacts.Spawn(newX, newY, bullet.weaponLevel == 4);
+            bullet.alive = false;
+            continue;
+        }
+
         if (TileBlocksShots(hitType)) {
             impacts.Spawn(newX, newY, bullet.weaponLevel == 4);
             bullet.alive = false;
@@ -546,6 +585,21 @@ bool BulletSystem::KillBulletsHittingBox(int excludeOwnerId, float left, float r
         if (bullet.x >= left && bullet.x <= right && bullet.y >= top && bullet.y <= bottom) {
             impacts.Spawn(bullet.x, bullet.y, bullet.weaponLevel == 4);
             outShooterWeaponLevels.push_back(bullet.weaponLevel);
+            bullet.alive = false;
+            hitAny = true;
+        }
+    }
+    return hitAny;
+}
+
+bool BulletSystem::KillEnemyBulletsHittingBox(float left, float right, float top, float bottom, BulletImpactSystem& impacts) {
+    bool hitAny = false;
+    for (Bullet& bullet : bullets_) {
+        if (!bullet.alive || bullet.isSpecial || bullet.ownerId < kEnemyOwnerIdBase) {
+            continue;
+        }
+        if (bullet.x >= left && bullet.x <= right && bullet.y >= top && bullet.y <= bottom) {
+            impacts.Spawn(bullet.x, bullet.y, bullet.weaponLevel == 4);
             bullet.alive = false;
             hitAny = true;
         }

@@ -38,6 +38,10 @@ public:
     void SetPosition(float cellX, float cellY) { x_ = cellX; y_ = cellY; }
     void SetFacing(Direction facing) { facing_ = facing; }
 
+    // Multiplicador de velocidad de movimiento (1.0 = normal). Pensado para
+    // los tanques enemigo "Basico", mas lentos que los del jugador.
+    void SetSpeedMultiplier(float multiplier) { speedMultiplier_ = multiplier; }
+
     // others son los demas tanques contra los que colisionar (activos, sin
     // contarse a si mismo): no se pueden atravesar entre si, sin excepcion
     // (sin empuje).
@@ -151,6 +155,12 @@ private:
     bool TrySlidePerpendicularY(float dx, const TileMap& map, const std::vector<Tank*>& others);
     bool TrySlidePerpendicularX(float dy, const TileMap& map, const std::vector<Tank*>& others);
 
+    // Celda de hielo debajo del centro del tanque (ver TileType::Ice): sobre
+    // hielo, el tanque patina un poco (sigue deslizando un instante al
+    // soltar el movimiento, ver Update) y ademas se enfria el doble de
+    // rapido (ver TickHeatDecay).
+    bool IsOnIce(const TileMap& map) const;
+
     float x_ = 0.0f;
     float y_ = 0.0f;
     Direction facing_ = Direction::Up;
@@ -170,6 +180,10 @@ private:
     float recoilRemaining_ = 0.0f; // celdas que le quedan por retroceder (ver StartRecoil/TickRecoil)
     float recoilDx_ = 0.0f;
     float recoilDy_ = 0.0f;
+    float iceCoastDx_ = 0.0f; // impulso restante al patinar sobre hielo sin apretar nada (ver Update)
+    float iceCoastDy_ = 0.0f;
+    bool onIce_ = false; // calculado en el Update anterior; lo usa TickHeatDecay (se llama antes que Update en Game::UpdatePlayer)
+    float speedMultiplier_ = 1.0f;
     int lives_ = 3;
     bool eliminated_ = false;
 };

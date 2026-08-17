@@ -17,12 +17,25 @@ std::mt19937& Rng() {
 }
 } // namespace
 
-void PowerUpSystem::SpawnAt(PowerUpType type, const TileMap& map) {
+namespace {
+bool CellOccupiedByTank(int x, int y, const std::vector<TankOccupiedBounds>& occupiedByTanks) {
+    const float cellLeft = static_cast<float>(x);
+    const float cellTop = static_cast<float>(y);
+    for (const TankOccupiedBounds& t : occupiedByTanks) {
+        if (t.left < cellLeft + 1.0f && t.right > cellLeft && t.top < cellTop + 1.0f && t.bottom > cellTop) {
+            return true;
+        }
+    }
+    return false;
+}
+} // namespace
+
+void PowerUpSystem::SpawnAt(PowerUpType type, const TileMap& map, const std::vector<TankOccupiedBounds>& occupiedByTanks) {
     std::vector<std::pair<int, int>> openCells;
     for (int y = 0; y < map.Height(); ++y) {
         for (int x = 0; x < map.Width(); ++x) {
             const TileType cellType = map.At(x, y).type;
-            if (!TileBlocksMovement(cellType) && cellType != TileType::Base) {
+            if (!TileBlocksMovement(cellType) && cellType != TileType::Base && !CellOccupiedByTank(x, y, occupiedByTanks)) {
                 openCells.emplace_back(x, y);
             }
         }
@@ -43,12 +56,12 @@ void PowerUpSystem::SpawnAt(PowerUpType type, const TileMap& map) {
     blinkVisible_ = true;
 }
 
-void PowerUpSystem::ForceSpawn(PowerUpType type, const TileMap& map) {
-    SpawnAt(type, map);
+void PowerUpSystem::ForceSpawn(PowerUpType type, const TileMap& map, const std::vector<TankOccupiedBounds>& occupiedByTanks) {
+    SpawnAt(type, map, occupiedByTanks);
     spawnTimer_ = kSpawnInterval;
 }
 
-void PowerUpSystem::Update(double dt, const TileMap& map) {
+void PowerUpSystem::Update(double dt, const TileMap& map, const std::vector<TankOccupiedBounds>& occupiedByTanks) {
     if (powerUp_.alive) {
         lifeTimer_ -= dt;
 
@@ -67,9 +80,14 @@ void PowerUpSystem::Update(double dt, const TileMap& map) {
 
     spawnTimer_ -= dt;
     if (spawnTimer_ <= 0.0) {
-        constexpr PowerUpType kTypes[4] = {PowerUpType::Star, PowerUpType::Helmet, PowerUpType::Gun, PowerUpType::Life};
-        std::uniform_int_distribution<int> typeDist(0, 3);
-        SpawnAt(kTypes[typeDist(Rng())], map);
+        // Probabilidades pedidas (suman 100%): Vida 3%, Pistola 8%, Granada
+        // 10%, Pala 12%, Estrella 17%, Reloj 20%, Escudo 30%.
+        constexpr PowerUpType kTypes[7] = {
+            PowerUpType::Life, PowerUpType::Gun, PowerUpType::Grenade, PowerUpType::Shovel,
+            PowerUpType::Star, PowerUpType::Clock, PowerUpType::Helmet,
+        };
+        std::discrete_distribution<int> typeDist({3.0, 8.0, 10.0, 12.0, 17.0, 20.0, 30.0});
+        SpawnAt(kTypes[typeDist(Rng())], map, occupiedByTanks);
     }
 }
 

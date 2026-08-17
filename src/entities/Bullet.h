@@ -4,6 +4,12 @@
 
 namespace bc {
 
+// Los jugadores usan ownerId 0-3 (ver Game::kPlayer1Id..kPlayer4Id); los
+// tanques enemigo arrancan aca en adelante (uno distinto por tanque), para
+// poder distinguir el origen de una bala/impacto de un vistazo sin
+// necesitar una lista aparte de "que IDs son enemigos".
+constexpr int kEnemyOwnerIdBase = 1000;
+
 struct Bullet {
     float x = 0.0f; // celdas, centro de la bala
     float y = 0.0f;

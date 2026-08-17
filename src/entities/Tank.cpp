@@ -24,6 +24,12 @@ constexpr double kHeatDecayInterval = 0.5; // segundos entre cada paso de enfria
 constexpr float kHeatDecayStep = 5.0f;
 constexpr int kChipHitsPerLevel = 2; // fuego amigo nivel 2 disparado por un rival nivel 2
 constexpr float kRecoilSpeed = 5.0f; // celdas por segundo a las que se anima el retroceso
+
+// Hielo (seccion custom): patina un poco al soltar el movimiento (sigue
+// deslizando por inercia) y se enfria el doble de rapido.
+constexpr float kIceCoastDecay = 0.94f;         // por frame: cuanto le queda del impulso patinando sin apretar nada
+constexpr float kIceCoastStopEpsilon = 0.0008f; // celdas: por debajo de esto, se corta del todo
+constexpr float kIceHeatDecayMultiplier = 2.0f;
 }
 
 void Tank::PickupStar() {
@@ -76,10 +82,13 @@ void Tank::TickHeatDecay(double dt) {
     if (shootCooldownTimer_ > 0.0 || heatPercent_ <= 0.0f) {
         return; // bloqueado por sobrecalentamiento (se mantiene fijo) o ya en 0
     }
+    // onIce_ es el hielo del Update anterior (este se llama antes en
+    // Game::UpdatePlayer): un frame de atraso, imperceptible a 60fps.
+    const float step = onIce_ ? kHeatDecayStep * kIceHeatDecayMultiplier : kHeatDecayStep;
     heatDecayAccumulator_ += dt;
     while (heatDecayAccumulator_ >= kHeatDecayInterval && heatPercent_ > 0.0f) {
         heatDecayAccumulator_ -= kHeatDecayInterval;
-        heatPercent_ = std::max(0.0f, heatPercent_ - kHeatDecayStep);
+        heatPercent_ = std::max(0.0f, heatPercent_ - step);
     }
 }
 
@@ -278,29 +287,70 @@ bool Tank::TrySlidePerpendicularX(float dy, const TileMap& map, const std::vecto
     return false;
 }
 
+bool Tank::IsOnIce(const TileMap& map) const {
+    const int cellX = static_cast<int>(std::floor(x_ + 0.5f));
+    const int cellY = static_cast<int>(std::floor(y_ + 0.5f));
+    return map.InBounds(cellX, cellY) && map.At(cellX, cellY).type == TileType::Ice;
+}
+
 void Tank::Update(double dt, const PlayerInput& input, const TileMap& map, const std::vector<Tank*>& others) {
+    onIce_ = IsOnIce(map);
+
     if (freezeTimer_ > 0.0) {
         animTimer_ = 0.0; // paralizado: no se mueve, no anima, mantiene la ultima direccion
         return;
     }
 
-    const float distance = static_cast<float>(kMoveSpeedByLevel[weaponLevel_ - 1] * dt);
-    bool moved = false;
+    const float distance = static_cast<float>(kMoveSpeedByLevel[weaponLevel_ - 1] * dt) * speedMultiplier_;
+    float moveDx = 0.0f, moveDy = 0.0f;
+    bool hasInput = true;
 
     // Sin diagonales (seccion 4.3): el tanque siempre rota hacia la ultima
-    // direccion presionada, incluso si el movimiento queda bloqueado.
+    // direccion presionada, incluso si el movimiento queda bloqueado. Girar
+    // y arrancar a moverse es instantaneo incluso sobre hielo; lo unico que
+    // patina es seguir deslizando un instante al soltar el movimiento (ver
+    // mas abajo).
     if (input.moveUp) {
         facing_ = Direction::Up;
-        moved = TryMoveWithAssist(0.0f, -distance, map, others);
+        moveDy = -distance;
     } else if (input.moveDown) {
         facing_ = Direction::Down;
-        moved = TryMoveWithAssist(0.0f, distance, map, others);
+        moveDy = distance;
     } else if (input.moveLeft) {
         facing_ = Direction::Left;
-        moved = TryMoveWithAssist(-distance, 0.0f, map, others);
+        moveDx = -distance;
     } else if (input.moveRight) {
         facing_ = Direction::Right;
-        moved = TryMoveWithAssist(distance, 0.0f, map, others);
+        moveDx = distance;
+    } else {
+        hasInput = false;
+    }
+
+    if (hasInput) {
+        iceCoastDx_ = moveDx;
+        iceCoastDy_ = moveDy;
+    } else if (onIce_ && (iceCoastDx_ != 0.0f || iceCoastDy_ != 0.0f)) {
+        // No se aprieta nada, pero sigue deslizando por inercia sobre el
+        // hielo: un solo eje a la vez (el mismo que traia), nunca diagonal.
+        iceCoastDx_ *= kIceCoastDecay;
+        iceCoastDy_ *= kIceCoastDecay;
+        if (std::fabs(iceCoastDx_) < kIceCoastStopEpsilon) iceCoastDx_ = 0.0f;
+        if (std::fabs(iceCoastDy_) < kIceCoastStopEpsilon) iceCoastDy_ = 0.0f;
+        moveDx = iceCoastDx_;
+        moveDy = iceCoastDy_;
+    } else {
+        iceCoastDx_ = 0.0f;
+        iceCoastDy_ = 0.0f;
+    }
+
+    bool moved = false;
+    if (moveDx != 0.0f || moveDy != 0.0f) {
+        moved = TryMoveWithAssist(moveDx, moveDy, map, others);
+        if (!moved) {
+            // Choco patinando (o caminando): se corta el resto del impulso.
+            iceCoastDx_ = 0.0f;
+            iceCoastDy_ = 0.0f;
+        }
     }
 
     if (moved) {

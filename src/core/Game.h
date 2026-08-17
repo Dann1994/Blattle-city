@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <vector>
 
 #include <raylib.h>
@@ -9,6 +10,8 @@
 #include "BulletImpactSystem.h"
 #include "BulletSprites.h"
 #include "BulletSystem.h"
+#include "EnemySprites.h"
+#include "EnemySystem.h"
 #include "PowerUpSystem.h"
 #include "ShieldSprites.h"
 #include "SpawnFlash.h"
@@ -43,6 +46,12 @@ private:
     void Render(double interpolationAlpha);
     void Shutdown();
 
+    // Suma el mando gamepadId al input (no reemplaza el teclado, cualquiera
+    // de los dos mueve/dispara). D-pad + stick izquierdo mueven; los botones
+    // de disparo/especial se ajustan segun kGamepadShootButton/kGamepadSpecialButton
+    // (ver ProcessInput). No hace nada si ese mando no esta conectado.
+    void ApplyGamepadInput(PlayerInput& input, int gamepadId) const;
+
     // Recarga el mapa y reinicia tanque/balas/power-ups a estado inicial
     // (ver Game.cpp). Llamada desde Init() y desde el boton de prueba ESC.
     void ResetState();
@@ -64,6 +73,21 @@ private:
     // dibuja) hasta que se vuelva a activar. Distinto de Eliminate(): esto es
     // reversible, pensado solo para probar con menos jugadores en pantalla.
     void SetPlayerActive(bool& activeFlag, Tank& tank, SpawnFlash& spawn, float spawnX, float spawnY, bool active);
+
+    // Item Pala (seccion custom): convierte en hierro temporal las hasta 8
+    // celdas alrededor de la base (las que sean Ladrillo o Vacio; el hierro
+    // ya existente se deja como esta), y guarda su tipo original en
+    // fortifiedCells_ para poder devolverlas como estaban al vencer el
+    // timer (ver TickBaseFortification, llamado desde Update).
+    void ApplyShovelFortification();
+    void TickBaseFortification(double dt);
+
+    // Recorta las celdas de ladrillo del anillo alrededor de la base (ver
+    // ResetState) a solo 2 unidades de espesor (de las 4 de la grilla),
+    // pegadas al lado que da hacia la base. Se llama una vez despues de
+    // cargar el nivel; no afecta a ningun otro ladrillo del mapa.
+    void ThinBrickCellVertical(int x, int y, bool keepBottomHalf);
+    void ThinBrickCellHorizontal(int x, int y, bool keepRightHalf);
 
     // Punto unico al que llegan todas las formas de morir (fuego amigo,
     // explosion especial, choque directo del especial): resta 1 vida y, si
@@ -108,12 +132,23 @@ private:
     // al de excludeOwnerId, ver UpdatePlayer.
     std::vector<Tank*> ActiveOthers(int excludeOwnerId);
 
+    // Caja de cada tanque activo (todos, sin excluir ninguno), para que los
+    // power-ups no aparezcan encima de un jugador (ver PowerUpSystem::Update).
+    std::vector<TankOccupiedBounds> ActiveTankBounds() const;
+
     // Dibuja el destello de aparicion (mientras dura) o el tanque + escudo.
     void RenderTank(const Tank& tank, const SpawnFlash& spawn, const TankSpriteSet& sprites, const MapViewport& viewport);
 
+    // Dibuja un tanque enemigo "Basico" (sprite propio, ver EnemySprites).
+    void RenderEnemy(const Enemy& enemy, const MapViewport& viewport);
+
+    // Arma la lista de tanques de jugador activos (sin excluir a nadie), para
+    // colision/deteccion/blanco de los enemigos (ver EnemySystem::Update).
+    std::vector<Tank*> ActivePlayerTanks();
+
     // Panel de nivel de arma / disparo especial / calor / paralisis de un
-    // tanque, anclado en (x,y).
-    void RenderPlayerHud(const Tank& tank, const char* label, int x, int y);
+    // tanque, alineado al centro: centerX es el centro horizontal del bloque.
+    void RenderPlayerHud(const Tank& tank, const char* label, int centerX, int y);
 
     static constexpr int kPlayer1Id = 0;
     static constexpr int kPlayer2Id = 1;
@@ -151,6 +186,9 @@ private:
     bool player4Active_ = false;
     BulletSystem bullets_;
     BulletSpriteSet bulletSprites_;
+    EnemySystem enemies_;
+    EnemySprites enemySprites_;
+    std::vector<std::array<int, 2>> enemySpawnPositions_;
     BulletImpactSystem bulletImpacts_;
     BulletImpactSprites bulletImpactSprites_;
     SpecialExplosionSystem specialExplosions_;
@@ -162,14 +200,37 @@ private:
     Texture2D helmetTexture_{};
     Texture2D gunTexture_{};
     Texture2D lifeTexture_{};
+    Texture2D grenadeTexture_{};
+    Texture2D shovelTexture_{};
+    Texture2D clockTexture_{};
     Texture2D brickUnitTextures_[2]{}; // ver BrickUnit.h: 0 = liso, 1 = esquina/junta
     Texture2D steelUnitTexture_{};      // ver SteelUnit.h: unico frame, se repite en la grilla 2x2
+    Texture2D treesTexture_{};          // arbusto: bloque entero (no por unidad), se dibuja encima de tanques/balas
+    Texture2D waterTextures_[2]{};       // agua: 2 frames que alternan para animar el oleaje
+    Texture2D iceTexture_{};             // hielo: hace patinar al tanque y enfria el arma el doble de rapido (ver Tank)
+    Texture2D baseEagleTexture_{};       // aguila (Tanques.png, misma fila que agua/arbusto/hielo): objeto a defender, un impacto la destruye y termina la partida
+    Texture2D hudLifeIconTexture_{};     // icono chico (Tanques.png, junto a "1P") que reemplaza la "X" en "P1 X 3" del HUD
+    Texture2D stageFlagIconTexture_{};   // icono de bandera (Tanques.png, junto a "STAGE"), arriba de la barra izquierda
     SpawnFlashSprites spawnFlashSprites_;
     ShieldSprites shieldSprites_;
     double screenShakeTimer_ = 0.0; // onda expansiva del disparo especial
     FriendlyFireMode friendlyFireMode_ = FriendlyFireMode::Off;
+    bool showGrid_ = true; // grilla de referencia sobre el mapa (boton de prueba F6), para ubicar bloques al diseñar el escenario
+    int lastGamepadButtonPressed_ = -1; // debug: para calibrar a que numero de boton responde cada mando (ver Render)
+    bool gameOver_ = false; // el aguila (TileType::Base) recibio un impacto: se congela todo hasta reiniciar (ESC)
     int windowWidth_ = 0;
     int windowHeight_ = 0;
+
+    // Item Pala: ver ApplyShovelFortification/TickBaseFortification.
+    struct FortifiedCell {
+        int x = 0;
+        int y = 0;
+        TileType originalType = TileType::Empty;
+    };
+    int basePositionX_ = -1;
+    int basePositionY_ = -1;
+    std::vector<FortifiedCell> fortifiedCells_;
+    double baseFortifyTimer_ = 0.0;
 };
 
 } // namespace bc

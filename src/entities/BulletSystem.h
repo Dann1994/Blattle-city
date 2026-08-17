@@ -75,6 +75,13 @@ public:
     // disparo cada bala.
     bool KillBulletsHittingBox(int excludeOwnerId, float left, float right, float top, float bottom, BulletImpactSystem& impacts, std::vector<int>& outShooterWeaponLevels);
 
+    // Igual que KillBulletsHittingBox, pero solo cuenta balas de tanques
+    // enemigo (ownerId >= kEnemyOwnerIdBase): un jugador siempre puede
+    // recibir dano de un enemigo, sin importar el modo de fuego amigo (que
+    // solo aplica entre jugadores, ver Game::ApplyFriendlyFire). Devuelve
+    // true si mato al menos una.
+    bool KillEnemyBulletsHittingBox(float left, float right, float top, float bottom, BulletImpactSystem& impacts);
+
 private:
     // Destruye unidades minimas alrededor del punto de impacto (hitX,hitY):
     // si el golpe cae en una fila/columna central de la grilla 4x4, destruye
