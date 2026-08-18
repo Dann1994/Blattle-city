@@ -12,6 +12,7 @@
 #include "BulletSystem.h"
 #include "EnemySprites.h"
 #include "EnemySystem.h"
+#include "FastEnemySystem.h"
 #include "PowerUpSystem.h"
 #include "ShieldSprites.h"
 #include "SpawnFlash.h"
@@ -140,7 +141,7 @@ private:
     void RenderTank(const Tank& tank, const SpawnFlash& spawn, const TankSpriteSet& sprites, const MapViewport& viewport);
 
     // Dibuja un tanque enemigo "Basico" (sprite propio, ver EnemySprites).
-    void RenderEnemy(const Enemy& enemy, const MapViewport& viewport);
+    void RenderEnemy(const Enemy& enemy, const EnemySprites& sprites, const MapViewport& viewport);
 
     // Arma la lista de tanques de jugador activos (sin excluir a nadie), para
     // colision/deteccion/blanco de los enemigos (ver EnemySystem::Update).
@@ -188,6 +189,8 @@ private:
     BulletSpriteSet bulletSprites_;
     EnemySystem enemies_;
     EnemySprites enemySprites_;
+    FastEnemySystem fastEnemies_;
+    EnemySprites fastEnemySprites_;
     std::vector<std::array<int, 2>> enemySpawnPositions_;
     BulletImpactSystem bulletImpacts_;
     BulletImpactSprites bulletImpactSprites_;

@@ -95,7 +95,8 @@ void Game::Init() {
     player2Sprites_.LoadPlayer2(BC_ASSETS_DIR);
     player3Sprites_.LoadPlayer3(BC_ASSETS_DIR);
     player4Sprites_.LoadPlayer4(BC_ASSETS_DIR);
-    enemySprites_.Load(BC_ASSETS_DIR);
+    enemySprites_.Load(BC_ASSETS_DIR, "basic");
+    fastEnemySprites_.Load(BC_ASSETS_DIR, "fast");
     bulletSprites_.Load(BC_ASSETS_DIR);
     starTexture_ = LoadTexture((std::string(BC_ASSETS_DIR) + "sprites/powerup_star.png").c_str());
     SetTextureFilter(starTexture_, TEXTURE_FILTER_POINT);
@@ -213,6 +214,9 @@ void Game::ResetState() {
     if (!enemySpawnPositions_.empty()) {
         enemies_.SpawnAt(static_cast<float>(enemySpawnPositions_[0][0]), static_cast<float>(enemySpawnPositions_[0][1]));
     }
+    // Tanque "Rapido" (prueba): no aparece solo, se agrega a mano con
+    // Shift+F10 mientras no haya oleadas de verdad.
+    fastEnemies_ = FastEnemySystem{};
 
     // Al empezar (o reiniciar con ESC) solo esta presente el jugador 1; P2/P3/P4
     // se traen con las teclas 1/2/3/4 (ver ProcessInput y SetPlayerActive).
@@ -496,12 +500,31 @@ void Game::ProcessInput() {
         powerUps_.ForceSpawn(PowerUpType::Clock, map_, ActiveTankBounds());
     }
 
-    // Boton de prueba: agrega otro enemigo (rotando entre los puntos de
-    // spawn del nivel), mientras no haya oleadas de verdad todavia.
+    // Boton de prueba: agrega otro enemigo "Basico" (rotando entre los
+    // puntos de spawn del nivel), mientras no haya oleadas de verdad
+    // todavia. Shift+F10 agrega uno "Rapido" en su lugar.
     if (IsKeyPressed(KEY_F10) && !enemySpawnPositions_.empty()) {
-        const size_t spawnIndex = enemies_.Enemies().size() % enemySpawnPositions_.size();
-        const std::array<int, 2>& pos = enemySpawnPositions_[spawnIndex];
-        enemies_.SpawnAt(static_cast<float>(pos[0]), static_cast<float>(pos[1]));
+        if (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)) {
+            const size_t spawnIndex = fastEnemies_.Enemies().size() % enemySpawnPositions_.size();
+            const std::array<int, 2>& pos = enemySpawnPositions_[spawnIndex];
+            fastEnemies_.SpawnAt(static_cast<float>(pos[0]), static_cast<float>(pos[1]));
+        } else {
+            const size_t spawnIndex = enemies_.Enemies().size() % enemySpawnPositions_.size();
+            const std::array<int, 2>& pos = enemySpawnPositions_[spawnIndex];
+            enemies_.SpawnAt(static_cast<float>(pos[0]), static_cast<float>(pos[1]));
+        }
+    }
+
+    // Botones de prueba: bajan/suben el nivel de agresividad de los
+    // enemigos (1 a 5, 3 es el comportamiento de base), para los 2 tipos a
+    // la vez. Ver EnemySystem::SetAggressivenessLevel.
+    if (IsKeyPressed(KEY_F11)) {
+        enemies_.SetAggressivenessLevel(enemies_.AggressivenessLevel() - 1);
+        fastEnemies_.SetAggressivenessLevel(fastEnemies_.AggressivenessLevel() - 1);
+    }
+    if (IsKeyPressed(KEY_F12)) {
+        enemies_.SetAggressivenessLevel(enemies_.AggressivenessLevel() + 1);
+        fastEnemies_.SetAggressivenessLevel(fastEnemies_.AggressivenessLevel() + 1);
     }
 
     // Boton de prueba: rota el modo de fuego amigo Off -> nivel 1 -> nivel 2 -> Off.
@@ -593,7 +616,7 @@ void Game::HandlePlayerDeath(Tank& tank, int ownerId) {
 
 std::vector<Tank*> Game::ActiveOthers(int excludeOwnerId) {
     std::vector<Tank*> others;
-    others.reserve(3 + enemies_.Enemies().size());
+    others.reserve(3 + enemies_.Enemies().size() + fastEnemies_.Enemies().size());
     if (player1Active_ && excludeOwnerId != kPlayer1Id) {
         others.push_back(&player1_);
     }
@@ -606,9 +629,15 @@ std::vector<Tank*> Game::ActiveOthers(int excludeOwnerId) {
     if (player4Active_ && excludeOwnerId != kPlayer4Id) {
         others.push_back(&player4_);
     }
-    // Los jugadores tambien chocan contra los tanques enemigo (antes los
-    // atravesaban: solo los enemigos chequeaban colision contra ellos).
+    // Los jugadores tambien chocan contra los tanques enemigo, de cualquier
+    // tipo (antes los atravesaban: solo los enemigos chequeaban colision
+    // contra ellos).
     for (Enemy& enemy : enemies_.Enemies()) {
+        if (enemy.alive) {
+            others.push_back(&enemy.tank);
+        }
+    }
+    for (Enemy& enemy : fastEnemies_.Enemies()) {
         if (enemy.alive) {
             others.push_back(&enemy.tank);
         }
@@ -802,7 +831,24 @@ void Game::Update(double fixedDt) {
     if (player3Active_) UpdatePlayer(player3_, input3_, player3Spawn_, kPlayer3Id, ActiveOthers(kPlayer3Id), fixedDt);
     if (player4Active_) UpdatePlayer(player4_, input4_, player4Spawn_, kPlayer4Id, ActiveOthers(kPlayer4Id), fixedDt);
 
-    enemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), static_cast<float>(basePositionX_), static_cast<float>(basePositionY_));
+    // Cada sistema de enemigos recibe al otro como obstaculo de colision
+    // (nunca como blanco de combate: eso solo aplica a jugadores reales).
+    std::vector<Tank*> basicEnemyTanks;
+    basicEnemyTanks.reserve(enemies_.Enemies().size());
+    for (Enemy& enemy : enemies_.Enemies()) {
+        if (enemy.alive) {
+            basicEnemyTanks.push_back(&enemy.tank);
+        }
+    }
+    std::vector<Tank*> fastEnemyTanks;
+    fastEnemyTanks.reserve(fastEnemies_.Enemies().size());
+    for (Enemy& enemy : fastEnemies_.Enemies()) {
+        if (enemy.alive) {
+            fastEnemyTanks.push_back(&enemy.tank);
+        }
+    }
+    enemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), fastEnemyTanks, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_));
+    fastEnemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), basicEnemyTanks, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_));
 
     // Estado actual de los tanques presentes para que BulletSystem resuelva
     // un choque directo del disparo especial (ver TankCombatState).
@@ -976,7 +1022,7 @@ void Game::RenderTank(const Tank& tank, const SpawnFlash& spawn, const TankSprit
     }
 }
 
-void Game::RenderEnemy(const Enemy& enemy, const MapViewport& viewport) {
+void Game::RenderEnemy(const Enemy& enemy, const EnemySprites& sprites, const MapViewport& viewport) {
     if (!enemy.alive) {
         return;
     }
@@ -997,12 +1043,20 @@ void Game::RenderEnemy(const Enemy& enemy, const MapViewport& viewport) {
         return;
     }
 
-    // Tanque enemigo "Basico": fila 5 de Tanques.png, paleta gris/teal de P3
-    // (ver EnemySprites) — sprite propio, no el del Jugador 3.
-    const Texture2D enemyTex = enemySprites_.Get(enemy.tank.Facing(), enemy.tank.AnimFrame());
+    // Sprite propio del tipo de enemigo (fila 5 = Basico, fila 6 = Rapido de
+    // Tanques.png, paleta gris/teal de P3) — no el del Jugador 3.
+    const Texture2D enemyTex = sprites.Get(enemy.tank.Facing(), enemy.tank.AnimFrame());
     const Rectangle src{0.0f, 0.0f, static_cast<float>(enemyTex.width), static_cast<float>(enemyTex.height)};
     const Rectangle dst{viewport.TileToScreenX(enemy.tank.X()), viewport.TileToScreenY(enemy.tank.Y()), viewport.tileScreenSize, viewport.tileScreenSize};
     DrawTexturePro(enemyTex, src, dst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+
+    // Debug (temporal, para diagnosticar si se traba): modo de movimiento
+    // actual (ver Enemy::debugMode) + cuantos frames seguidos lleva sin
+    // poder moverse, en cuanto pasa medio segundo.
+    if (enemy.stuckFrames > 30) {
+        const char* label = TextFormat("%c %.1fs", enemy.debugMode, enemy.stuckFrames / 60.0f);
+        DrawText(label, static_cast<int>(dst.x), static_cast<int>(dst.y) - 12, 10, RED);
+    }
 }
 
 void Game::RenderPlayerHud(const Tank& tank, const char* label, int centerX, int y) {
@@ -1218,7 +1272,10 @@ void Game::Render(double /*interpolationAlpha*/) {
     if (player4Active_) RenderTank(player4_, player4Spawn_, player4Sprites_, viewport);
 
     for (const Enemy& enemy : enemies_.Enemies()) {
-        RenderEnemy(enemy, viewport);
+        RenderEnemy(enemy, enemySprites_, viewport);
+    }
+    for (const Enemy& enemy : fastEnemies_.Enemies()) {
+        RenderEnemy(enemy, fastEnemySprites_, viewport);
     }
 
     const float pixelScale = viewport.tileScreenSize / static_cast<float>(kTileSize);
@@ -1338,6 +1395,11 @@ void Game::Render(double /*interpolationAlpha*/) {
         // Cuantos enemigos faltan eliminar para terminar el nivel. Todavia
         // no hay enemigos (Fase 3), asi que por ahora siempre muestra 0.
         DrawText("Enemigos: 0", panelLeftX, stageNumberY + 40, 20, RAYWHITE);
+
+        // Debug (temporal): nivel de agresividad actual (F11/F12 para
+        // bajar/subir, ver EnemySystem::SetAggressivenessLevel).
+        const char* aggroLabel = TextFormat("Agresividad: %d", enemies_.AggressivenessLevel());
+        DrawText(aggroLabel, panelLeftX, stageNumberY + 70, 16, YELLOW);
     }
     const int panelCenterX = windowWidth_ - panelW / 2;
     const int p4Y = windowHeight_ - hudMargin - blockH;
@@ -1409,6 +1471,7 @@ void Game::Shutdown() {
     player3Sprites_.Unload();
     player4Sprites_.Unload();
     enemySprites_.Unload();
+    fastEnemySprites_.Unload();
     CloseWindow();
 }
 
