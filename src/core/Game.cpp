@@ -593,7 +593,7 @@ void Game::HandlePlayerDeath(Tank& tank, int ownerId) {
 
 std::vector<Tank*> Game::ActiveOthers(int excludeOwnerId) {
     std::vector<Tank*> others;
-    others.reserve(3);
+    others.reserve(3 + enemies_.Enemies().size());
     if (player1Active_ && excludeOwnerId != kPlayer1Id) {
         others.push_back(&player1_);
     }
@@ -605,6 +605,13 @@ std::vector<Tank*> Game::ActiveOthers(int excludeOwnerId) {
     }
     if (player4Active_ && excludeOwnerId != kPlayer4Id) {
         others.push_back(&player4_);
+    }
+    // Los jugadores tambien chocan contra los tanques enemigo (antes los
+    // atravesaban: solo los enemigos chequeaban colision contra ellos).
+    for (Enemy& enemy : enemies_.Enemies()) {
+        if (enemy.alive) {
+            others.push_back(&enemy.tank);
+        }
     }
     return others;
 }
@@ -795,7 +802,7 @@ void Game::Update(double fixedDt) {
     if (player3Active_) UpdatePlayer(player3_, input3_, player3Spawn_, kPlayer3Id, ActiveOthers(kPlayer3Id), fixedDt);
     if (player4Active_) UpdatePlayer(player4_, input4_, player4Spawn_, kPlayer4Id, ActiveOthers(kPlayer4Id), fixedDt);
 
-    enemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, ActivePlayerTanks(), static_cast<float>(basePositionX_), static_cast<float>(basePositionY_));
+    enemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), static_cast<float>(basePositionX_), static_cast<float>(basePositionY_));
 
     // Estado actual de los tanques presentes para que BulletSystem resuelva
     // un choque directo del disparo especial (ver TankCombatState).
@@ -875,11 +882,16 @@ void Game::Update(double fixedDt) {
     if (!specialExplosionEvents_.empty()) {
         // Efecto global, no depende de la distancia (a diferencia del dano):
         // toda explosion especial sacude la pantalla y paraliza a TODOS los
-        // tanques presentes.
+        // tanques presentes, jugadores y enemigos por igual.
         screenShakeTimer_ = kScreenShakeDuration;
         for (const ActivePlayerRef& ref : activePlayers) {
             if (ref.active) {
                 ref.tank->Freeze(kSpecialImpactFreezeDuration);
+            }
+        }
+        for (Enemy& enemy : enemies_.Enemies()) {
+            if (enemy.alive) {
+                enemy.tank.Freeze(kSpecialImpactFreezeDuration);
             }
         }
     }
@@ -968,6 +980,23 @@ void Game::RenderEnemy(const Enemy& enemy, const MapViewport& viewport) {
     if (!enemy.alive) {
         return;
     }
+
+    if (enemy.spawn.IsActive()) {
+        // Mismo destello de aparicion que los jugadores (ver RenderTank).
+        const Texture2D flashTex = spawnFlashSprites_.Get(enemy.spawn.FrameIndex());
+        const Rectangle flashSrc{0.0f, 0.0f, static_cast<float>(flashTex.width), static_cast<float>(flashTex.height)};
+        const Rectangle flashDst{viewport.TileToScreenX(enemy.spawn.X()), viewport.TileToScreenY(enemy.spawn.Y()), viewport.tileScreenSize, viewport.tileScreenSize};
+        DrawTexturePro(flashTex, flashSrc, flashDst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+        return;
+    }
+
+    // Paralizado (onda del disparo especial, igual que los jugadores):
+    // parpadea en vez de dibujarse fijo (ver kFrozenBlinkInterval).
+    const bool blinkedOut = enemy.tank.IsFrozen() && (static_cast<int>(GetTime() / kFrozenBlinkInterval) % 2 == 0);
+    if (blinkedOut) {
+        return;
+    }
+
     // Tanque enemigo "Basico": fila 5 de Tanques.png, paleta gris/teal de P3
     // (ver EnemySprites) — sprite propio, no el del Jugador 3.
     const Texture2D enemyTex = enemySprites_.Get(enemy.tank.Facing(), enemy.tank.AnimFrame());

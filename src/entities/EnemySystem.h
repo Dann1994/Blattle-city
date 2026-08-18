@@ -10,10 +10,12 @@ namespace bc {
 
 class BulletSystem;
 class BulletImpactSystem;
+class SpecialExplosionSystem;
 
 // Radio de deteccion de jugadores (celdas, centro a centro): dentro de esto
-// la prioridad pasa a AttackPlayer; fuera, vuelve a SeekBase.
-constexpr float kEnemyDetectionRadius = 2.0f;
+// la prioridad pasa a AttackPlayer; fuera (el jugador se alejo), vuelve a
+// SeekBase (su mision principal es destruir el aguila).
+constexpr float kEnemyDetectionRadius = 4.0f;
 
 // Tanque "Basico": la mitad de veloz que un tanque de jugador nivel 1.
 constexpr float kEnemySpeedMultiplier = 0.5f;
@@ -27,7 +29,9 @@ public:
 
     // baseX/baseY: objetivo por defecto (SeekBase). playerTanks: tanques de
     // jugador activos, para colision, deteccion y como blanco (AttackPlayer).
-    void Update(double dt, TileMap& map, BulletSystem& bullets, BulletImpactSystem& impacts, const std::vector<Tank*>& playerTanks, float baseX, float baseY);
+    // specialExplosions recibe la animacion chica de muerte (igual que
+    // Game::DestroyTank para los jugadores) cuando un enemigo es destruido.
+    void Update(double dt, TileMap& map, BulletSystem& bullets, BulletImpactSystem& impacts, SpecialExplosionSystem& specialExplosions, const std::vector<Tank*>& playerTanks, float baseX, float baseY);
 
     std::vector<Enemy>& Enemies() { return enemies_; }
     const std::vector<Enemy>& Enemies() const { return enemies_; }

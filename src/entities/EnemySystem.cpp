@@ -6,55 +6,112 @@
 
 #include "BulletImpactSystem.h"
 #include "BulletSystem.h"
+#include "SpecialExplosionSystem.h"
 
 namespace bc {
 
 namespace {
-// Cuantos frames seguidos sin moverse antes de probar el eje perpendicular
-// (esquivar) y, si sigue sin poder, disparar al ladrillo que tenga enfrente.
+// Cuantos frames seguidos sin moverse antes de considerarla atascada: prueba
+// una direccion distinta a la bloqueada (rota entre las 4) y dispara mas
+// seguido mientras dure (ver kShootIntervalStuck*).
 constexpr int kDodgeStuckFrames = 20;  // ~0.33s a 60fps
-constexpr int kShootStuckFrames = 45;  // ~0.75s a 60fps: le da tiempo a esquivar antes de tirotear
-// Si sigue trabada despues de probar una direccion de esquive, cuanto espera
-// antes de probar la siguiente (rota entre las 4, ver kDodgeCandidateCount).
+// Si la direccion de esquive elegida sigue trabada despues de un rato, prueba
+// la siguiente (siempre que kDodgeCandidateCount candidatas).
 constexpr int kDodgeRotateFrames = 15;  // ~0.25s a 60fps
 constexpr int kDodgeCandidateCount = 4;
 
-// Cuanto tiempo se queda comprometida con una direccion antes de poder
-// re-elegir hacia el objetivo (ver Enemy::redecideTimer). Un rango, no un
-// valor fijo, para que no giren todas sincronizadas. Bastante mas amplio que
-// antes: para que a veces se note una excursion larga hacia un costado (o
-// hacia arriba) antes de volver a orientarse hacia el objetivo.
-constexpr double kRedecideMinInterval = 0.4;
-constexpr double kRedecideMaxInterval = 2.0;
-// Cerca del aguila (ver kBaseAggroRadius) se re-orienta mas seguido, para que
-// la persecucion se sienta mas insistente en vez de seguir deambulando.
-constexpr double kRedecideMaxIntervalAggro = 0.9;
+// Tramo recto: cuantas celdas recorre en una direccion antes de re-elegir.
+// "focused" (ver kBaseAggroRadius) re-elige mucho mas seguido, para que la
+// persecucion se note mas insistente en vez de seguir de largo un buen rato.
+constexpr int kMinCellsPerLeg = 1;
+constexpr int kMaxCellsPerLeg = 5;
+constexpr int kMinCellsPerLegFocused = 1;
+constexpr int kMaxCellsPerLegFocused = 2;
+// Pegada al aguila: re-elige cada celda, sin comprometerse a un tramo largo.
+constexpr int kCellsPerLegBaseAggro = 1;
 
-// Distancia (celdas, centro a centro) a la que el aguila pasa a ser una
-// prioridad activa (ver PickAggressiveWanderDirection): sigue sin ser un
-// camino 100% directo, pero mucho mas insistente que el deambular normal.
-constexpr float kBaseAggroRadius = 4.0f;
-// Al esquivar (ver kDodgeStuckFrames) se compromete un rato mas corto: solo
-// lo suficiente para despegarse del obstaculo, no para alejarse del objetivo.
-constexpr double kRedecideDodgeInterval = 0.35;
+// Cerca del aguila (buscandola, no atacando a un jugador) su atencion se
+// concentra mas en llegar a ella (ver ChooseDirection, "focused").
+constexpr float kBaseAggroRadius = 5.0f;
 
-// Cada cuanto intenta un disparo "porque si", sin necesitar estar trabada ni
-// tener a un jugador enfilado (asi se siente mas vivo, como el original).
-constexpr double kRandomShootMinInterval = 1.2;
-constexpr double kRandomShootMaxInterval = 3.5;
+// Pesos [principal, secundario, aleja-secundario, aleja-principal] segun que
+// tan enfocada esta la IA. Lejos: tendencia pareja hacia el objetivo, con
+// harto margen para deambular. Enfocada (atacando a un jugador): bastante
+// mas insistente. Con el aguila encima (ver kBaseAggroRadius): casi sin
+// margen para deambular, muy decidida.
+constexpr std::array<double, 4> kWanderWeights{45.0, 45.0, 5.0, 5.0};
+constexpr std::array<double, 4> kFocusedWeights{60.0, 35.0, 3.0, 2.0};
+constexpr std::array<double, 4> kBaseAggroWeights{88.0, 10.0, 1.0, 1.0};
+
+// Que tan lejos por delante del tanque se chequea si una direccion esta
+// bloqueada antes de comprometerse a ella (ver WouldBeBlocked).
+constexpr float kLookaheadStep = 0.2f;
+
+// "Reflejo" de cuerpo a cuerpo: si un jugador entra a 1 casilla de distancia,
+// 50% de chance de girar a encararlo y dispararle de una para matarlo, sin
+// esperar el temporizador normal (ver Update). Se sortea una sola vez por
+// acercamiento (ver Enemy::playerWasAdjacent), no en cada frame que se queda
+// pegado.
+constexpr float kAdjacentSnapRadius = 1.0f;
+constexpr double kAdjacentSnapChance = 0.50;
+
+// Buscando el aguila (no atacando a un jugador) y a 2 casillas o mas: en
+// cada disparo "de rutina" (no uno ya encarado, ver aimedShot), 40% de
+// chance de girar a apuntarle antes de tirar, en vez de disparar para
+// donde este mirando.
+constexpr float kBaseSnapShotMinRadius = 2.0f;
+constexpr double kBaseSnapShotChance = 0.40;
+
+// Cuanto tarda el proximo disparo despues de que el anterior impacto o
+// desaparecio (ver Enemy::shootTimer/bulletWasAlive): normal, mas seguido
+// atacando a un jugador, y mas seguido todavia si esta atascada.
+constexpr double kShootIntervalMin = 3.0;
+constexpr double kShootIntervalMax = 5.0;
+constexpr double kShootIntervalAttackMin = 1.0;
+constexpr double kShootIntervalAttackMax = 2.0;
+constexpr double kShootIntervalStuckMin = 0.4;
+constexpr double kShootIntervalStuckMax = 1.0;
+// Cerca del aguila (ver kBaseAggroRadius), como fallback para cuando todavia
+// no la tiene encarada (ver aimedShot en Update: si la tiene encarada, ni
+// siquiera espera este intervalo).
+constexpr double kShootIntervalBaseAggroMin = 0.8;
+constexpr double kShootIntervalBaseAggroMax = 1.5;
+
+// Tolerancia de alineacion para el disparo "ya encarado" (ver aimedShot):
+// contra un jugador (blanco chico y movil) se pide bastante precision;
+// contra el aguila, mucho mas laxo — no hace falta estar perfilado, alcanza
+// con estar en una posicion desde la que la bala pueda llegar a pegarle.
+constexpr float kPlayerAlignTolerance = 0.4f;
+constexpr float kBaseAlignTolerance = 0.9f;
+
+// Si el camino directo hacia el aguila esta bloqueado por LADRILLO (no
+// acero, agua u otro tanque), se queda plantada encarandolo y lo tirotea en
+// vez de rodearlo, hasta este limite de frames atascada (despues, se rinde
+// y vuelve al esquive normal por las dudas).
+constexpr int kBrickBreachPatienceFrames = 240;  // ~4s a 60fps
 
 std::mt19937& Rng() {
     static std::mt19937 engine(std::random_device{}());
     return engine;
 }
 
-double RandomRedecideInterval(bool aggro) {
-    std::uniform_real_distribution<double> dist(kRedecideMinInterval, aggro ? kRedecideMaxIntervalAggro : kRedecideMaxInterval);
+int RandomCellsPerLeg() {
+    std::uniform_int_distribution<int> dist(kMinCellsPerLeg, kMaxCellsPerLeg);
     return dist(Rng());
 }
 
-double RandomShootInterval() {
-    std::uniform_real_distribution<double> dist(kRandomShootMinInterval, kRandomShootMaxInterval);
+int RandomCellsPerLegFocused() {
+    std::uniform_int_distribution<int> dist(kMinCellsPerLegFocused, kMaxCellsPerLegFocused);
+    return dist(Rng());
+}
+
+double RandomInRange(double lo, double hi) {
+    std::uniform_real_distribution<double> dist(lo, hi);
+    return dist(Rng());
+}
+
+bool RollChance(double probability) {
+    std::bernoulli_distribution dist(probability);
     return dist(Rng());
 }
 
@@ -68,37 +125,52 @@ Direction Opposite(Direction dir) {
     return dir;
 }
 
-// Elige una de las 4 direcciones con tendencia hacia el objetivo, pero sin
-// ser tan directa: preferred/fallback (los 2 ejes que acercan) pesan mas,
-// pero tambien puede alejarse un poco (mas seguido en el eje secundario, que
-// es lo que se nota como "a veces sube" o "se va mas largo para el costado"
-// cuando el objetivo esta abajo/al costado).
-// aggro=true: cerca del aguila (ver kBaseAggroRadius), mucho mas insistente
-// en cerrar distancia (85% de las veces por uno de los 2 ejes que acercan),
-// pero sin llegar a ser un camino 100% directo como al atacar a un jugador.
-Direction PickWanderDirection(Direction preferred, Direction fallback, bool aggro) {
-    const Direction awayFromFallback = Opposite(fallback);
-    const Direction awayFromPreferred = Opposite(preferred);
-    const std::array<Direction, 4> options{preferred, fallback, awayFromFallback, awayFromPreferred};
-    if (aggro) {
-        std::discrete_distribution<int> dist({60.0, 25.0, 12.0, 3.0});
-        return options[dist(Rng())];
+// Un paso chico en esa direccion desde donde esta ahora chocaria contra el
+// mapa o contra otro tanque: razona sobre el obstaculo antes de comprometerse
+// a una direccion, en vez de solo reaccionar despues de quedar atascada.
+bool WouldBeBlocked(const Tank& tank, Direction dir, const TileMap& map, const std::vector<Tank*>& others) {
+    float left = 0.0f, right = 0.0f, top = 0.0f, bottom = 0.0f;
+    tank.GetBounds(left, right, top, bottom);
+    float dx = 0.0f, dy = 0.0f;
+    DirectionVector(dir, dx, dy);
+    const float newLeft = left + dx * kLookaheadStep;
+    const float newRight = right + dx * kLookaheadStep;
+    const float newTop = top + dy * kLookaheadStep;
+    const float newBottom = bottom + dy * kLookaheadStep;
+
+    if (newLeft < 0.0f || newTop < 0.0f || newRight > static_cast<float>(map.Width()) || newBottom > static_cast<float>(map.Height())) {
+        return true;
     }
-    std::discrete_distribution<int> dist({45.0, 27.0, 20.0, 8.0});
-    return options[dist(Rng())];
+    if (map.IsBoxBlocked(newLeft, newRight, newTop, newBottom)) {
+        return true;
+    }
+    for (const Tank* other : others) {
+        if (other == nullptr) {
+            continue;
+        }
+        float oLeft = 0.0f, oRight = 0.0f, oTop = 0.0f, oBottom = 0.0f;
+        other->GetBounds(oLeft, oRight, oTop, oBottom);
+        if (newLeft < oRight && newRight > oLeft && newTop < oBottom && newBottom > oTop) {
+            return true;
+        }
+    }
+    return false;
 }
 
-// Hay un ladrillo justo pegado al frente del tanque, en la direccion que mira.
-bool IsFacingBrick(const TileMap& map, const Tank& tank) {
+// Hay un ladrillo (destructible, a diferencia del acero) justo pegado al
+// frente en esa direccion: a diferencia de WouldBeBlocked, distingue el
+// material porque a un ladrillo conviene plantarse y tirotearlo, mientras
+// que a un bloqueo de acero/agua/tanque conviene rodearlo (ver Update).
+bool IsBrickAhead(const Tank& tank, Direction dir, const TileMap& map) {
     float left = 0.0f, right = 0.0f, top = 0.0f, bottom = 0.0f;
     tank.GetBounds(left, right, top, bottom);
     float checkX = (left + right) * 0.5f;
     float checkY = (top + bottom) * 0.5f;
-    switch (tank.Facing()) {
-        case Direction::Up:    checkY = top - 0.1f; break;
-        case Direction::Down:  checkY = bottom + 0.1f; break;
-        case Direction::Left:  checkX = left - 0.1f; break;
-        case Direction::Right: checkX = right + 0.1f; break;
+    switch (dir) {
+        case Direction::Up:    checkY = top - kLookaheadStep; break;
+        case Direction::Down:  checkY = bottom + kLookaheadStep; break;
+        case Direction::Left:  checkX = left - kLookaheadStep; break;
+        case Direction::Right: checkX = right + kLookaheadStep; break;
     }
     const int cx = static_cast<int>(std::floor(checkX));
     const int cy = static_cast<int>(std::floor(checkY));
@@ -108,18 +180,56 @@ bool IsFacingBrick(const TileMap& map, const Tank& tank) {
     return map.At(cx, cy).type == TileType::Brick;
 }
 
+// Elige una de las 4 direcciones con tendencia hacia el objetivo segun los
+// pesos [principal, secundario, aleja-secundario, aleja-principal] que le
+// pasen (ver kWanderWeights/kFocusedWeights/kBaseAggroWeights). Antes de
+// sortear, descarta las direcciones que chocarian de una (ver
+// WouldBeBlocked) repartiendo su peso entre las que quedan libres.
+Direction ChooseDirection(const Tank& tank, const TileMap& map, const std::vector<Tank*>& others, Direction primary, Direction secondary, const std::array<double, 4>& baseWeights) {
+    const Direction awaySecondary = Opposite(secondary);
+    const Direction awayPrimary = Opposite(primary);
+    const std::array<Direction, 4> options{primary, secondary, awaySecondary, awayPrimary};
+
+    std::array<double, 4> weights{0.0, 0.0, 0.0, 0.0};
+    double total = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        if (!WouldBeBlocked(tank, options[i], map, others)) {
+            weights[i] = baseWeights[i];
+            total += weights[i];
+        }
+    }
+    if (total <= 0.0) {
+        // Las 4 direcciones chocan (rincon/callejon sin salida): elige igual
+        // la de mas peso nominal, el esquive por atascamiento se hace cargo
+        // apenas quede trabada de verdad.
+        int best = 0;
+        for (int i = 1; i < 4; ++i) {
+            if (baseWeights[i] > baseWeights[best]) {
+                best = i;
+            }
+        }
+        return options[best];
+    }
+    std::discrete_distribution<int> dist(weights.begin(), weights.end());
+    return options[dist(Rng())];
+}
+
 // El tanque esta mirando hacia el objetivo (mismo pasillo, en la direccion
 // correcta): suficiente para animo de disparo simple, sin trazar linea de
 // vision real contra obstaculos (la IA no necesita puntaria perfecta).
-bool IsFacingTarget(const Tank& tank, float targetX, float targetY) {
-    constexpr float kAlignTolerance = 0.4f;
+// alignTolerance es cuanto puede estar corrida la otra coordenada y seguir
+// contando como "encarado" (celdas): con el jugador se pide bastante
+// precision (kPlayerAlignTolerance); con el aguila es mucho mas laxo (ver
+// kBaseAlignTolerance) porque no hace falta estar perfilado de una, solo
+// parado en una posicion desde la que la bala pueda llegar a pegarle.
+bool IsFacingTarget(const Tank& tank, float targetX, float targetY, float alignTolerance) {
     const float cx = tank.X() + 0.5f;
     const float cy = tank.Y() + 0.5f;
     switch (tank.Facing()) {
-        case Direction::Up:    return std::fabs(cx - targetX) < kAlignTolerance && targetY < cy;
-        case Direction::Down:  return std::fabs(cx - targetX) < kAlignTolerance && targetY > cy;
-        case Direction::Left:  return std::fabs(cy - targetY) < kAlignTolerance && targetX < cx;
-        case Direction::Right: return std::fabs(cy - targetY) < kAlignTolerance && targetX > cx;
+        case Direction::Up:    return std::fabs(cx - targetX) < alignTolerance && targetY < cy;
+        case Direction::Down:  return std::fabs(cx - targetX) < alignTolerance && targetY > cy;
+        case Direction::Left:  return std::fabs(cy - targetY) < alignTolerance && targetX < cx;
+        case Direction::Right: return std::fabs(cy - targetY) < alignTolerance && targetX > cx;
     }
     return false;
 }
@@ -132,11 +242,12 @@ void EnemySystem::SpawnAt(float x, float y) {
     enemy.tank.SetSpeedMultiplier(kEnemySpeedMultiplier);
     enemy.ownerId = nextOwnerId_++;
     enemy.alive = true;
-    enemy.randomShootTimer = RandomShootInterval();
+    enemy.shootTimer = RandomInRange(1.0, 2.5); // el primer disparo no espera el ciclo completo
+    enemy.spawn.Start(x, y); // destello de aparicion, igual que los jugadores
     enemies_.push_back(enemy);
 }
 
-void EnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, BulletImpactSystem& impacts, const std::vector<Tank*>& playerTanks, float baseX, float baseY) {
+void EnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, BulletImpactSystem& impacts, SpecialExplosionSystem& specialExplosions, const std::vector<Tank*>& playerTanks, float baseX, float baseY) {
     for (size_t i = 0; i < enemies_.size(); ++i) {
         Enemy& enemy = enemies_[i];
         if (!enemy.alive) {
@@ -144,17 +255,35 @@ void EnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, BulletI
         }
 
         enemy.tank.TickShootCooldown(dt);
+        enemy.tank.TickFreeze(dt);
 
-        // Muere de un solo impacto de bala de jugador, sin importar el nivel.
+        // Muere de un solo impacto de bala de jugador, sin importar el nivel:
+        // misma animacion chica de explosion que Game::DestroyTank usa para
+        // los jugadores.
         float eLeft = 0.0f, eRight = 0.0f, eTop = 0.0f, eBottom = 0.0f;
         enemy.tank.GetBounds(eLeft, eRight, eTop, eBottom);
         std::vector<int> hitLevels;
         if (bullets.KillBulletsHittingBox(enemy.ownerId, eLeft, eRight, eTop, eBottom, impacts, hitLevels)) {
+            specialExplosions.Spawn(enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, /*nativeScale=*/true);
             enemy.alive = false;
             continue;
         }
 
-        // Deteccion: el jugador activo mas cercano dentro del radio.
+        if (enemy.spawn.IsActive()) {
+            // Mientras dura el destello de aparicion (igual que los
+            // jugadores), no se mueve, no razona ni dispara.
+            enemy.spawn.Update(dt);
+            continue;
+        }
+
+        if (enemy.tank.IsFrozen()) {
+            // Paralizada (onda del disparo especial, igual que los
+            // jugadores): no se mueve, no razona ni dispara mientras dure.
+            continue;
+        }
+
+        // Deteccion: el jugador activo mas cercano dentro del radio. Fuera de
+        // ese radio (se alejo), vuelve a su mision principal: el aguila.
         const float ex = enemy.tank.X() + 0.5f;
         const float ey = enemy.tank.Y() + 0.5f;
         Tank* nearestPlayer = nullptr;
@@ -172,50 +301,82 @@ void EnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, BulletI
             }
         }
         enemy.state = (nearestPlayer != nullptr) ? EnemyState::AttackPlayer : EnemyState::SeekBase;
+        const bool stateChanged = enemy.state != enemy.previousState;
+        enemy.previousState = enemy.state;
+
+        // Reflejo de cuerpo a cuerpo: un jugador acaba de entrar a 1 casilla
+        // (ver kAdjacentSnapRadius). Se sortea una sola vez por acercamiento
+        // (playerWasAdjacent detecta el flanco de entrada), no en cada frame.
+        const bool playerAdjacentNow = (nearestPlayer != nullptr) && (nearestDist <= kAdjacentSnapRadius);
+        if (playerAdjacentNow && !enemy.playerWasAdjacent && RollChance(kAdjacentSnapChance)) {
+            const float pdx = nearestPlayer->X() - enemy.tank.X();
+            const float pdy = nearestPlayer->Y() - enemy.tank.Y();
+            const Direction snapDir = (std::fabs(pdx) >= std::fabs(pdy))
+                ? (pdx >= 0.0f ? Direction::Right : Direction::Left)
+                : (pdy >= 0.0f ? Direction::Down : Direction::Up);
+            enemy.tank.SetFacing(snapDir);
+            if (!bullets.HasAliveBullet(enemy.ownerId) && enemy.tank.CanShoot()) {
+                float muzzleX = 0.0f, muzzleY = 0.0f;
+                enemy.tank.MuzzlePosition(muzzleX, muzzleY);
+                bullets.TryShoot(enemy.ownerId, muzzleX, muzzleY, snapDir, enemy.tank.BulletSpeed(), 1, 1);
+            }
+        }
+        enemy.playerWasAdjacent = playerAdjacentNow;
 
         const float targetX = (enemy.state == EnemyState::AttackPlayer) ? (nearestPlayer->X() + 0.5f) : (baseX + 0.5f);
         const float targetY = (enemy.state == EnemyState::AttackPlayer) ? (nearestPlayer->Y() + 0.5f) : (baseY + 0.5f);
-
-        // Eje preferido: el de mayor diferencia hacia el objetivo.
         const float dx = targetX - ex;
         const float dy = targetY - ey;
-        const bool preferHorizontal = std::fabs(dx) >= std::fabs(dy);
-        const Direction horizDir = (dx >= 0.0f) ? Direction::Right : Direction::Left;
-        const Direction vertDir = (dy >= 0.0f) ? Direction::Down : Direction::Up;
-        const Direction preferred = preferHorizontal ? horizDir : vertDir;
-        const Direction fallback = preferHorizontal ? vertDir : horizDir;
-
-        // Cerca del aguila (buscandola, no atacando a un jugador): prioridad
-        // mas activa a destruirla, aunque sin ser un camino perfectamente
-        // directo (ver PickWanderDirection).
         const float distToTarget = std::sqrt(dx * dx + dy * dy);
-        const bool baseAggro = (enemy.state == EnemyState::SeekBase) && (distToTarget <= kBaseAggroRadius);
 
-        // Fiel al original: se mueve en linea recta un rato en vez de
-        // re-apuntar al objetivo cada frame (eso, con pasos tan chicos,
-        // termina viendose como si caminara en diagonal). Solo re-elige
-        // direccion cuando se le acaba el compromiso, cuando cambia de
-        // prioridad (SeekBase <-> AttackPlayer) o cuando esta atascada
-        // (ver stuckFrames), momento en que prueba una direccion distinta a
-        // la bloqueada para esquivar el obstaculo.
+        // Lejos, el eje horizontal siempre es el principal (tendencia fija).
+        // Pegada al aguila (ver kBaseAggroRadius), en cambio, el principal
+        // pasa a ser el que tenga mayor diferencia real: si ya esta a la
+        // misma altura pero lejos de costado, ataca por el costado en vez de
+        // insistir en bajar (antes solo la atacaba por arriba).
+        const Direction fixedPrimary = (dx >= 0.0f) ? Direction::Right : Direction::Left;
+        const Direction fixedSecondary = (dy >= 0.0f) ? Direction::Down : Direction::Up;
+        const bool baseAggro = (enemy.state == EnemyState::SeekBase) && (distToTarget <= kBaseAggroRadius);
+        const bool focused = (enemy.state == EnemyState::AttackPlayer) || baseAggro;
+        const bool horizontalIsBigger = std::fabs(dx) >= std::fabs(dy);
+        const Direction primary = baseAggro ? (horizontalIsBigger ? fixedPrimary : fixedSecondary) : fixedPrimary;
+        const Direction secondary = baseAggro ? (horizontalIsBigger ? fixedSecondary : fixedPrimary) : fixedSecondary;
+        const std::array<double, 4>& weights = baseAggro ? kBaseAggroWeights : (focused ? kFocusedWeights : kWanderWeights);
+
+        std::vector<Tank*> others = playerTanks;
+        for (size_t j = 0; j < enemies_.size(); ++j) {
+            if (j == i || !enemies_[j].alive) {
+                continue;
+            }
+            others.push_back(&enemies_[j].tank);
+        }
+
         const bool stuck = enemy.stuckFrames > kDodgeStuckFrames;
-        const bool stateChanged = enemy.state != enemy.previousState;
-        enemy.previousState = enemy.state;
-        enemy.redecideTimer -= dt;
-        if (stuck) {
-            // Si la primera direccion de esquive tampoco funciona, prueba la
-            // siguiente (rota entre las 4 posibles) en vez de insistir para
-            // siempre con la misma direccion bloqueada.
-            const int dodgeStage = (enemy.stuckFrames - kDodgeStuckFrames) / kDodgeRotateFrames;
-            const std::array<Direction, kDodgeCandidateCount> dodgeCandidates{fallback, Opposite(fallback), Opposite(preferred), preferred};
-            enemy.moveDir = dodgeCandidates[dodgeStage % kDodgeCandidateCount];
-            enemy.redecideTimer = kRedecideDodgeInterval;
-        } else if (enemy.redecideTimer <= 0.0 || stateChanged) {
-            // Al atacar a un jugador va derecho a el (sin vueltas); buscando
-            // el aguila, deambula con tendencia hacia ella, mas insistente
-            // si ya la tiene cerca (ver baseAggro).
-            enemy.moveDir = (enemy.state == EnemyState::AttackPlayer) ? preferred : PickWanderDirection(preferred, fallback, baseAggro);
-            enemy.redecideTimer = RandomRedecideInterval(baseAggro);
+        // Cerca del aguila, con el camino directo tapado por un ladrillo
+        // (se puede volar a tiros): se queda plantada encarandolo y
+        // disparando en vez de rodearlo, mientras no se pase de paciencia
+        // (por si algo raro pasa y nunca se abre paso, ver kBrickBreachPatienceFrames).
+        const bool breachingBrick = baseAggro && enemy.stuckFrames <= kBrickBreachPatienceFrames && IsBrickAhead(enemy.tank, primary, map);
+        if (breachingBrick) {
+            enemy.moveDir = primary;
+            enemy.tank.SetFacing(primary);
+            enemy.cellsRemaining = static_cast<float>(kCellsPerLegBaseAggro);
+        } else if (stuck) {
+            // Si la primera direccion de esquive tambien choca de una, salta
+            // a la siguiente candidata (hasta las 4) en vez de comprometerse
+            // a algo que ya se sabe bloqueado.
+            const std::array<Direction, kDodgeCandidateCount> dodgeCandidates{secondary, Opposite(secondary), Opposite(primary), primary};
+            int dodgeStage = (enemy.stuckFrames - kDodgeStuckFrames) / kDodgeRotateFrames;
+            Direction chosen = dodgeCandidates[dodgeStage % kDodgeCandidateCount];
+            for (int tries = 0; tries < kDodgeCandidateCount && WouldBeBlocked(enemy.tank, chosen, map, others); ++tries) {
+                ++dodgeStage;
+                chosen = dodgeCandidates[dodgeStage % kDodgeCandidateCount];
+            }
+            enemy.moveDir = chosen;
+            enemy.cellsRemaining = static_cast<float>(baseAggro ? kCellsPerLegBaseAggro : RandomCellsPerLeg());
+        } else if (enemy.cellsRemaining <= 0.0f || stateChanged) {
+            enemy.moveDir = ChooseDirection(enemy.tank, map, others, primary, secondary, weights);
+            enemy.cellsRemaining = static_cast<float>(baseAggro ? kCellsPerLegBaseAggro : (focused ? RandomCellsPerLegFocused() : RandomCellsPerLeg()));
         }
 
         PlayerInput input;
@@ -226,42 +387,54 @@ void EnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, BulletI
             case Direction::Right: input.moveRight = true; break;
         }
 
-        std::vector<Tank*> others = playerTanks;
-        for (size_t j = 0; j < enemies_.size(); ++j) {
-            if (j == i || !enemies_[j].alive) {
-                continue;
-            }
-            others.push_back(&enemies_[j].tank);
-        }
-
         const float prevX = enemy.tank.X();
         const float prevY = enemy.tank.Y();
         enemy.tank.Update(dt, input, map, others);
-        const bool moved = std::fabs(enemy.tank.X() - prevX) > 0.0005f || std::fabs(enemy.tank.Y() - prevY) > 0.0005f;
+        const float movedDist = std::fabs(enemy.tank.X() - prevX) + std::fabs(enemy.tank.Y() - prevY);
+        const bool moved = movedDist > 0.0005f;
         enemy.stuckFrames = moved ? 0 : (enemy.stuckFrames + 1);
+        enemy.cellsRemaining -= movedDist;
 
-        // Dispara para abrirse paso si esta atascada hace rato contra un
-        // ladrillo, oportunamente si esta atacando a un jugador (o tiene al
-        // aguila cerca y encarada, ver baseAggro) y lo tiene enfilado, o de
-        // vez en cuando porque si (ver randomShootTimer), sin importar hacia
-        // donde este mirando.
-        enemy.randomShootTimer -= dt;
-        const bool wantsRandomShot = enemy.randomShootTimer <= 0.0;
-        const bool facingPriorityTarget =
-            (enemy.state == EnemyState::AttackPlayer || baseAggro) && IsFacingTarget(enemy.tank, targetX, targetY);
-        const bool shouldShoot =
-            wantsRandomShot ||
-            (enemy.stuckFrames > kShootStuckFrames && IsFacingBrick(map, enemy.tank)) ||
-            facingPriorityTarget;
+        // Solo 1 bala propia a la vez (ver BulletSystem::TryShoot). El
+        // temporizador del proximo disparo arranca justo cuando la bala
+        // anterior impacta/desaparece (bulletWasAlive detecta esa
+        // transicion), no en paralelo mientras sigue en pantalla.
+        const bool bulletAliveNow = bullets.HasAliveBullet(enemy.ownerId);
+        if (enemy.bulletWasAlive && !bulletAliveNow) {
+            const bool stuckALot = enemy.stuckFrames > kDodgeStuckFrames;
+            if (stuckALot) {
+                enemy.shootTimer = RandomInRange(kShootIntervalStuckMin, kShootIntervalStuckMax);
+            } else if (enemy.state == EnemyState::AttackPlayer) {
+                enemy.shootTimer = RandomInRange(kShootIntervalAttackMin, kShootIntervalAttackMax);
+            } else if (baseAggro) {
+                enemy.shootTimer = RandomInRange(kShootIntervalBaseAggroMin, kShootIntervalBaseAggroMax);
+            } else {
+                enemy.shootTimer = RandomInRange(kShootIntervalMin, kShootIntervalMax);
+            }
+        }
+        enemy.bulletWasAlive = bulletAliveNow;
 
-        if (shouldShoot && enemy.tank.CanShoot()) {
-            float muzzleX = 0.0f, muzzleY = 0.0f;
-            enemy.tank.MuzzlePosition(muzzleX, muzzleY);
-            if (bullets.TryShoot(enemy.ownerId, muzzleX, muzzleY, enemy.tank.Facing(), enemy.tank.BulletSpeed(), 1, 1)) {
-                if (enemy.stuckFrames > kShootStuckFrames) {
-                    enemy.stuckFrames = 0; // le dio una oportunidad de abrirse paso
+        if (!bulletAliveNow && enemy.tank.CanShoot()) {
+            // Enfocada (atacando a un jugador o con el aguila cerca) y ya la
+            // tiene encarada: dispara ya, sin esperar el resto del intervalo
+            // (que sigue sirviendo de todos modos mientras no este encarada).
+            const bool aimedShot = focused && IsFacingTarget(enemy.tank, targetX, targetY, baseAggro ? kBaseAlignTolerance : kPlayerAlignTolerance);
+            enemy.shootTimer -= dt;
+            const bool timerShot = enemy.shootTimer <= 0.0;
+            if (aimedShot || timerShot) {
+                // Disparo de rutina (no uno ya encarado) buscando el aguila y
+                // a 2 casillas o mas: a veces gira a apuntarle antes de tirar
+                // en vez de disparar para donde este mirando (dx/dy ya
+                // apuntan al aguila en este estado, ver targetX/targetY).
+                if (!aimedShot && enemy.state == EnemyState::SeekBase && distToTarget >= kBaseSnapShotMinRadius && RollChance(kBaseSnapShotChance)) {
+                    const Direction snapDir = (std::fabs(dx) >= std::fabs(dy))
+                        ? (dx >= 0.0f ? Direction::Right : Direction::Left)
+                        : (dy >= 0.0f ? Direction::Down : Direction::Up);
+                    enemy.tank.SetFacing(snapDir);
                 }
-                enemy.randomShootTimer = RandomShootInterval();
+                float muzzleX = 0.0f, muzzleY = 0.0f;
+                enemy.tank.MuzzlePosition(muzzleX, muzzleY);
+                bullets.TryShoot(enemy.ownerId, muzzleX, muzzleY, enemy.tank.Facing(), enemy.tank.BulletSpeed(), 1, 1);
             }
         }
     }

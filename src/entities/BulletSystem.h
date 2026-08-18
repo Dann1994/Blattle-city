@@ -66,6 +66,11 @@ public:
 
     const std::vector<Bullet>& Bullets() const { return bullets_; }
 
+    // Hay alguna bala viva de este dueño en pantalla ahora mismo (ver
+    // EnemySystem: el enemigo espera a que la suya impacte/desaparezca antes
+    // de arrancar la cuenta regresiva para el proximo disparo).
+    bool HasAliveBullet(int ownerId) const;
+
     // Fuego amigo (seccion custom, configurable): mata las balas vivas, no
     // especiales, de un dueño distinto a excludeOwnerId que esten dentro de
     // la caja indicada (el tanque que se esta chequeando), y les dispara un

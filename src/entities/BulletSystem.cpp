@@ -41,6 +41,15 @@ bool BulletSystem::TryShoot(int ownerId, float muzzleX, float muzzleY, Direction
     return true;
 }
 
+bool BulletSystem::HasAliveBullet(int ownerId) const {
+    for (const Bullet& b : bullets_) {
+        if (b.alive && b.ownerId == ownerId) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool BulletSystem::TryShootSpecial(int ownerId, float muzzleX, float muzzleY, Direction direction) {
     Bullet bullet;
     bullet.x = muzzleX;
