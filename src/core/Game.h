@@ -5,6 +5,7 @@
 
 #include <raylib.h>
 
+#include "ArmorEnemySystem.h"
 #include "BulletImpactSprites.h"
 #include "Camera.h"
 #include "BulletImpactSystem.h"
@@ -13,6 +14,7 @@
 #include "EnemySprites.h"
 #include "EnemySystem.h"
 #include "FastEnemySystem.h"
+#include "PowerEnemySystem.h"
 #include "PowerUpSystem.h"
 #include "ShieldSprites.h"
 #include "SpawnFlash.h"
@@ -137,6 +139,81 @@ private:
     // power-ups no aparezcan encima de un jugador (ver PowerUpSystem::Update).
     std::vector<TankOccupiedBounds> ActiveTankBounds() const;
 
+    // Estrella/pistola tambien las puede agarrar un enemigo (el resto de
+    // los power-ups son solo para jugadores, no hacen nada si un enemigo
+    // los toca). En vez de subir de nivel de arma como a un jugador, lo
+    // convierten en el siguiente tipo de tanque (Basico -> Rapido ->
+    // Blindado -> Power con la estrella; la pistola salta directo a Power
+    // desde cualquiera). El Power, al no tener un "siguiente" tipo, arma su
+    // disparo especial en vez de convertirse (ver Enemy::specialShotFuseTimer).
+    void ApplyEnemyPowerUpPickups();
+
+    // Item Granada (seccion custom): un jugador que la agarra hace explotar
+    // a todos los enemigos vivos en pantalla, de los 4 tipos, de una sola
+    // vez (el mapa entero entra en una sola pantalla, no hay scroll). Cada
+    // uno destruido cuenta para la cuota del nivel (ver enemiesKilledThisLevel_).
+    void DestroyAllEnemies();
+
+    // Item Reloj (seccion custom): paraliza (Tank::Freeze) a todos los
+    // enemigos vivos en pantalla, de los 4 tipos, por kClockFreezeDuration.
+    void FreezeAllEnemies(double duration);
+
+    // Automatizacion de oleadas (40 niveles, ver ResetState/kEnemyWaveTiers
+    // en Game.cpp): cada 1s intenta spawnear 1 enemigo (tipo al azar entre
+    // los 4) en la siguiente celda de enemySpawnPositions_, en orden y
+    // rotando; no lo hace si esa celda todavia tiene a otro enemigo
+    // apareciendo encima (ver IsEnemySpawningAtCell), si la pantalla ya
+    // esta al maximo para el nivel actual, o si ya se alcanzo la cuota de
+    // enemigos a spawnear de este nivel.
+    void TickEnemySpawning(double dt);
+
+    // Apenas arranca un nivel: hace aparecer 1 enemigo al azar en cada una
+    // de las celdas de spawn, todas a la vez (ver ResetState/
+    // CheckLevelCompletion), y deja el temporizador listo para que
+    // TickEnemySpawning recien intente el siguiente spawn "de a uno" tras
+    // kEnemySpawnInterval.
+    void SpawnInitialWaveForLevel();
+
+    // Cuantos enemigos (de los 4 tipos, vivos) hay ahora mismo en pantalla.
+    int CountAliveEnemies() const;
+
+    // Hay un enemigo (de cualquier tipo) con el destello de aparicion
+    // todavia activo justo en esa celda.
+    bool IsEnemySpawningAtCell(int cellX, int cellY) const;
+
+    // Arma levelEnemyTypeSequence_: la lista (tamano = cuota maxima del
+    // nivel actual) de que tipo de enemigo le toca a cada spawn de este
+    // nivel, segun la composicion pedida por rango de nivel (ver
+    // EnemyTypeCountsForLevel en Game.cpp), barajada al azar. Se llama una
+    // vez por nivel (ResetState/CheckLevelCompletion), antes de spawnear.
+    void BuildEnemyTypeSequenceForLevel();
+
+    // Consume el siguiente tipo de levelEnemyTypeSequence_ y lo hace
+    // aparecer en (x,y). Usado por el spawn automatico (inicial y de a
+    // uno); el spawn manual de depuracion (F10 y variantes) no pasa por aca.
+    void SpawnNextEnemyForLevelAt(float x, float y);
+
+    // Si enemiesKilledThisLevel_ ya alcanzo la cuota del nivel actual
+    // (segun cantidad de jugadores activos), pasa al siguiente nivel (tope
+    // 40: se queda repitiendo el 40 para siempre) y reaplica el nivel de
+    // agresividad que le corresponda a los 4 tipos de enemigo.
+    void CheckLevelCompletion();
+
+    // Cuantos enemigos faltan matar para terminar currentLevel_ (cuota del
+    // nivel, segun cantidad de jugadores activos, menos los ya eliminados);
+    // para el HUD, ver Render().
+    int EnemiesRemainingThisLevel() const;
+
+    // Nivel de agresividad 1-4 que le corresponde a currentLevel_ (1-10 = 1,
+    // 11-20 = 2, 21-30 = 3, 31-40 = 4), aplicado a los 4 tipos de enemigo.
+    void ApplyAggressivenessForCurrentLevel();
+
+    // Boton de prueba (+/-): salta directo a newLevel (recortado a 1..40),
+    // reiniciando todo (mapa, jugadores, enemigos, balas, power-ups, y los
+    // contadores de oleada) como ResetState, pero arrancando ya en ese nivel
+    // con los parametros de dificultad que le correspondan.
+    void JumpToLevel(int newLevel);
+
     // Dibuja el destello de aparicion (mientras dura) o el tanque + escudo.
     void RenderTank(const Tank& tank, const SpawnFlash& spawn, const TankSpriteSet& sprites, const MapViewport& viewport);
 
@@ -191,7 +268,29 @@ private:
     EnemySprites enemySprites_;
     FastEnemySystem fastEnemies_;
     EnemySprites fastEnemySprites_;
+    ArmorEnemySystem armorEnemies_;
+    EnemySprites armorEnemySprites_;
+    PowerEnemySystem powerEnemies_;
+    EnemySprites powerEnemySprites_;
     std::vector<std::array<int, 2>> enemySpawnPositions_;
+
+    // Automatizacion de oleadas (ver TickEnemySpawning/CheckLevelCompletion
+    // en Game.cpp): nivel de juego actual (1-40), cuantos enemigos van
+    // eliminados y cuantos van spawneados en ESTE nivel, temporizador de 1s
+    // entre intentos de spawn, y proxima celda de enemySpawnPositions_ (en
+    // orden, rotando) para el siguiente spawn.
+    int currentLevel_ = 1;
+    int enemiesKilledThisLevel_ = 0;
+    int enemiesSpawnedThisLevel_ = 0;
+    double enemySpawnTimer_ = 0.0;
+    size_t nextEnemySpawnCellIndex_ = 0;
+
+    // Composicion de tipos de enemigo de ESTE nivel (ver
+    // BuildEnemyTypeSequenceForLevel/SpawnNextEnemyForLevelAt en Game.cpp):
+    // 0=Basico, 1=Rapido, 2=Blindado, 3=Power, ya barajada al azar. Se
+    // reconstruye entera cada vez que arranca un nivel.
+    std::vector<int> levelEnemyTypeSequence_;
+    size_t nextEnemyTypeIndex_ = 0;
     BulletImpactSystem bulletImpacts_;
     BulletImpactSprites bulletImpactSprites_;
     SpecialExplosionSystem specialExplosions_;

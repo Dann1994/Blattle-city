@@ -4,3 +4,5 @@ out/
 .vs/
 .cache/
 CMakeUserPresets.json
+launch_check.log
+screenshot*.png

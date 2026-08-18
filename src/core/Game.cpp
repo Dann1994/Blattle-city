@@ -32,6 +32,10 @@ constexpr float kSpecialShotRecoilDistance = 0.75f; // celdas que retrocede el t
 constexpr double kFriendlyFireParalyzeDuration = 5.0;
 constexpr double kFrozenBlinkInterval = 0.1; // segundos entre cada parpadeo mientras esta paralizado
 
+// Reloj: paraliza a todos los enemigos en pantalla (los 4 tipos) durante
+// este tiempo, igual que el clasico.
+constexpr double kClockFreezeDuration = 10.0;
+
 // Agua: alterna entre sus 2 frames para animar el oleaje.
 constexpr double kWaterFrameInterval = 0.5;
 
@@ -73,6 +77,111 @@ Color ColorForTile(TileType type) {
     }
 }
 
+// Color principal de cada jugador (ver tank_p1..p4_*.png): P1 amarillo/dorado,
+// P2 verde, P3 gris/plateado, P4 azul — el mismo tono dominante de su propio
+// sprite, asi la bala se nota de quien es. El sprite de bala es gris parejo
+// de base, asi que tintarlo (multiplicativo) alcanza sin necesitar arte
+// nuevo. Los enemigos (ownerId >= kEnemyOwnerIdBase) siguen en WHITE (sin
+// tintar): ver bullet.ownerId en el loop de renderizado. ownerId 0-3 son
+// literales, no Game::kPlayer1Id..kPlayer4Id (son privados y esta funcion
+// esta fuera de la clase), pero son los mismos valores.
+Color BulletTintForOwner(int ownerId) {
+    switch (ownerId) {
+        case 0: return Color{231, 156, 33, 255}; // P1
+        case 1: return Color{0, 140, 49, 255};   // P2
+        case 2: return Color{173, 173, 173, 255}; // P3
+        case 3: return Color{0, 85, 164, 255};   // P4
+        default: return WHITE;
+    }
+}
+
+// Automatizacion de oleadas (40 niveles, ver Game::TickEnemySpawning/
+// CheckLevelCompletion): tope de niveles y cada cuanto se intenta un spawn.
+constexpr int kMaxGameLevel = 40;
+// Cadencia despues del arranque simultaneo de las 3 celdas (ver
+// Game::SpawnInitialWaveForLevel): cada cuanto se intenta 1 spawn mas.
+constexpr double kEnemySpawnInterval = 5.0;
+
+// Nivel de agresividad y cuotas (cuantos enemigos hay que eliminar para
+// terminar el nivel / cuantos puede haber en pantalla a la vez) segun el
+// nivel de juego actual (1-40) y la cantidad de jugadores activos: con 3 o
+// 4 jugadores las cuotas son mas altas (mas jugadores = mas fuego, hace
+// falta mas presion enemiga). 1-10 = agresividad 1, 11-20 = 2, 21-30 = 3,
+// 31-40 = 4 (y se queda en 4 si currentLevel_ se pasa de 40).
+struct EnemyWaveTier {
+    int aggressivenessLevel;
+    int killQuotaFewPlayers;
+    int killQuotaManyPlayers;
+    int maxOnScreenFewPlayers;
+    int maxOnScreenManyPlayers;
+};
+
+const EnemyWaveTier& WaveTierForLevel(int level) {
+    static constexpr EnemyWaveTier kTiers[4] = {
+        {1, 15, 20, 5, 10},  // niveles 1-10
+        {2, 20, 25, 6, 12},  // niveles 11-20
+        {3, 30, 35, 10, 15}, // niveles 21-30
+        {4, 50, 60, 15, 20}, // niveles 31-40 (y de ahi en mas)
+    };
+    if (level <= 10) {
+        return kTiers[0];
+    }
+    if (level <= 20) {
+        return kTiers[1];
+    }
+    if (level <= 30) {
+        return kTiers[2];
+    }
+    return kTiers[3];
+}
+
+// Composicion de tipos de enemigo por rango de nivel (pedido explicitamente,
+// con conteos fijos por tipo y el resto siempre Basico/tipo1): tipo1=Basico,
+// tipo2=Rapido, tipo3=Blindado, tipo4=Power. Los conteos son absolutos (no
+// escalan con la cantidad de jugadores); el 11-15 es la unica excepcion, ahi
+// se pide mitad y mitad en vez de un numero fijo.
+struct EnemyTypeCounts {
+    int basic;
+    int fast;
+    int armor;
+    int power;
+};
+
+EnemyTypeCounts EnemyTypeCountsForLevel(int level, int totalQuota) {
+    int fast = 0, armor = 0, power = 0;
+    if (level <= 5) {
+        // Solo Basico.
+    } else if (level <= 10) {
+        fast = 3;
+    } else if (level <= 15) {
+        fast = totalQuota / 2; // mitad tipo2, la otra mitad (resto) tipo1
+    } else if (level <= 20) {
+        fast = 5;
+        armor = 3;
+    } else if (level <= 25) {
+        fast = 5;
+        armor = 5;
+    } else if (level <= 30) {
+        fast = 5;
+        armor = 5;
+        power = 3;
+    } else if (level <= 35) {
+        fast = 5;
+        armor = 5;
+        power = 5;
+    } else if (level <= 39) {
+        fast = 10;
+        armor = 10;
+        power = 5;
+    } else {
+        fast = 10;
+        armor = 10;
+        power = 10;
+    }
+    const int basic = std::max(0, totalQuota - fast - armor - power);
+    return EnemyTypeCounts{basic, fast, armor, power};
+}
+
 } // namespace
 
 void Game::Init() {
@@ -97,6 +206,8 @@ void Game::Init() {
     player4Sprites_.LoadPlayer4(BC_ASSETS_DIR);
     enemySprites_.Load(BC_ASSETS_DIR, "basic");
     fastEnemySprites_.Load(BC_ASSETS_DIR, "fast");
+    armorEnemySprites_.Load(BC_ASSETS_DIR, "armor");
+    powerEnemySprites_.Load(BC_ASSETS_DIR, "power");
     bulletSprites_.Load(BC_ASSETS_DIR);
     starTexture_ = LoadTexture((std::string(BC_ASSETS_DIR) + "sprites/powerup_star.png").c_str());
     SetTextureFilter(starTexture_, TEXTURE_FILTER_POINT);
@@ -206,17 +317,23 @@ void Game::ResetState() {
     powerUps_ = PowerUpSystem{};
     screenShakeTimer_ = 0.0;
 
-    // Primer enemigo (seccion 5, prueba): arranca en el primer punto de
-    // spawn de enemigos del nivel. El resto se agregan a mano con F10
-    // mientras no haya oleadas (eso llega mas adelante en la Fase 3).
+    // El spawneo automatico (TickEnemySpawning) se encarga de poblar cada
+    // celda de spawn del nivel; F10/Shift+F10/Ctrl+F10/Ctrl+Shift+F10 siguen
+    // disponibles como spawn manual de depuracion sobre estos mismos sistemas.
     enemies_ = EnemySystem{};
-    enemySpawnPositions_ = level.enemy_spawns;
-    if (!enemySpawnPositions_.empty()) {
-        enemies_.SpawnAt(static_cast<float>(enemySpawnPositions_[0][0]), static_cast<float>(enemySpawnPositions_[0][1]));
-    }
-    // Tanque "Rapido" (prueba): no aparece solo, se agrega a mano con
-    // Shift+F10 mientras no haya oleadas de verdad.
     fastEnemies_ = FastEnemySystem{};
+    armorEnemies_ = ArmorEnemySystem{};
+    powerEnemies_ = PowerEnemySystem{};
+    enemySpawnPositions_ = level.enemy_spawns;
+
+    currentLevel_ = 1;
+    enemiesKilledThisLevel_ = 0;
+    enemiesSpawnedThisLevel_ = 0;
+    enemySpawnTimer_ = 0.0;
+    nextEnemySpawnCellIndex_ = 0;
+    ApplyAggressivenessForCurrentLevel();
+    BuildEnemyTypeSequenceForLevel();
+    SpawnInitialWaveForLevel();
 
     // Al empezar (o reiniciar con ESC) solo esta presente el jugador 1; P2/P3/P4
     // se traen con las teclas 1/2/3/4 (ver ProcessInput y SetPlayerActive).
@@ -502,9 +619,20 @@ void Game::ProcessInput() {
 
     // Boton de prueba: agrega otro enemigo "Basico" (rotando entre los
     // puntos de spawn del nivel), mientras no haya oleadas de verdad
-    // todavia. Shift+F10 agrega uno "Rapido" en su lugar.
+    // todavia. Shift+F10 agrega uno "Rapido", Ctrl+F10 uno "Blindado" y
+    // Ctrl+Shift+F10 uno "Power" en su lugar.
     if (IsKeyPressed(KEY_F10) && !enemySpawnPositions_.empty()) {
-        if (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)) {
+        const bool ctrlDown = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+        const bool shiftDown = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+        if (ctrlDown && shiftDown) {
+            const size_t spawnIndex = powerEnemies_.Enemies().size() % enemySpawnPositions_.size();
+            const std::array<int, 2>& pos = enemySpawnPositions_[spawnIndex];
+            powerEnemies_.SpawnAt(static_cast<float>(pos[0]), static_cast<float>(pos[1]));
+        } else if (ctrlDown) {
+            const size_t spawnIndex = armorEnemies_.Enemies().size() % enemySpawnPositions_.size();
+            const std::array<int, 2>& pos = enemySpawnPositions_[spawnIndex];
+            armorEnemies_.SpawnAt(static_cast<float>(pos[0]), static_cast<float>(pos[1]));
+        } else if (shiftDown) {
             const size_t spawnIndex = fastEnemies_.Enemies().size() % enemySpawnPositions_.size();
             const std::array<int, 2>& pos = enemySpawnPositions_[spawnIndex];
             fastEnemies_.SpawnAt(static_cast<float>(pos[0]), static_cast<float>(pos[1]));
@@ -516,15 +644,30 @@ void Game::ProcessInput() {
     }
 
     // Botones de prueba: bajan/suben el nivel de agresividad de los
-    // enemigos (1 a 5, 3 es el comportamiento de base), para los 2 tipos a
+    // enemigos (1 a 5, 3 es el comportamiento de base), para los 4 tipos a
     // la vez. Ver EnemySystem::SetAggressivenessLevel.
     if (IsKeyPressed(KEY_F11)) {
         enemies_.SetAggressivenessLevel(enemies_.AggressivenessLevel() - 1);
         fastEnemies_.SetAggressivenessLevel(fastEnemies_.AggressivenessLevel() - 1);
+        armorEnemies_.SetAggressivenessLevel(armorEnemies_.AggressivenessLevel() - 1);
+        powerEnemies_.SetAggressivenessLevel(powerEnemies_.AggressivenessLevel() - 1);
     }
     if (IsKeyPressed(KEY_F12)) {
         enemies_.SetAggressivenessLevel(enemies_.AggressivenessLevel() + 1);
         fastEnemies_.SetAggressivenessLevel(fastEnemies_.AggressivenessLevel() + 1);
+        armorEnemies_.SetAggressivenessLevel(armorEnemies_.AggressivenessLevel() + 1);
+        powerEnemies_.SetAggressivenessLevel(powerEnemies_.AggressivenessLevel() + 1);
+    }
+
+    // Botones de prueba: +/- saltan directo al siguiente/anterior nivel de
+    // juego (1-40), reiniciando todo (ver JumpToLevel) y arrancando ya con
+    // los parametros de dificultad (agresividad, cuota, tope en pantalla)
+    // que le correspondan a ese nivel.
+    if (IsKeyPressed(KEY_KP_ADD) || IsKeyPressed(KEY_EQUAL)) {
+        JumpToLevel(currentLevel_ + 1);
+    }
+    if (IsKeyPressed(KEY_KP_SUBTRACT) || IsKeyPressed(KEY_MINUS)) {
+        JumpToLevel(currentLevel_ - 1);
     }
 
     // Boton de prueba: rota el modo de fuego amigo Off -> nivel 1 -> nivel 2 -> Off.
@@ -597,11 +740,11 @@ void Game::UpdatePlayer(Tank& tank, PlayerInput& input, SpawnFlash& spawn, int o
             tank.AddLife();
         } else if (pickedType == PowerUpType::Shovel) {
             ApplyShovelFortification();
+        } else if (pickedType == PowerUpType::Grenade) {
+            DestroyAllEnemies();
+        } else if (pickedType == PowerUpType::Clock) {
+            FreezeAllEnemies(kClockFreezeDuration);
         }
-        // Granada y Reloj (seccion custom): en el juego real le pegan a los
-        // enemigos (destruirlos todos / paralizarlos), pero todavia no hay
-        // enemigos (Fase 3). Por ahora se pueden agarrar (entran en la
-        // rotacion de probabilidades) pero no hacen nada.
     }
 }
 
@@ -616,7 +759,7 @@ void Game::HandlePlayerDeath(Tank& tank, int ownerId) {
 
 std::vector<Tank*> Game::ActiveOthers(int excludeOwnerId) {
     std::vector<Tank*> others;
-    others.reserve(3 + enemies_.Enemies().size() + fastEnemies_.Enemies().size());
+    others.reserve(3 + enemies_.Enemies().size() + fastEnemies_.Enemies().size() + armorEnemies_.Enemies().size() + powerEnemies_.Enemies().size());
     if (player1Active_ && excludeOwnerId != kPlayer1Id) {
         others.push_back(&player1_);
     }
@@ -642,6 +785,16 @@ std::vector<Tank*> Game::ActiveOthers(int excludeOwnerId) {
             others.push_back(&enemy.tank);
         }
     }
+    for (Enemy& enemy : armorEnemies_.Enemies()) {
+        if (enemy.alive) {
+            others.push_back(&enemy.tank);
+        }
+    }
+    for (Enemy& enemy : powerEnemies_.Enemies()) {
+        if (enemy.alive) {
+            others.push_back(&enemy.tank);
+        }
+    }
     return others;
 }
 
@@ -663,6 +816,322 @@ std::vector<TankOccupiedBounds> Game::ActiveTankBounds() const {
         bounds.push_back(b);
     }
     return bounds;
+}
+
+void Game::ApplyEnemyPowerUpPickups() {
+    // Basico -> Rapido -> Blindado -> Power con la estrella; la pistola
+    // salta directo a Power desde cualquiera de los 3. SpawnAt reinicia la
+    // direccion a Abajo y dispara el destello de aparicion (sirve como
+    // efecto visual "se transformo" gratis); se le devuelve la direccion
+    // que traia justo despues para no perderla.
+    for (Enemy& enemy : enemies_.Enemies()) {
+        if (!enemy.alive) {
+            continue;
+        }
+        PowerUpType pickedType{};
+        if (!powerUps_.TryPickup(enemy.tank.X(), enemy.tank.Y(), pickedType)) {
+            continue;
+        }
+        const Direction facing = enemy.tank.Facing();
+        if (pickedType == PowerUpType::Star) {
+            fastEnemies_.SpawnAt(enemy.tank.X(), enemy.tank.Y());
+            fastEnemies_.Enemies().back().tank.SetFacing(facing);
+            enemy.alive = false;
+        } else if (pickedType == PowerUpType::Gun) {
+            powerEnemies_.SpawnAt(enemy.tank.X(), enemy.tank.Y());
+            powerEnemies_.Enemies().back().tank.SetFacing(facing);
+            enemy.alive = false;
+        } else if (pickedType == PowerUpType::Helmet) {
+            enemy.tank.ActivateShield(kHelmetShieldDuration);
+        }
+    }
+    for (Enemy& enemy : fastEnemies_.Enemies()) {
+        if (!enemy.alive) {
+            continue;
+        }
+        PowerUpType pickedType{};
+        if (!powerUps_.TryPickup(enemy.tank.X(), enemy.tank.Y(), pickedType)) {
+            continue;
+        }
+        const Direction facing = enemy.tank.Facing();
+        if (pickedType == PowerUpType::Star) {
+            armorEnemies_.SpawnAt(enemy.tank.X(), enemy.tank.Y());
+            armorEnemies_.Enemies().back().tank.SetFacing(facing);
+            enemy.alive = false;
+        } else if (pickedType == PowerUpType::Gun) {
+            powerEnemies_.SpawnAt(enemy.tank.X(), enemy.tank.Y());
+            powerEnemies_.Enemies().back().tank.SetFacing(facing);
+            enemy.alive = false;
+        } else if (pickedType == PowerUpType::Helmet) {
+            enemy.tank.ActivateShield(kHelmetShieldDuration);
+        }
+    }
+    for (Enemy& enemy : armorEnemies_.Enemies()) {
+        if (!enemy.alive) {
+            continue;
+        }
+        PowerUpType pickedType{};
+        if (!powerUps_.TryPickup(enemy.tank.X(), enemy.tank.Y(), pickedType)) {
+            continue;
+        }
+        if (pickedType == PowerUpType::Star || pickedType == PowerUpType::Gun) {
+            const Direction facing = enemy.tank.Facing();
+            powerEnemies_.SpawnAt(enemy.tank.X(), enemy.tank.Y());
+            powerEnemies_.Enemies().back().tank.SetFacing(facing);
+            enemy.alive = false;
+        } else if (pickedType == PowerUpType::Helmet) {
+            enemy.tank.ActivateShield(kHelmetShieldDuration);
+        }
+    }
+    // El Power no tiene un "siguiente" tipo: en su lugar, agarrar estrella o
+    // pistola le arma el disparo especial (ver Enemy::specialShotFuseTimer y
+    // PowerEnemySystem::Update), igual que a un jugador ya en nivel maximo
+    // (ver Tank::PickupGun/PickupStar).
+    for (Enemy& enemy : powerEnemies_.Enemies()) {
+        if (!enemy.alive) {
+            continue;
+        }
+        PowerUpType pickedType{};
+        if (!powerUps_.TryPickup(enemy.tank.X(), enemy.tank.Y(), pickedType)) {
+            continue;
+        }
+        if (pickedType == PowerUpType::Helmet) {
+            enemy.tank.ActivateShield(kHelmetShieldDuration);
+        } else if (pickedType == PowerUpType::Star || pickedType == PowerUpType::Gun) {
+            enemy.specialShotFuseTimer = 5.0;
+        }
+    }
+}
+
+void Game::DestroyAllEnemies() {
+    for (Enemy& enemy : enemies_.Enemies()) {
+        if (!enemy.alive) {
+            continue;
+        }
+        specialExplosions_.Spawn(enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, /*nativeScale=*/true);
+        enemy.alive = false;
+        ++enemiesKilledThisLevel_;
+    }
+    for (Enemy& enemy : fastEnemies_.Enemies()) {
+        if (!enemy.alive) {
+            continue;
+        }
+        specialExplosions_.Spawn(enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, /*nativeScale=*/true);
+        enemy.alive = false;
+        ++enemiesKilledThisLevel_;
+    }
+    for (Enemy& enemy : armorEnemies_.Enemies()) {
+        if (!enemy.alive) {
+            continue;
+        }
+        specialExplosions_.Spawn(enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, /*nativeScale=*/true);
+        enemy.alive = false;
+        ++enemiesKilledThisLevel_;
+    }
+    for (Enemy& enemy : powerEnemies_.Enemies()) {
+        if (!enemy.alive) {
+            continue;
+        }
+        specialExplosions_.Spawn(enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, /*nativeScale=*/true);
+        enemy.alive = false;
+        ++enemiesKilledThisLevel_;
+    }
+}
+
+void Game::FreezeAllEnemies(double duration) {
+    for (Enemy& enemy : enemies_.Enemies()) {
+        if (enemy.alive) {
+            enemy.tank.Freeze(duration);
+        }
+    }
+    for (Enemy& enemy : fastEnemies_.Enemies()) {
+        if (enemy.alive) {
+            enemy.tank.Freeze(duration);
+        }
+    }
+    for (Enemy& enemy : armorEnemies_.Enemies()) {
+        if (enemy.alive) {
+            enemy.tank.Freeze(duration);
+        }
+    }
+    for (Enemy& enemy : powerEnemies_.Enemies()) {
+        if (enemy.alive) {
+            enemy.tank.Freeze(duration);
+        }
+    }
+}
+
+void Game::ApplyAggressivenessForCurrentLevel() {
+    const int aggro = WaveTierForLevel(currentLevel_).aggressivenessLevel;
+    enemies_.SetAggressivenessLevel(aggro);
+    fastEnemies_.SetAggressivenessLevel(aggro);
+    armorEnemies_.SetAggressivenessLevel(aggro);
+    powerEnemies_.SetAggressivenessLevel(aggro);
+}
+
+void Game::JumpToLevel(int newLevel) {
+    // ResetState ya deja todo (mapa, jugadores, balas, power-ups) como al
+    // arrancar la partida, pero siempre arma el enjambre inicial para el
+    // nivel 1: se descarta y se vuelve a armar entero para el nivel
+    // destino, para que la composicion de tipos de enemigo (ver
+    // BuildEnemyTypeSequenceForLevel) sea la que le corresponde ahi.
+    ResetState();
+    currentLevel_ = std::clamp(newLevel, 1, kMaxGameLevel);
+
+    enemies_ = EnemySystem{};
+    fastEnemies_ = FastEnemySystem{};
+    armorEnemies_ = ArmorEnemySystem{};
+    powerEnemies_ = PowerEnemySystem{};
+    enemiesSpawnedThisLevel_ = 0;
+    enemiesKilledThisLevel_ = 0;
+
+    ApplyAggressivenessForCurrentLevel();
+    BuildEnemyTypeSequenceForLevel();
+    SpawnInitialWaveForLevel();
+}
+
+int Game::CountAliveEnemies() const {
+    int count = 0;
+    for (const Enemy& enemy : enemies_.Enemies()) {
+        count += enemy.alive ? 1 : 0;
+    }
+    for (const Enemy& enemy : fastEnemies_.Enemies()) {
+        count += enemy.alive ? 1 : 0;
+    }
+    for (const Enemy& enemy : armorEnemies_.Enemies()) {
+        count += enemy.alive ? 1 : 0;
+    }
+    for (const Enemy& enemy : powerEnemies_.Enemies()) {
+        count += enemy.alive ? 1 : 0;
+    }
+    return count;
+}
+
+bool Game::IsEnemySpawningAtCell(int cellX, int cellY) const {
+    auto anySpawningAt = [cellX, cellY](const std::vector<Enemy>& list) {
+        for (const Enemy& enemy : list) {
+            if (!enemy.alive || !enemy.spawn.IsActive()) {
+                continue;
+            }
+            if (static_cast<int>(std::round(enemy.spawn.X())) == cellX && static_cast<int>(std::round(enemy.spawn.Y())) == cellY) {
+                return true;
+            }
+        }
+        return false;
+    };
+    return anySpawningAt(enemies_.Enemies()) || anySpawningAt(fastEnemies_.Enemies()) ||
+           anySpawningAt(armorEnemies_.Enemies()) || anySpawningAt(powerEnemies_.Enemies());
+}
+
+void Game::BuildEnemyTypeSequenceForLevel() {
+    // Se dimensiona a la cuota MAXIMA del nivel (con 3-4 jugadores), que
+    // siempre es >= la cuota con 1-2 jugadores en las 4 franjas de
+    // dificultad: asi alcanza sin importar cuantos jugadores esten activos
+    // en el momento de cada spawn (killQuota se reevalua dinamicamente).
+    const int totalQuota = WaveTierForLevel(currentLevel_).killQuotaManyPlayers;
+    const EnemyTypeCounts counts = EnemyTypeCountsForLevel(currentLevel_, totalQuota);
+
+    levelEnemyTypeSequence_.clear();
+    levelEnemyTypeSequence_.reserve(totalQuota);
+    levelEnemyTypeSequence_.insert(levelEnemyTypeSequence_.end(), counts.basic, 0);
+    levelEnemyTypeSequence_.insert(levelEnemyTypeSequence_.end(), counts.fast, 1);
+    levelEnemyTypeSequence_.insert(levelEnemyTypeSequence_.end(), counts.armor, 2);
+    levelEnemyTypeSequence_.insert(levelEnemyTypeSequence_.end(), counts.power, 3);
+
+    // El orden en que salen si es al azar (pedido explicitamente), aunque
+    // los conteos totales de cada tipo sean fijos: Fisher-Yates con
+    // GetRandomValue, el mismo generador que ya usa el resto de Game.cpp.
+    for (int i = static_cast<int>(levelEnemyTypeSequence_.size()) - 1; i > 0; --i) {
+        const int j = GetRandomValue(0, i);
+        std::swap(levelEnemyTypeSequence_[i], levelEnemyTypeSequence_[j]);
+    }
+    nextEnemyTypeIndex_ = 0;
+}
+
+void Game::SpawnNextEnemyForLevelAt(float x, float y) {
+    // No deberia pasar (la secuencia se arma del tamano de la cuota maxima
+    // del nivel), pero si se agotara cae a Basico como resguardo.
+    const int type = (nextEnemyTypeIndex_ < levelEnemyTypeSequence_.size())
+        ? levelEnemyTypeSequence_[nextEnemyTypeIndex_++]
+        : 0;
+    switch (type) {
+        case 1: fastEnemies_.SpawnAt(x, y); break;
+        case 2: armorEnemies_.SpawnAt(x, y); break;
+        case 3: powerEnemies_.SpawnAt(x, y); break;
+        default: enemies_.SpawnAt(x, y); break;
+    }
+}
+
+void Game::SpawnInitialWaveForLevel() {
+    // Apenas arranca el nivel, las 3 celdas de spawn largan un enemigo cada
+    // una al mismo tiempo (pedido explicitamente), en vez de esperar la
+    // rotacion de a una que usa TickEnemySpawning despues. El temporizador
+    // queda listo para que el primer spawn "de a uno" tarde el intervalo
+    // normal, no que salga otro enemigo de inmediato encima de esta tanda.
+    for (const std::array<int, 2>& cell : enemySpawnPositions_) {
+        SpawnNextEnemyForLevelAt(static_cast<float>(cell[0]), static_cast<float>(cell[1]));
+        ++enemiesSpawnedThisLevel_;
+    }
+    nextEnemySpawnCellIndex_ = 0;
+    enemySpawnTimer_ = kEnemySpawnInterval;
+}
+
+void Game::TickEnemySpawning(double dt) {
+    if (enemySpawnPositions_.empty()) {
+        return;
+    }
+
+    enemySpawnTimer_ -= dt;
+    if (enemySpawnTimer_ > 0.0) {
+        return;
+    }
+    enemySpawnTimer_ = kEnemySpawnInterval;
+
+    const EnemyWaveTier& tier = WaveTierForLevel(currentLevel_);
+    const int activePlayers = (player1Active_ ? 1 : 0) + (player2Active_ ? 1 : 0) + (player3Active_ ? 1 : 0) + (player4Active_ ? 1 : 0);
+    const bool fewPlayers = activePlayers <= 2;
+    const int killQuota = fewPlayers ? tier.killQuotaFewPlayers : tier.killQuotaManyPlayers;
+    const int maxOnScreen = fewPlayers ? tier.maxOnScreenFewPlayers : tier.maxOnScreenManyPlayers;
+
+    if (enemiesSpawnedThisLevel_ >= killQuota) {
+        return; // ya se termino de spawnear la cuota de este nivel; falta que mueran los que quedan
+    }
+    if (CountAliveEnemies() >= maxOnScreen) {
+        return; // pantalla llena para el nivel actual
+    }
+
+    const std::array<int, 2>& cell = enemySpawnPositions_[nextEnemySpawnCellIndex_ % enemySpawnPositions_.size()];
+    if (IsEnemySpawningAtCell(cell[0], cell[1])) {
+        return; // celda ocupada por otro que todavia esta apareciendo: reintenta la misma celda el proximo tick
+    }
+
+    SpawnNextEnemyForLevelAt(static_cast<float>(cell[0]), static_cast<float>(cell[1]));
+    ++enemiesSpawnedThisLevel_;
+    nextEnemySpawnCellIndex_ = (nextEnemySpawnCellIndex_ + 1) % enemySpawnPositions_.size();
+}
+
+void Game::CheckLevelCompletion() {
+    const EnemyWaveTier& tier = WaveTierForLevel(currentLevel_);
+    const int activePlayers = (player1Active_ ? 1 : 0) + (player2Active_ ? 1 : 0) + (player3Active_ ? 1 : 0) + (player4Active_ ? 1 : 0);
+    const int killQuota = (activePlayers <= 2) ? tier.killQuotaFewPlayers : tier.killQuotaManyPlayers;
+    if (enemiesKilledThisLevel_ < killQuota) {
+        return;
+    }
+    if (currentLevel_ < kMaxGameLevel) {
+        ++currentLevel_;
+    }
+    enemiesKilledThisLevel_ = 0;
+    enemiesSpawnedThisLevel_ = 0;
+    ApplyAggressivenessForCurrentLevel();
+    BuildEnemyTypeSequenceForLevel();
+    SpawnInitialWaveForLevel();
+}
+
+int Game::EnemiesRemainingThisLevel() const {
+    const EnemyWaveTier& tier = WaveTierForLevel(currentLevel_);
+    const int activePlayers = (player1Active_ ? 1 : 0) + (player2Active_ ? 1 : 0) + (player3Active_ ? 1 : 0) + (player4Active_ ? 1 : 0);
+    const int killQuota = (activePlayers <= 2) ? tier.killQuotaFewPlayers : tier.killQuotaManyPlayers;
+    return std::max(0, killQuota - enemiesKilledThisLevel_);
 }
 
 std::vector<Tank*> Game::ActivePlayerTanks() {
@@ -831,8 +1300,12 @@ void Game::Update(double fixedDt) {
     if (player3Active_) UpdatePlayer(player3_, input3_, player3Spawn_, kPlayer3Id, ActiveOthers(kPlayer3Id), fixedDt);
     if (player4Active_) UpdatePlayer(player4_, input4_, player4Spawn_, kPlayer4Id, ActiveOthers(kPlayer4Id), fixedDt);
 
-    // Cada sistema de enemigos recibe al otro como obstaculo de colision
-    // (nunca como blanco de combate: eso solo aplica a jugadores reales).
+    TickEnemySpawning(fixedDt);
+    const int aliveEnemiesBeforeCombat = CountAliveEnemies();
+
+    // Cada sistema de enemigos recibe a los otros 2 tipos como obstaculo de
+    // colision (nunca como blanco de combate: eso solo aplica a jugadores
+    // reales).
     std::vector<Tank*> basicEnemyTanks;
     basicEnemyTanks.reserve(enemies_.Enemies().size());
     for (Enemy& enemy : enemies_.Enemies()) {
@@ -847,8 +1320,48 @@ void Game::Update(double fixedDt) {
             fastEnemyTanks.push_back(&enemy.tank);
         }
     }
-    enemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), fastEnemyTanks, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_));
-    fastEnemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), basicEnemyTanks, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_));
+    std::vector<Tank*> armorEnemyTanks;
+    armorEnemyTanks.reserve(armorEnemies_.Enemies().size());
+    for (Enemy& enemy : armorEnemies_.Enemies()) {
+        if (enemy.alive) {
+            armorEnemyTanks.push_back(&enemy.tank);
+        }
+    }
+    std::vector<Tank*> powerEnemyTanks;
+    powerEnemyTanks.reserve(powerEnemies_.Enemies().size());
+    for (Enemy& enemy : powerEnemies_.Enemies()) {
+        if (enemy.alive) {
+            powerEnemyTanks.push_back(&enemy.tank);
+        }
+    }
+
+    std::vector<Tank*> otherThanBasic = fastEnemyTanks;
+    otherThanBasic.insert(otherThanBasic.end(), armorEnemyTanks.begin(), armorEnemyTanks.end());
+    otherThanBasic.insert(otherThanBasic.end(), powerEnemyTanks.begin(), powerEnemyTanks.end());
+    std::vector<Tank*> otherThanFast = basicEnemyTanks;
+    otherThanFast.insert(otherThanFast.end(), armorEnemyTanks.begin(), armorEnemyTanks.end());
+    otherThanFast.insert(otherThanFast.end(), powerEnemyTanks.begin(), powerEnemyTanks.end());
+    std::vector<Tank*> otherThanArmor = basicEnemyTanks;
+    otherThanArmor.insert(otherThanArmor.end(), fastEnemyTanks.begin(), fastEnemyTanks.end());
+    otherThanArmor.insert(otherThanArmor.end(), powerEnemyTanks.begin(), powerEnemyTanks.end());
+    std::vector<Tank*> otherThanPower = basicEnemyTanks;
+    otherThanPower.insert(otherThanPower.end(), fastEnemyTanks.begin(), fastEnemyTanks.end());
+    otherThanPower.insert(otherThanPower.end(), armorEnemyTanks.begin(), armorEnemyTanks.end());
+
+    enemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), otherThanBasic, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_));
+    fastEnemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), otherThanFast, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_));
+    armorEnemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), otherThanArmor, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_));
+    powerEnemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), otherThanPower, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_));
+
+    // Balas normales matando enemigos (ver los 4 Update() de arriba): la
+    // diferencia de vivos antes/despues de la combinacion la cuenta como
+    // eliminados. ApplyEnemyPowerUpPickups() (justo abajo) tambien puede
+    // bajar el conteo de vivos al convertir un enemigo en otro tipo, pero
+    // eso NO es una eliminacion, por eso el conteo se toma ANTES de
+    // llamarla.
+    enemiesKilledThisLevel_ += std::max(0, aliveEnemiesBeforeCombat - CountAliveEnemies());
+
+    ApplyEnemyPowerUpPickups();
 
     // Estado actual de los tanques presentes para que BulletSystem resuelva
     // un choque directo del disparo especial (ver TankCombatState).
@@ -872,8 +1385,42 @@ void Game::Update(double fixedDt) {
         state.weaponLevel = ref.tank->WeaponLevel();
         tanks.push_back(state);
     }
+    // El "Power" (enemigo 4) es el unico enemigo que entra a esta lista: el
+    // resto no es un blanco valido del especial (la bala los atraviesa
+    // sin hacerles nada, ver BulletSystem::Update). weaponLevel=4 fuerza la
+    // rama de "explota" en vez de "atraviesa" (esa rama solo pasa de largo
+    // si weaponLevel != 4), asi el especial revienta contra el en vez de
+    // seguir de largo como con los demas.
+    for (Enemy& enemy : powerEnemies_.Enemies()) {
+        if (!enemy.alive) {
+            continue;
+        }
+        TankCombatState state;
+        state.ownerId = enemy.ownerId;
+        enemy.tank.GetBounds(state.left, state.right, state.top, state.bottom);
+        state.shielded = false;
+        state.weaponLevel = 4;
+        tanks.push_back(state);
+    }
 
     bullets_.Update(fixedDt, map_, bulletImpacts_, specialExplosions_, specialExplosionEvents_, tanks, specialDirectKillEvents_);
+
+    // Choque directo del especial contra el "Power": lo destruye (a
+    // diferencia de un jugador, sin niveles/escudo que resolver, muere
+    // directo).
+    for (Enemy& enemy : powerEnemies_.Enemies()) {
+        if (!enemy.alive) {
+            continue;
+        }
+        for (const SpecialExplosionEvent& event : specialExplosionEvents_) {
+            if (event.directHitOwnerId == enemy.ownerId) {
+                specialExplosions_.Spawn(enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, /*nativeScale=*/true);
+                enemy.alive = false;
+                ++enemiesKilledThisLevel_;
+                break;
+            }
+        }
+    }
 
     // El aguila (TileType::Base) se destruye de un impacto (ver BulletSystem
     // y TriggerSpecialExplosion): si la celda dejo de ser Base, se acabo la
@@ -953,6 +1500,8 @@ void Game::Update(double fixedDt) {
             HandlePlayerDeath(*ref.tank, ref.ownerId);
         }
     }
+
+    CheckLevelCompletion();
 }
 
 void Game::RenderTank(const Tank& tank, const SpawnFlash& spawn, const TankSpriteSet& sprites, const MapViewport& viewport) {
@@ -1049,6 +1598,31 @@ void Game::RenderEnemy(const Enemy& enemy, const EnemySprites& sprites, const Ma
     const Rectangle src{0.0f, 0.0f, static_cast<float>(enemyTex.width), static_cast<float>(enemyTex.height)};
     const Rectangle dst{viewport.TileToScreenX(enemy.tank.X()), viewport.TileToScreenY(enemy.tank.Y()), viewport.tileScreenSize, viewport.tileScreenSize};
     DrawTexturePro(enemyTex, src, dst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+
+    // Disparo especial armado (solo "Power", ver Enemy::specialShotFuseTimer):
+    // mismo brillo pulsante que un jugador con HasSpecialShotReady() (ver
+    // RenderTank), redibujando el mismo sprite con mezcla aditiva.
+    if (enemy.specialShotFuseTimer >= 0.0) {
+        constexpr double kPulseStepDuration = 0.12;
+        constexpr int kPulseSequence[4] = {0, 1, 2, 1};
+        const int step = static_cast<int>(GetTime() / kPulseStepDuration) % 4;
+        const int level = kPulseSequence[step];
+        if (level > 0) {
+            const unsigned char alpha = (level == 1) ? 70 : 150;
+            BeginBlendMode(BLEND_ADDITIVE);
+            DrawTexturePro(enemyTex, src, dst, Vector2{0.0f, 0.0f}, 0.0f, Color{255, 255, 255, alpha});
+            EndBlendMode();
+        }
+    }
+
+    // Escudo (item Casco, ver Game::ApplyEnemyPowerUpPickups): mismo overlay
+    // parpadeante que un jugador con IsShielded() (ver RenderTank).
+    if (enemy.tank.IsShielded()) {
+        const int shieldFrame = static_cast<int>(GetTime() / kShieldBlinkInterval) % 2;
+        const Texture2D shieldTex = shieldSprites_.Get(shieldFrame);
+        const Rectangle shieldSrc{0.0f, 0.0f, static_cast<float>(shieldTex.width), static_cast<float>(shieldTex.height)};
+        DrawTexturePro(shieldTex, shieldSrc, dst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+    }
 
     // Debug (temporal, para diagnosticar si se traba): modo de movimiento
     // actual (ver Enemy::debugMode) + cuantos frames seguidos lleva sin
@@ -1277,6 +1851,12 @@ void Game::Render(double /*interpolationAlpha*/) {
     for (const Enemy& enemy : fastEnemies_.Enemies()) {
         RenderEnemy(enemy, fastEnemySprites_, viewport);
     }
+    for (const Enemy& enemy : armorEnemies_.Enemies()) {
+        RenderEnemy(enemy, armorEnemySprites_, viewport);
+    }
+    for (const Enemy& enemy : powerEnemies_.Enemies()) {
+        RenderEnemy(enemy, powerEnemySprites_, viewport);
+    }
 
     const float pixelScale = viewport.tileScreenSize / static_cast<float>(kTileSize);
     for (const Bullet& bullet : bullets_.Bullets()) {
@@ -1285,7 +1865,7 @@ void Game::Render(double /*interpolationAlpha*/) {
         const float h = static_cast<float>(bulletTex.height) * pixelScale;
         const Rectangle bulletSrc{0.0f, 0.0f, static_cast<float>(bulletTex.width), static_cast<float>(bulletTex.height)};
         const Rectangle bulletDst{viewport.TileToScreenX(bullet.x) - w * 0.5f, viewport.TileToScreenY(bullet.y) - h * 0.5f, w, h};
-        DrawTexturePro(bulletTex, bulletSrc, bulletDst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+        DrawTexturePro(bulletTex, bulletSrc, bulletDst, Vector2{0.0f, 0.0f}, 0.0f, BulletTintForOwner(bullet.ownerId));
     }
 
     const float impactSize = viewport.tileScreenSize * 0.9f;
@@ -1380,8 +1960,7 @@ void Game::Render(double /*interpolationAlpha*/) {
 
     // Icono de bandera "STAGE" (Tanques.png) arriba de la barra derecha,
     // alineado a la izquierda del panel (igual que los datos de jugadores),
-    // con el numero de nivel debajo. Todavia no hay progresion de niveles
-    // (Fase 3+), asi que por ahora siempre muestra 0 (nivel de prueba).
+    // con el numero de nivel actual (currentLevel_, 1-40) debajo.
     {
         constexpr int kStageIconDisplayWidth = 32;
         const int stageIconH = (stageFlagIconTexture_.height * kStageIconDisplayWidth) / stageFlagIconTexture_.width;
@@ -1390,11 +1969,11 @@ void Game::Render(double /*interpolationAlpha*/) {
         const Rectangle stageIconDst{static_cast<float>(panelLeftX), static_cast<float>(stageIconY), static_cast<float>(kStageIconDisplayWidth), static_cast<float>(stageIconH)};
         DrawTexturePro(stageFlagIconTexture_, stageIconSrc, stageIconDst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
         const int stageNumberY = stageIconY + stageIconH + 4;
-        DrawText("0", panelLeftX, stageNumberY, 20, RAYWHITE);
+        DrawText(TextFormat("%d", currentLevel_), panelLeftX, stageNumberY, 20, RAYWHITE);
 
-        // Cuantos enemigos faltan eliminar para terminar el nivel. Todavia
-        // no hay enemigos (Fase 3), asi que por ahora siempre muestra 0.
-        DrawText("Enemigos: 0", panelLeftX, stageNumberY + 40, 20, RAYWHITE);
+        // Cuantos enemigos faltan eliminar para terminar el nivel actual
+        // (cuota segun cantidad de jugadores activos, ver EnemiesRemainingThisLevel).
+        DrawText(TextFormat("Enemigos: %d", EnemiesRemainingThisLevel()), panelLeftX, stageNumberY + 40, 20, RAYWHITE);
 
         // Debug (temporal): nivel de agresividad actual (F11/F12 para
         // bajar/subir, ver EnemySystem::SetAggressivenessLevel).
@@ -1472,6 +2051,8 @@ void Game::Shutdown() {
     player4Sprites_.Unload();
     enemySprites_.Unload();
     fastEnemySprites_.Unload();
+    armorEnemySprites_.Unload();
+    powerEnemySprites_.Unload();
     CloseWindow();
 }
 

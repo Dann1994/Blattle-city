@@ -71,6 +71,12 @@ public:
     // de arrancar la cuenta regresiva para el proximo disparo).
     bool HasAliveBullet(int ownerId) const;
 
+    // Cuantas balas vivas de este dueño hay en pantalla ahora mismo (ver
+    // ArmorEnemySystem: puede tener hasta 2 balas propias a la vez, asi que
+    // HasAliveBullet -que solo dice "al menos 1"- no alcanza para saber si
+    // todavia puede disparar otra mas).
+    int AliveBulletCount(int ownerId) const;
+
     // Fuego amigo (seccion custom, configurable): mata las balas vivas, no
     // especiales, de un dueño distinto a excludeOwnerId que esten dentro de
     // la caja indicada (el tanque que se esta chequeando), y les dispara un
@@ -86,6 +92,13 @@ public:
     // solo aplica entre jugadores, ver Game::ApplyFriendlyFire). Devuelve
     // true si mato al menos una.
     bool KillEnemyBulletsHittingBox(float left, float right, float top, float bottom, BulletImpactSystem& impacts);
+
+    // Lo opuesto de KillEnemyBulletsHittingBox: solo cuenta balas de
+    // jugador (ownerId < kEnemyOwnerIdBase). La usan EnemySystem/
+    // FastEnemySystem para chequear si UN ENEMIGO murio: asi las balas
+    // enemigas (de cualquier tipo, incluidas las de otro enemigo) los
+    // atraviesan sin hacerles nada, en vez de matarse entre ellos.
+    bool KillPlayerBulletsHittingBox(float left, float right, float top, float bottom, BulletImpactSystem& impacts, std::vector<int>& outShooterWeaponLevels);
 
 private:
     // Destruye unidades minimas alrededor del punto de impacto (hitX,hitY):

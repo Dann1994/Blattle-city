@@ -1,5 +1,6 @@
 #pragma once
 
+#include <random>
 #include <vector>
 
 #include "BaseDistanceField.h"
@@ -16,32 +17,36 @@ class SpecialExplosionSystem;
 // Tanque "Basico": la mitad de veloz que un tanque de jugador nivel 1.
 constexpr float kEnemySpeedMultiplier = 0.5f;
 
-// Tanques enemigo "Basico" (seccion 5): en vez de heuristicas de
-// probabilidad, siguen el camino real mas corto hacia el aguila (ver
-// BaseDistanceField, recalculado cada tanto y compartido por todos). Reusa
-// Tank para todo el movimiento/colision/disparo (ver Enemy.h); esta clase
-// solo agrega la logica de decision.
+// Tanque enemigo "Basico": IA reconstruida paso a paso (ver el comentario
+// de cabecera de EnemySystem.cpp) — movimiento en linea recta por tramos,
+// direccion ponderada segun la posicion respecto del aguila (peso por
+// nivel de agresividad, ver kWeightsByLevel), reaccion al choque, y a
+// partir de nivel 4 pathfinding real (BaseDistanceField) en vez de la
+// ponderacion. Reusa Tank para todo el movimiento/colision/disparo (ver
+// Enemy.h); esta clase solo agrega la logica de decision.
 class EnemySystem {
 public:
     void SpawnAt(float x, float y);
 
-    // baseX/baseY: destino del campo de distancias (ver BaseDistanceField).
-    // playerTanks: tanques de jugador activos, solo para colision (son un
-    // obstaculo mas a esquivar, igual que un bloque: no hay modo de
-    // defensa). otherEnemyTanks: tanques de otros tipos de enemigo (por
-    // ejemplo el "Rapido", ver FastEnemySystem), solo para colision, nunca
-    // como blanco. specialExplosions recibe la animacion chica de muerte
-    // (igual que Game::DestroyTank para los jugadores) cuando un enemigo es
-    // destruido.
+    // baseX/baseY: posicion de la base (objetivo posible, ver
+    // EnemyTargetType::Base). playerTanks: tanques de jugador activos,
+    // objetivo posible (EnemyTargetType::Player) o simple obstaculo a
+    // esquivar segun a quien apunte cada enemigo este frame (ver
+    // SelectTarget en EnemySystem.cpp). otherEnemyTanks: tanques de otros
+    // tipos de enemigo (por ejemplo el "Rapido", ver FastEnemySystem), solo
+    // para colision, nunca como blanco. specialExplosions recibe la
+    // animacion chica de muerte (igual que Game::DestroyTank para los
+    // jugadores) cuando un enemigo es destruido.
     void Update(double dt, TileMap& map, BulletSystem& bullets, BulletImpactSystem& impacts, SpecialExplosionSystem& specialExplosions, const std::vector<Tank*>& playerTanks, const std::vector<Tank*>& otherEnemyTanks, float baseX, float baseY);
 
     std::vector<Enemy>& Enemies() { return enemies_; }
     const std::vector<Enemy>& Enemies() const { return enemies_; }
 
-    // 1 (mas pasiva) a 5 (mas agresiva); 3 es el comportamiento "de base"
-    // (valores originales). Escala que tan seguido dispara y que tan
-    // directo es el camino hacia el aguila (ver las tablas *ByLevel en
-    // EnemySystem.cpp); la velocidad de movimiento no cambia con esto.
+    // 1 (mas pasiva) a 5 (mas agresiva). Cambia la tabla de pesos de
+    // direccion (kWeightsByLevel en EnemySystem.cpp) y, desde nivel 4,
+    // activa el pathfinding real hacia el aguila en vez de la ponderacion.
+    // Se lee de nuevo cada Update(), asi que afecta de inmediato a los
+    // enemigos ya en pantalla, no solo a los que aparezcan despues.
     void SetAggressivenessLevel(int level);
     int AggressivenessLevel() const { return aggressivenessLevel_; }
 
@@ -50,9 +55,15 @@ private:
     int nextOwnerId_ = kEnemyOwnerIdBase;
     int aggressivenessLevel_ = 1;
 
-    // Compartido por todos los enemigos (el objetivo es el mismo para
-    // todos): se recalcula cada tanto, no cada frame (ver
-    // kFieldRecomputeInterval en EnemySystem.cpp).
+    // Semilla base para el RNG propio de cada enemigo (ver Enemy::rng):
+    // cada uno se siembra con globalSeed_ + su ownerId. Fija por instancia
+    // de EnemySystem para que, dada la misma secuencia de spawns, el
+    // comportamiento sea reproducible.
+    unsigned int globalSeed_ = std::random_device{}();
+
+    // Solo se usa/recalcula a partir de nivel de agresividad 4 (ver
+    // kFieldRecomputeInterval en EnemySystem.cpp): campo de distancias
+    // compartido por todos los enemigos de este tipo hacia el aguila.
     BaseDistanceField baseField_;
     double fieldRecomputeTimer_ = 0.0;
 };

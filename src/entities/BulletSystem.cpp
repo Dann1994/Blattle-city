@@ -50,6 +50,16 @@ bool BulletSystem::HasAliveBullet(int ownerId) const {
     return false;
 }
 
+int BulletSystem::AliveBulletCount(int ownerId) const {
+    int count = 0;
+    for (const Bullet& b : bullets_) {
+        if (b.alive && b.ownerId == ownerId) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 bool BulletSystem::TryShootSpecial(int ownerId, float muzzleX, float muzzleY, Direction direction) {
     Bullet bullet;
     bullet.x = muzzleX;
@@ -373,7 +383,7 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
         // central esta vacia pero el margen del sprite (perpendicular al
         // movimiento) roza la celda de al lado y esa si bloquea, se usa esa
         // celda en su lugar.
-        constexpr float kBulletHitHalfWidth = 0.09f;
+        constexpr float kBulletHitHalfWidth = 0.09f + (1.0f / 16.0f); // +1px (celda de 16px), pedido explicitamente
         const bool centerBlocks = map.InBounds(cellX, cellY) && TileBlocksShots(map.At(cellX, cellY).type);
         if (!centerBlocks && dx != 0.0f) {
             const int cellYLow = static_cast<int>(std::floor(newY - kBulletHitHalfWidth));
@@ -609,6 +619,22 @@ bool BulletSystem::KillEnemyBulletsHittingBox(float left, float right, float top
         }
         if (bullet.x >= left && bullet.x <= right && bullet.y >= top && bullet.y <= bottom) {
             impacts.Spawn(bullet.x, bullet.y, bullet.weaponLevel == 4);
+            bullet.alive = false;
+            hitAny = true;
+        }
+    }
+    return hitAny;
+}
+
+bool BulletSystem::KillPlayerBulletsHittingBox(float left, float right, float top, float bottom, BulletImpactSystem& impacts, std::vector<int>& outShooterWeaponLevels) {
+    bool hitAny = false;
+    for (Bullet& bullet : bullets_) {
+        if (!bullet.alive || bullet.isSpecial || bullet.ownerId >= kEnemyOwnerIdBase) {
+            continue;
+        }
+        if (bullet.x >= left && bullet.x <= right && bullet.y >= top && bullet.y <= bottom) {
+            impacts.Spawn(bullet.x, bullet.y, bullet.weaponLevel == 4);
+            outShooterWeaponLevels.push_back(bullet.weaponLevel);
             bullet.alive = false;
             hitAny = true;
         }

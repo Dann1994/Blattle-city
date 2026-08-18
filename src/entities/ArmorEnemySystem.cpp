@@ -1,4 +1,4 @@
-#include "EnemySystem.h"
+#include "ArmorEnemySystem.h"
 
 #include <algorithm>
 #include <array>
@@ -9,44 +9,26 @@
 #include "BulletSystem.h"
 #include "SpecialExplosionSystem.h"
 
-// Tanque enemigo "Basico": IA en reconstruccion paso a paso (a pedido del
-// usuario: "vamos por parte, te voy dando configuracion por configuracion").
-//
-// Paso 1: patron de movimiento en linea recta vertical u horizontal, en
-// tramos de 1 a 6 celdas elegidos al azar; al completarse un tramo, elige
-// uno nuevo y una direccion nueva, y recien entonces vuelve a decidir.
-//
-// Paso 2: en niveles de agresividad 1-3, la direccion no es 25%/25%/25%/25%
-// parejo. Cada direccion tiene un peso que depende de la posicion (por
-// celda) del enemigo respecto del aguila (ver WeightedRandomDirection):
-//   Arriba: upBase, o upAlignedPenalty si la columna (X) del enemigo
-//     coincide con la del aguila (ver Abajo).
-//   Abajo: downFavored, o downAligned si la columna (X) del enemigo
-//     coincide con la del aguila.
-//   Derecha: rlFavored si el aguila esta a la derecha (X mayor), si no
-//     rlBase; pero si la fila (Y) coincide con la del aguila, el lado
-//     hacia el que realmente esta (segun esa misma comparacion de X) sube
-//     a rlAligned y el lado contrario baja a rlAlignedPenalty.
-//   Izquierda: espejo de Derecha (rlFavored si el aguila esta a la
-//     izquierda, si no rlBase; con fila alineada, rlAligned/
-//     rlAlignedPenalty segun de que lado este el aguila).
-// Los pesos NO suman 100: se sortea proporcional al peso total (un peso
-// mas alto es mas probable, no un porcentaje independiente). Los numeros
-// dependen del nivel de agresividad (ver DirectionWeights/kWeightsByLevel
-// mas abajo): niveles 1-3 confirmados, nivel 5 pendiente.
-//
-// Desde nivel de agresividad 4, se deja de lado la ponderacion: busca el
-// camino real mas corto hacia el aguila (BaseDistanceField, igual que la
-// version pre-reconstruccion) y prioriza destruirla. El resto (tramos de
-// 1-6 celdas, reaccion al choque) sigue igual, solo cambia como se elige
-// la direccion.
-//
-// Paso 3: reaccion al choque. Si la direccion actual esta bloqueada
-// (no puede avanzar), cada frame que siga asi hace 2 sorteos independientes
-// de 50%: uno para cancelar el movimiento y pasar ya al siguiente (una
-// direccion distinta a la bloqueada, elegida igual que el paso 2 segun el
-// nivel), y otro para disparar hacia donde esta mirando. Evita que se
-// quede trabada insistiendo en avanzar contra algo.
+// Tanque "Blindado" (enemigo 3): misma IA que "Basico"/"Rapido" (ver el
+// comentario de cabecera de EnemySystem.cpp para el detalle completo de
+// cada paso). Las unicas diferencias son de combate/velocidad:
+//   - Mas lento: misma velocidad que un jugador con arma nivel 4 (ver
+//     kArmorEnemySpeedMultiplier en el .h).
+//   - Puede tener hasta 2 balas propias en vuelo a la vez (kMaxAliveBullets),
+//     no 1: "capacidad de tirar dos disparos seguidos". El segundo tiro de
+//     cada tanda de rutina no sale pegado al primero: espera un intervalo
+//     al azar entre kSecondShotMinDelay y kSecondShotMaxDelay (0.5s-2s, ver
+//     Enemy::secondShotDelay).
+//   - Sus balas llevan weaponLevel alto (kArmorWeaponLevel) para poder
+//     romper hierro, no solo ladrillo (ver kSteelDamageByLevel en
+//     BulletSystem.cpp: nivel 3 = 15 de dano por impacto, un bloque de
+//     hierro tiene 75, asi que se abre paso en unos 5 tiros sostenidos).
+//     El acero ya no es "intransitable para siempre" para este tipo (ver
+//     WouldBeBlocked mas abajo): la reaccion al choque lo tirotea igual que
+//     a un ladrillo.
+// Desde nivel de agresividad 4, la direccion se elige con pathfinding real
+// (BaseDistanceField) en vez de la tabla de pesos por nivel (ver
+// kMinPathfindingLevel).
 
 namespace bc {
 
@@ -54,13 +36,7 @@ namespace {
 constexpr int kMinRunCells = 1;
 constexpr int kMaxRunCells = 6;
 
-// Red de seguridad minima (NO es esquive "inteligente", eso es un paso
-// futuro): si el tramo elegido choca contra algo y nunca se completa
-// durante ~15s seguidos, se repone a la fuerza en una direccion libre (si
-// encuentra alguna) para que nunca quede trabada para siempre mientras se
-// prueba este paso.
 constexpr int kHardUnstuckFrames = 900; // ~15s a 60fps
-
 constexpr float kLookaheadStep = 0.2f;
 
 // Disparo: intervalo fijo, sin puntoria ni prioridades — placeholder
@@ -73,16 +49,31 @@ constexpr double kPlaceholderShootInterval = 1.5;
 constexpr int kMinPathfindingLevel = 4;
 
 // Cada cuanto se recalcula el campo de distancias hacia el aguila (solo
-// nivel >= kMinPathfindingLevel): la grilla es chica y el terreno solo
-// cambia cuando algo rompe un ladrillo/hierro, asi que no hace falta cada
-// frame.
+// nivel >= kMinPathfindingLevel).
 constexpr double kFieldRecomputeInterval = 0.5;
 
-// Nivel de arma que llevan sus balas: mismo dano contra hierro que un
-// jugador con arma nivel 1 (ver kSteelDamageByLevel en BulletSystem.cpp).
-// Ya alcanza para ir rompiendolo de a poco cuando la reaccion al choque le
-// dispara (WouldBeBlocked no distingue hierro de cualquier otro bloqueo).
-constexpr int kWeaponLevel = 1;
+// Nivel de arma que llevan sus balas (no el de movimiento del tanque, que
+// no tiene: ver kArmorEnemySpeedMultiplier en el .h). Nivel 3 = suficiente
+// para ir rompiendo hierro en varios impactos sostenidos, sin llegar al
+// "revienta todo de un tiro" del nivel 4.
+constexpr int kArmorWeaponLevel = 3;
+
+// Puede tener hasta 2 balas propias en pantalla a la vez (el resto de los
+// enemigos, 1).
+constexpr int kMaxAliveBullets = 2;
+
+// El segundo tiro de cada tanda no sale junto con el primero: espera entre
+// esto (ver Enemy::secondShotDelay).
+constexpr double kSecondShotMinDelay = 0.5;
+constexpr double kSecondShotMaxDelay = 2.0;
+
+constexpr int kMinAggressivenessLevel = 1;
+constexpr int kMaxAggressivenessLevel = 5;
+
+double RandomInRange(std::mt19937& rng, double lo, double hi) {
+    std::uniform_real_distribution<double> dist(lo, hi);
+    return dist(rng);
+}
 
 Direction RandomDirection(std::mt19937& rng) {
     constexpr Direction kAllDirs[4] = {Direction::Up, Direction::Down, Direction::Left, Direction::Right};
@@ -90,18 +81,8 @@ Direction RandomDirection(std::mt19937& rng) {
     return kAllDirs[dist(rng)];
 }
 
-// Los numeros que arman la tabla de pesos de WeightedRandomDirection
-// (seccion "Niveles de agresividad" mas abajo). Arriba y Abajo/Derecha/
-// Izquierda tienen cada uno su propio numero "base" (a diferencia de una
-// version anterior, no se asume que sean iguales entre si: por ejemplo
-// nivel 1 usa 30 para Arriba pero 25 para el lado no favorable de
-// Derecha/Izquierda).
-//   upBase / upAlignedPenalty: Arriba sin/con columna alineada con el aguila.
-//   downFavored / downAligned: Abajo sin/con columna alineada.
-//   rlBase: el lado "no favorable" de Derecha/Izquierda (sin alinear en fila).
-//   rlFavored: el lado favorable de Derecha/Izquierda (sin alinear en fila).
-//   rlAligned / rlAlignedPenalty: el lado favorable/contrario de Derecha o
-//     Izquierda cuando la fila SI esta alineada con el aguila.
+// Los numeros que arman la tabla de pesos de WeightedRandomDirection (ver
+// comentario equivalente en EnemySystem.cpp para el detalle completo).
 struct DirectionWeights {
     float upBase;
     float upAlignedPenalty;
@@ -113,22 +94,21 @@ struct DirectionWeights {
     float rlAlignedPenalty;
 };
 
-// Nivel de agresividad 1-5 (ver EnemySystem::SetAggressivenessLevel):
-// niveles 1-3 confirmados por el usuario; nivel 4 no usa esta tabla (ver
-// kMinPathfindingLevel, usa pathfinding real en su lugar); nivel 5 es
-// placeholder (copia de nivel 3) hasta que se defina.
+// Nivel de agresividad 1-5: niveles 1-3 confirmados; nivel 4 no usa esta
+// tabla (ver kMinPathfindingLevel, usa pathfinding real en su lugar);
+// nivel 5 es placeholder (copia de nivel 3) hasta que se defina.
 constexpr DirectionWeights kWeightsByLevel[5] = {
     {30.0f, 20.0f, 50.0f, 75.0f, 25.0f, 50.0f, 75.0f, 15.0f}, // nivel 1
     {25.0f, 10.0f, 75.0f, 98.0f, 25.0f, 75.0f, 98.0f, 10.0f}, // nivel 2
     {10.0f, 5.0f, 80.0f, 99.0f, 25.0f, 80.0f, 99.0f, 5.0f},   // nivel 3
-    {10.0f, 5.0f, 80.0f, 99.0f, 25.0f, 80.0f, 99.0f, 5.0f},   // nivel 4 (no se usa: pathfinding, ver kMinPathfindingLevel)
+    {10.0f, 5.0f, 80.0f, 99.0f, 25.0f, 80.0f, 99.0f, 5.0f},   // nivel 4 (no se usa: pathfinding)
     {10.0f, 5.0f, 80.0f, 99.0f, 25.0f, 80.0f, 99.0f, 5.0f},   // nivel 5 (placeholder, pendiente)
 };
 
 // Direccion al azar, ponderada segun la posicion (celda) del enemigo
-// respecto del aguila y el nivel de agresividad actual (ver
-// DirectionWeights/kWeightsByLevel arriba). Sortea un numero entre 0 y la
-// suma total de los 4 pesos, y devuelve la direccion en cuyo "tramo" cayo.
+// respecto del aguila y el nivel de agresividad actual. Ver el comentario
+// de cabecera de EnemySystem.cpp para la tabla de pesos completa (identica
+// aca).
 Direction WeightedRandomDirection(std::mt19937& rng, int enemyCellX, int enemyCellY, int baseCellX, int baseCellY, const DirectionWeights& w) {
     const bool sameColumn = (enemyCellX == baseCellX);
     const bool sameRow = (enemyCellY == baseCellY);
@@ -136,12 +116,6 @@ Direction WeightedRandomDirection(std::mt19937& rng, int enemyCellX, int enemyCe
     const float wUp = sameColumn ? w.upAlignedPenalty : w.upBase;
     const float wDown = sameColumn ? w.downAligned : w.downFavored;
 
-    // Derecha/Izquierda: si esta alineada en la misma fila que el aguila,
-    // el lado hacia el que realmente esta el aguila (segun la comparacion
-    // de X) sube a w.rlAligned y el lado contrario baja a
-    // w.rlAlignedPenalty (en vez de que ambas reglas se pisen y las 2
-    // terminen altas). Sin alineacion de fila, cada lado usa
-    // w.rlFavored/w.rlBase segun de que lado esta el aguila.
     float wRight = (baseCellX > enemyCellX) ? w.rlFavored : w.rlBase;
     float wLeft = (baseCellX < enemyCellX) ? w.rlFavored : w.rlBase;
     if (sameRow) {
@@ -204,8 +178,13 @@ bool IsTankAhead(const Tank& tank, Direction dir, const std::vector<Tank*>& othe
     return false;
 }
 
-// Usado solo por la red de seguridad de arriba, para elegir una direccion
-// que al menos ahora mismo este libre.
+// Bloqueada ahora mismo: pared del escenario, borde del mapa u otro tanque.
+// A diferencia de EnemySystem/FastEnemySystem, el hierro NO se trata
+// distinto de un ladrillo aca: este tipo tiene bala suficiente para
+// romperlo (ver kArmorWeaponLevel), asi que map.IsBoxBlocked ya alcanza sin
+// necesitar una excepcion para acero (que de todos modos hoy no existe en
+// este archivo: fisicamente sigue siendo solido hasta que las balas lo
+// terminen de romper, TileBlocksMovement no cambia por esto).
 bool WouldBeBlocked(const Tank& tank, Direction dir, const TileMap& map, const std::vector<Tank*>& others) {
     float left = 0.0f, right = 0.0f, top = 0.0f, bottom = 0.0f;
     tank.GetBounds(left, right, top, bottom);
@@ -224,12 +203,8 @@ bool WouldBeBlocked(const Tank& tank, Direction dir, const TileMap& map, const s
     return IsTankAhead(tank, dir, others);
 }
 
-// Nivel de agresividad >= kMinPathfindingLevel: en vez de ponderar, elige
-// la mejor direccion segun el campo de distancias real (BaseDistanceField,
-// ya tiene en cuenta el terreno — ladrillo transitable pero caro, acero/
-// agua intransitable). Solo descarta una candidata si un tanque la tapa
-// ahora mismo (eso el campo no lo sabe); si las 4 estan tapadas por
-// tanques, devuelve igual la mejor (la reaccion al choque se encarga).
+// Nivel de agresividad >= kMinPathfindingLevel: ver comentario equivalente
+// en EnemySystem.cpp.
 Direction FieldBestDirection(const BaseDistanceField& field, int cellX, int cellY, const Tank& tank, const std::vector<Tank*>& others) {
     const std::array<Direction, 4> ranked = field.RankedDirections(cellX, cellY);
     for (Direction d : ranked) {
@@ -241,9 +216,7 @@ Direction FieldBestDirection(const BaseDistanceField& field, int cellX, int cell
 }
 } // namespace
 
-void EnemySystem::SetAggressivenessLevel(int level) {
-    constexpr int kMinAggressivenessLevel = 1;
-    constexpr int kMaxAggressivenessLevel = 5;
+void ArmorEnemySystem::SetAggressivenessLevel(int level) {
     if (level < kMinAggressivenessLevel) {
         level = kMinAggressivenessLevel;
     } else if (level > kMaxAggressivenessLevel) {
@@ -256,11 +229,11 @@ void EnemySystem::SetAggressivenessLevel(int level) {
     // pantalla, no solo a los que aparezcan despues.
 }
 
-void EnemySystem::SpawnAt(float x, float y) {
+void ArmorEnemySystem::SpawnAt(float x, float y) {
     Enemy enemy;
     enemy.tank.SetPosition(x, y);
     enemy.tank.SetFacing(Direction::Down); // entra mirando hacia adentro del mapa
-    enemy.tank.SetSpeedMultiplier(kEnemySpeedMultiplier);
+    enemy.tank.SetSpeedMultiplier(kArmorEnemySpeedMultiplier);
     enemy.ownerId = nextOwnerId_++;
     enemy.alive = true;
 
@@ -273,7 +246,7 @@ void EnemySystem::SpawnAt(float x, float y) {
     enemies_.push_back(enemy);
 }
 
-void EnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, BulletImpactSystem& impacts, SpecialExplosionSystem& specialExplosions, const std::vector<Tank*>& playerTanks, const std::vector<Tank*>& otherEnemyTanks, float baseX, float baseY) {
+void ArmorEnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, BulletImpactSystem& impacts, SpecialExplosionSystem& specialExplosions, const std::vector<Tank*>& playerTanks, const std::vector<Tank*>& otherEnemyTanks, float baseX, float baseY) {
     const int baseCellX = static_cast<int>(std::round(baseX));
     const int baseCellY = static_cast<int>(std::round(baseY));
     const DirectionWeights& weights = kWeightsByLevel[aggressivenessLevel_ - 1];
@@ -352,9 +325,6 @@ void EnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, BulletI
         }
 
         // --- Movimiento: linea recta, tramos de 1 a 6 celdas al azar ---
-        // Cada vez que entra a una celda nueva, descuenta el tramo actual;
-        // cuando se completa, elige una direccion nueva (25% cada una) y un
-        // tramo nuevo, y recien ahi vuelve a decidir.
         const int cellX = static_cast<int>(std::floor(enemy.tank.X() + 0.5f));
         const int cellY = static_cast<int>(std::floor(enemy.tank.Y() + 0.5f));
         if (cellX != enemy.decisionCellX || cellY != enemy.decisionCellY) {
@@ -372,8 +342,7 @@ void EnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, BulletI
         }
         enemy.debugMode = 'M';
 
-        // Red de seguridad (ver comentario arriba): nunca trabada para
-        // siempre mientras se prueba este paso.
+        // Red de seguridad: nunca trabada para siempre.
         bool hardUnstuckTriggered = false;
         if (enemy.stuckFrames > kHardUnstuckFrames) {
             Direction bestDir = enemy.moveDir;
@@ -397,27 +366,13 @@ void EnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, BulletI
             hardUnstuckTriggered = true;
         }
 
-        // --- Paso 3: reaccion al choque. Si la direccion actual esta
-        // bloqueada ahora mismo (no puede avanzar), 2 sorteos
-        // independientes, cada uno 50%: uno para cancelar el movimiento
-        // actual y pasar ya al siguiente (una direccion distinta a la que
-        // estaba bloqueada), y otro para disparar hacia donde esta mirando
-        // (por ejemplo, para intentar volar el ladrillo que la frena). Esto
-        // evita que se quede trabada insistiendo en avanzar contra algo. Se
-        // evalua cada frame que siga bloqueada, no solo la primera vez.
+        // --- Reaccion al choque: 2 sorteos independientes de 50% cada frame
+        // que siga bloqueada (redirigir / disparar hacia lo que la frena,
+        // incluido el hierro: ver comentario de cabecera). ---
         if (!hardUnstuckTriggered && WouldBeBlocked(enemy.tank, enemy.moveDir, map, others)) {
             if (RollChance(enemy.rng, 0.5)) {
-                // Prefiere una direccion que ya ahora mismo este libre (si
-                // hay alguna disponible entre varios intentos ponderados):
-                // si no, redirige igual a la mejor candidata ponderada
-                // (puede seguir bloqueada, pero el proximo frame se vuelve
-                // a intentar). Antes elegia a ciegas sin mirar si la nueva
-                // tambien chocaba, lo que la podia dejar rebotando entre 2
-                // direcciones igual de tapadas.
                 Direction newDir = enemy.moveDir;
                 if (usePathfinding) {
-                    // Igual que en la decision normal, pero descartando
-                    // ademas la direccion bloqueada actual.
                     const std::array<Direction, 4> ranked = baseField_.RankedDirections(cellX, cellY);
                     bool found = false;
                     for (Direction candidate : ranked) {
@@ -439,11 +394,9 @@ void EnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, BulletI
                         }
                     }
                 } else {
-                    Direction firstCandidate = enemy.moveDir;
-                    while (firstCandidate == enemy.moveDir) {
-                        firstCandidate = WeightedRandomDirection(enemy.rng, cellX, cellY, baseCellX, baseCellY, weights);
+                    while (newDir == enemy.moveDir) {
+                        newDir = WeightedRandomDirection(enemy.rng, cellX, cellY, baseCellX, baseCellY, weights);
                     }
-                    newDir = firstCandidate; // si ninguna sale libre, se usa esta igual (se reintenta el proximo frame)
                     for (int tries = 0; tries < 6; ++tries) {
                         Direction candidate = enemy.moveDir;
                         while (candidate == enemy.moveDir) {
@@ -456,29 +409,22 @@ void EnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, BulletI
                     }
                 }
                 enemy.moveDir = newDir;
-                // Encara la nueva direccion YA, sin esperar a tank.Update()
-                // mas abajo en este mismo frame (que tambien lo haria, pero
-                // solo si el input de movimiento efectivamente se procesa):
-                // asi el giro es inmediato y visible pase lo que pase con
-                // el intento de movimiento en si.
+                // Encara la nueva direccion YA (ver comentario equivalente
+                // en EnemySystem.cpp): giro inmediato, no depende de que
+                // tank.Update() llegue a procesar el input mas abajo.
                 enemy.tank.SetFacing(newDir);
                 enemy.decisionCellX = cellX;
                 enemy.decisionCellY = cellY;
                 enemy.deviationCellsRemaining = RandomRunLength(enemy.rng);
             }
             if (RollChance(enemy.rng, 0.5)) {
-                const bool bulletAlreadyAlive = bullets.HasAliveBullet(enemy.ownerId);
-                if (!bulletAlreadyAlive && enemy.tank.CanShoot()) {
-                    // Importante: encara YA la direccion bloqueada antes de
-                    // disparar. tank.Facing() todavia refleja el movimiento
-                    // del frame anterior (recien se actualiza mas abajo, en
-                    // tank.Update()), asi que sin esto el tiro podia salir
-                    // apuntando para otro lado en vez de al ladrillo que en
-                    // realidad la esta frenando.
+                if (bullets.AliveBulletCount(enemy.ownerId) < kMaxAliveBullets && enemy.tank.CanShoot()) {
+                    // Encara YA la direccion bloqueada antes de disparar
+                    // (ver comentario equivalente en EnemySystem.cpp).
                     enemy.tank.SetFacing(enemy.moveDir);
                     float muzzleX = 0.0f, muzzleY = 0.0f;
                     enemy.tank.MuzzlePosition(muzzleX, muzzleY);
-                    bullets.TryShoot(enemy.ownerId, muzzleX, muzzleY, enemy.moveDir, enemy.tank.BulletSpeed(), kWeaponLevel, 1);
+                    bullets.TryShoot(enemy.ownerId, muzzleX, muzzleY, enemy.moveDir, enemy.tank.BulletSpeed(), kArmorWeaponLevel, kMaxAliveBullets);
                 }
             }
         }
@@ -508,19 +454,31 @@ void EnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, BulletI
         const bool moved = movedDist > 0.0005f;
         enemy.stuckFrames = moved ? 0 : (enemy.stuckFrames + 1);
 
-        // --- Disparo: placeholder fijo, sin puntoria (paso pendiente) ---
-        const bool bulletAliveNow = bullets.HasAliveBullet(enemy.ownerId);
-        if (enemy.bulletWasAlive && !bulletAliveNow) {
-            enemy.shootTimer = kPlaceholderShootInterval;
-        }
-        enemy.bulletWasAlive = bulletAliveNow;
+        // --- Disparo: tanda de 2 tiros de rutina, sin puntoria (paso
+        // pendiente). Dispara el primero cuando vence shootTimer; el
+        // segundo no sale junto con el primero, sino recien despues de un
+        // intervalo al azar entre kSecondShotMinDelay y kSecondShotMaxDelay
+        // (secondShotDelay, -1 mientras no hay un segundo tiro pendiente).
+        // Recien cuando sale el segundo se vuelve a armar shootTimer para
+        // la proxima tanda. ---
+        const int aliveCount = bullets.AliveBulletCount(enemy.ownerId);
 
-        if (!bulletAliveNow && enemy.tank.CanShoot()) {
+        if (enemy.secondShotDelay >= 0.0) {
+            enemy.secondShotDelay -= dt;
+            if (enemy.secondShotDelay <= 0.0 && aliveCount < kMaxAliveBullets && enemy.tank.CanShoot()) {
+                float muzzleX = 0.0f, muzzleY = 0.0f;
+                enemy.tank.MuzzlePosition(muzzleX, muzzleY);
+                bullets.TryShoot(enemy.ownerId, muzzleX, muzzleY, enemy.tank.Facing(), enemy.tank.BulletSpeed(), kArmorWeaponLevel, kMaxAliveBullets);
+                enemy.secondShotDelay = -1.0;
+                enemy.shootTimer = kPlaceholderShootInterval; // arranca la cuenta para la proxima tanda
+            }
+        } else if (aliveCount < kMaxAliveBullets && enemy.tank.CanShoot()) {
             enemy.shootTimer -= dt;
             if (enemy.shootTimer <= 0.0) {
                 float muzzleX = 0.0f, muzzleY = 0.0f;
                 enemy.tank.MuzzlePosition(muzzleX, muzzleY);
-                bullets.TryShoot(enemy.ownerId, muzzleX, muzzleY, enemy.tank.Facing(), enemy.tank.BulletSpeed(), kWeaponLevel, 1);
+                bullets.TryShoot(enemy.ownerId, muzzleX, muzzleY, enemy.tank.Facing(), enemy.tank.BulletSpeed(), kArmorWeaponLevel, kMaxAliveBullets);
+                enemy.secondShotDelay = RandomInRange(enemy.rng, kSecondShotMinDelay, kSecondShotMaxDelay);
             }
         }
     }
