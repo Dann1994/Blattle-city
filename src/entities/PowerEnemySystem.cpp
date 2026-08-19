@@ -248,7 +248,8 @@ void PowerEnemySystem::SpawnAt(float x, float y) {
     enemies_.push_back(enemy);
 }
 
-void PowerEnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, BulletImpactSystem& impacts, SpecialExplosionSystem& specialExplosions, const std::vector<Tank*>& playerTanks, const std::vector<Tank*>& otherEnemyTanks, float baseX, float baseY) {
+void PowerEnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, BulletImpactSystem& impacts, SpecialExplosionSystem& specialExplosions, const std::vector<Tank*>& playerTanks, const std::vector<Tank*>& otherEnemyTanks, float baseX, float baseY, std::vector<ScoreEvent>& outScoreEvents) {
+    outScoreEvents.clear();
     const DirectionWeights& weights = kWeightsByLevel[aggressivenessLevel_ - 1];
     const int baseCellX = static_cast<int>(std::round(baseX));
     const int baseCellY = static_cast<int>(std::round(baseY));
@@ -282,14 +283,24 @@ void PowerEnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, Bu
         float eLeft = 0.0f, eRight = 0.0f, eTop = 0.0f, eBottom = 0.0f;
         enemy.tank.GetBounds(eLeft, eRight, eTop, eBottom);
         std::vector<int> hitLevels;
-        if (bullets.KillPlayerBulletsHittingBox(eLeft, eRight, eTop, eBottom, impacts, hitLevels)) {
-            for (int shooterLevel : hitLevels) {
-                const int idx = std::clamp(shooterLevel, 1, 4) - 1;
+        std::vector<int> hitOwnerIds;
+        if (bullets.KillPlayerBulletsHittingBox(eLeft, eRight, eTop, eBottom, impacts, hitLevels, hitOwnerIds)) {
+            // El "golpe de gracia" (el disparo que la deja en 0 o menos) es
+            // a quien se le acredita el puntaje, no necesariamente el
+            // primero de la lista: con varios jugadores pegandole a la vez
+            // puede ser cualquiera de los impactos de este mismo frame.
+            int killerOwnerId = -1;
+            for (size_t hitIdx = 0; hitIdx < hitLevels.size(); ++hitIdx) {
+                const int idx = std::clamp(hitLevels[hitIdx], 1, 4) - 1;
                 enemy.hp -= kPowerEnemyDamageByLevel[idx];
+                if (enemy.hp <= 0 && killerOwnerId == -1) {
+                    killerOwnerId = hitOwnerIds[hitIdx];
+                }
             }
             if (enemy.hp <= 0) {
                 specialExplosions.Spawn(enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, /*nativeScale=*/true);
                 enemy.alive = false;
+                outScoreEvents.push_back(ScoreEvent{killerOwnerId, enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, kScorePowerKill});
                 continue;
             }
         }
@@ -357,24 +368,33 @@ void PowerEnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, Bu
         bool hardUnstuckTriggered = false;
         if (enemy.stuckFrames > kHardUnstuckFrames) {
             Direction bestDir = enemy.moveDir;
+            bool foundFreeDirection = false;
             for (int tries = 0; tries < 4; ++tries) {
                 const Direction candidate = RandomDirection(enemy.rng);
                 if (!WouldBeBlocked(enemy.tank, candidate, map, others)) {
                     bestDir = candidate;
+                    foundFreeDirection = true;
                     break;
                 }
             }
-            float ddx = 0.0f, ddy = 0.0f;
-            DirectionVector(bestDir, ddx, ddy);
-            enemy.tank.SetPosition(std::round(enemy.tank.X()) + ddx, std::round(enemy.tank.Y()) + ddy);
-            enemy.tank.SetFacing(bestDir);
-            enemy.moveDir = bestDir;
-            enemy.decisionCellX = static_cast<int>(std::round(enemy.tank.X()));
-            enemy.decisionCellY = static_cast<int>(std::round(enemy.tank.Y()));
-            enemy.deviationCellsRemaining = RandomRunLength(enemy.rng);
-            enemy.stuckFrames = 0;
-            enemy.debugMode = 'U';
-            hardUnstuckTriggered = true;
+            // Si las 4 direcciones probadas seguian bloqueadas, NO
+            // teletransporta (antes lo hacia igual, con bestDir==moveDir,
+            // la MISMA direccion bloqueada que lo tenia trabado: eso podia
+            // meterlo adentro de una pared sin volver a chequear). Deja
+            // stuckFrames como esta para reintentar el proximo frame.
+            if (foundFreeDirection) {
+                float ddx = 0.0f, ddy = 0.0f;
+                DirectionVector(bestDir, ddx, ddy);
+                enemy.tank.SetPosition(std::round(enemy.tank.X()) + ddx, std::round(enemy.tank.Y()) + ddy);
+                enemy.tank.SetFacing(bestDir);
+                enemy.moveDir = bestDir;
+                enemy.decisionCellX = static_cast<int>(std::round(enemy.tank.X()));
+                enemy.decisionCellY = static_cast<int>(std::round(enemy.tank.Y()));
+                enemy.deviationCellsRemaining = RandomRunLength(enemy.rng);
+                enemy.stuckFrames = 0;
+                enemy.debugMode = 'U';
+                hardUnstuckTriggered = true;
+            }
         }
 
         // --- Reaccion al choque: 2 sorteos independientes de 50% cada

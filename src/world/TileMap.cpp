@@ -4,6 +4,21 @@
 
 namespace bc {
 
+namespace {
+// 'F' (o el campo ausente/mas corto que la grilla, en niveles guardados
+// antes de este campo existir) equivale a Full.
+BlockShape ShapeAt(const LevelData& level, int x, int y) {
+    if (y >= static_cast<int>(level.block_shapes.size())) {
+        return BlockShape::Full;
+    }
+    const std::string& row = level.block_shapes[y];
+    if (x >= static_cast<int>(row.size())) {
+        return BlockShape::Full;
+    }
+    return BlockShapeFromChar(row[x]);
+}
+} // namespace
+
 void TileMap::LoadFrom(const LevelData& level) {
     width_ = level.width;
     height_ = level.height;
@@ -16,17 +31,22 @@ void TileMap::LoadFrom(const LevelData& level) {
             Cell& cell = At(x, y);
             cell.type = type;
             if (type == TileType::Brick) {
+                const BlockShape shape = ShapeAt(level, x, y);
                 for (int r = 0; r < kBrickGridSize; ++r) {
                     for (int c = 0; c < kBrickGridSize; ++c) {
                         BrickUnit& unit = cell.brickUnits[r * kBrickGridSize + c];
-                        unit.alive = true;
+                        unit.alive = IsUnitAliveForShape(shape, r, c, kBrickGridSize);
                         unit.frame = BrickUnit::FrameFor(r, c);
                     }
                 }
             } else if (type == TileType::Steel) {
-                for (SteelUnit& unit : cell.steelUnits) {
-                    unit.alive = true;
-                    unit.hp = kSteelUnitMaxHp;
+                const BlockShape shape = ShapeAt(level, x, y);
+                for (int r = 0; r < kSteelGridSize; ++r) {
+                    for (int c = 0; c < kSteelGridSize; ++c) {
+                        SteelUnit& unit = cell.steelUnits[r * kSteelGridSize + c];
+                        unit.alive = IsUnitAliveForShape(shape, r, c, kSteelGridSize);
+                        unit.hp = kSteelUnitMaxHp;
+                    }
                 }
             }
         }

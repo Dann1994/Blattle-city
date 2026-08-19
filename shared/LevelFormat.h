@@ -12,6 +12,10 @@ struct LevelData {
     int width = 13;
     int height = 13;
     std::vector<std::string> tiles;                 // `height` filas de `width` caracteres
+    // Opcional: mismas dimensiones que tiles, solo se interpreta en celdas
+    // Brick/Steel (ver BlockShape en TileTypes.h). Vacio (el caso normal,
+    // niveles viejos sin este campo) equivale a "todo Full" en esas celdas.
+    std::vector<std::string> block_shapes;
     std::vector<std::array<int, 2>> player_spawns;   // [x, y]
     std::vector<std::array<int, 2>> enemy_spawns;    // [x, y]
     std::map<std::string, int> enemy_wave;           // "basic", "fast", "power", "armor"

@@ -22,6 +22,9 @@ LevelData LoadLevel(const std::string& path) {
     level.width = j.at("width").get<int>();
     level.height = j.at("height").get<int>();
     level.tiles = j.at("tiles").get<std::vector<std::string>>();
+    if (j.contains("block_shapes")) {
+        level.block_shapes = j.at("block_shapes").get<std::vector<std::string>>();
+    }
 
     if (j.contains("player_spawns")) {
         for (const auto& spawn : j.at("player_spawns")) {
@@ -52,6 +55,9 @@ void SaveLevel(const std::string& path, const LevelData& level) {
     j["width"] = level.width;
     j["height"] = level.height;
     j["tiles"] = level.tiles;
+    if (!level.block_shapes.empty()) {
+        j["block_shapes"] = level.block_shapes;
+    }
 
     for (const auto& spawn : level.player_spawns) {
         j["player_spawns"].push_back({spawn[0], spawn[1]});

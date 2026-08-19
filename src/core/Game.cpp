@@ -1,6 +1,8 @@
 #include "Game.h"
 
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 
 #include <raylib.h>
 
@@ -11,6 +13,38 @@
 namespace bc {
 
 namespace {
+
+// Interruptor unico para todas las teclas/HUD de depuracion (spawns
+// manuales, forzar power-ups, subir/bajar agresividad, saltar de nivel,
+// grilla de referencia, contador de FPS, etc.): pedido explicitamente que
+// la interfaz del juego quede limpia. Se deja en false en vez de borrar ese
+// codigo, para poder reactivarlo de un solo cambio si hace falta seguir
+// probando algo puntual mas adelante.
+constexpr bool kDebugFeaturesEnabled = false;
+
+// Transicion de nivel (seccion custom, calcada del original): pantalla gris
+// solida con "NIVEL N" un tiempo fijo, despues esa misma pantalla partida al
+// medio se abre como un telon (ver LevelTransitionPhase/RenderLevelTransition).
+constexpr double kLevelTransitionTextDuration = 2.0;
+constexpr double kLevelTransitionCurtainDuration = 0.8;
+constexpr Color kLevelTransitionGray = Color{168, 168, 168, 255};
+
+// Espera post-cuota-cumplida antes de pasar de nivel (pedido explicito): el
+// juego sigue andando normal durante esta espera, a diferencia de la
+// transicion de arriba que congela todo.
+constexpr double kLevelClearDelay = 5.0;
+
+// Pantalla de puntuacion de fin de nivel (ver ScoreTallyPhase): cuanto tarda
+// cada incremento de un contador, la pausa antes de revelar el siguiente
+// icono de esa fila, y la pausa final (Holding) con todo ya revelado antes
+// de pasar a la transicion del siguiente nivel.
+constexpr double kScoreTallyCountInterval = 0.2;
+constexpr double kScoreTallyRowPause = 0.6;
+constexpr double kScoreTallyHoldDuration = 2.0;
+
+// Bono de fin de nivel (pedido explicito) para quien mas puntos gano en el
+// nivel (ver TickScoreTally/scoreTallyBonusAwarded_).
+constexpr int kScoreTallyClearBonus = 1000;
 
 // Duraciones del escudo (seccion 6). No hay un numero exacto documentado del
 // juego original para la proteccion al aparecer; 10s para el item Casco esta
@@ -93,6 +127,99 @@ Color BulletTintForOwner(int ownerId) {
         case 3: return Color{0, 85, 164, 255};   // P4
         default: return WHITE;
     }
+}
+
+// Etiqueta corta (para el menu de Opciones) y explicacion (texto de ayuda
+// abajo del todo) de cada FriendlyFireMode. El comportamiento real ya
+// estaba implementado (ver ApplyFriendlyFire/ProcessFriendlyFireDamageHit);
+// esto solo lo expone en el menu en vez de F3.
+const char* FriendlyFireLabel(FriendlyFireMode mode) {
+    switch (mode) {
+        case FriendlyFireMode::Paralyze: return "TIPO 1";
+        case FriendlyFireMode::Damage:   return "TIPO 2";
+        default:                         return "NO";
+    }
+}
+
+const char* FriendlyFireExplanation(FriendlyFireMode mode) {
+    switch (mode) {
+        case FriendlyFireMode::Paralyze: return "La bala de un aliado te paraliza un momento, sin quitarte nada.";
+        case FriendlyFireMode::Damage:   return "La bala de un aliado te hace dano real, segun el nivel de arma de quien dispara.";
+        default:                         return "Las balas de otro jugador te atraviesan sin ningun efecto.";
+    }
+}
+
+// Nombre corto para mostrar en el mapeo de controles (Opciones > Mapeo de
+// controles): cubre las teclas usadas por los esquemas por defecto mas las
+// mas comunes para reasignar a mano. No es exhaustivo (raylib no trae un
+// KeyName de fabrica); una tecla no cubierta cae en el numero crudo.
+const char* KeyName(int key) {
+    switch (key) {
+        case KEY_SPACE: return "ESPACIO";
+        case KEY_ENTER: return "ENTER";
+        case KEY_ESCAPE: return "ESC";
+        case KEY_TAB: return "TAB";
+        case KEY_LEFT_CONTROL: return "CTRL IZQ";
+        case KEY_RIGHT_CONTROL: return "CTRL DER";
+        case KEY_LEFT_SHIFT: return "SHIFT IZQ";
+        case KEY_RIGHT_SHIFT: return "SHIFT DER";
+        case KEY_LEFT_ALT: return "ALT IZQ";
+        case KEY_RIGHT_ALT: return "ALT DER";
+        case KEY_UP: return "FLECHA ARRIBA";
+        case KEY_DOWN: return "FLECHA ABAJO";
+        case KEY_LEFT: return "FLECHA IZQ";
+        case KEY_RIGHT: return "FLECHA DER";
+        case KEY_KP_0: return "NUM 0";
+        case KEY_KP_1: return "NUM 1";
+        case KEY_KP_2: return "NUM 2";
+        case KEY_KP_3: return "NUM 3";
+        case KEY_KP_4: return "NUM 4";
+        case KEY_KP_5: return "NUM 5";
+        case KEY_KP_6: return "NUM 6";
+        case KEY_KP_7: return "NUM 7";
+        case KEY_KP_8: return "NUM 8";
+        case KEY_KP_9: return "NUM 9";
+        case KEY_KP_ENTER: return "NUM ENTER";
+        case KEY_KP_DECIMAL: return "NUM .";
+        case KEY_ONE: return "1";
+        case KEY_TWO: return "2";
+        case KEY_THREE: return "3";
+        case KEY_FOUR: return "4";
+        case KEY_FIVE: return "5";
+        case KEY_SIX: return "6";
+        case KEY_SEVEN: return "7";
+        case KEY_EIGHT: return "8";
+        case KEY_NINE: return "9";
+        case KEY_ZERO: return "0";
+        case KEY_A: return "A"; case KEY_B: return "B"; case KEY_C: return "C"; case KEY_D: return "D";
+        case KEY_E: return "E"; case KEY_F: return "F"; case KEY_G: return "G"; case KEY_H: return "H";
+        case KEY_I: return "I"; case KEY_J: return "J"; case KEY_K: return "K"; case KEY_L: return "L";
+        case KEY_M: return "M"; case KEY_N: return "N"; case KEY_O: return "O"; case KEY_P: return "P";
+        case KEY_Q: return "Q"; case KEY_R: return "R"; case KEY_S: return "S"; case KEY_T: return "T";
+        case KEY_U: return "U"; case KEY_V: return "V"; case KEY_W: return "W"; case KEY_X: return "X";
+        case KEY_Y: return "Y"; case KEY_Z: return "Z";
+        default: return TextFormat("TECLA %d", key);
+    }
+}
+
+// Triangulo chico que apunta hacia (dirX, dirY) (vector unidad, ej. (0,-1)
+// para arriba): usado en vez de texto para las 4 acciones de movimiento del
+// mapeo de controles, pedido explicitamente.
+void DrawArrowGlyph(float centerX, float centerY, float size, float dirX, float dirY, Color color) {
+    const Vector2 tip{centerX + dirX * size, centerY + dirY * size};
+    const float perpX = -dirY;
+    const float perpY = dirX;
+    const Vector2 base1{centerX - dirX * size * 0.6f + perpX * size * 0.7f, centerY - dirY * size * 0.6f + perpY * size * 0.7f};
+    const Vector2 base2{centerX - dirX * size * 0.6f - perpX * size * 0.7f, centerY - dirY * size * 0.6f - perpY * size * 0.7f};
+    DrawTriangle(tip, base2, base1, color);
+}
+
+int CountAliveInList(const std::vector<Enemy>& enemies) {
+    int count = 0;
+    for (const Enemy& enemy : enemies) {
+        count += enemy.alive ? 1 : 0;
+    }
+    return count;
 }
 
 // Automatizacion de oleadas (40 niveles, ver Game::TickEnemySpawning/
@@ -246,28 +373,63 @@ void Game::Init() {
     spawnFlashSprites_.Load(BC_ASSETS_DIR);
     shieldSprites_.Load(BC_ASSETS_DIR);
     bulletImpactSprites_.Load(BC_ASSETS_DIR);
+    scorePopupSprites_.Load(BC_ASSETS_DIR);
     specialExplosionSprites_.Load(BC_ASSETS_DIR);
+    titleLogoTexture_ = LoadTexture((std::string(BC_ASSETS_DIR) + "sprites/title_logo.png").c_str());
+    SetTextureFilter(titleLogoTexture_, TEXTURE_FILTER_POINT);
+    menuSelectorTexture_ = LoadTexture((std::string(BC_ASSETS_DIR) + "sprites/menu_selector_tank.png").c_str());
+    SetTextureFilter(menuSelectorTexture_, TEXTURE_FILTER_POINT);
+    LoadHighScore();
+    InitDefaultKeyBindings();
 
     ResetState();
+}
+
+void Game::InitDefaultKeyBindings() {
+    using A = InputAction;
+    auto set = [](PlayerKeyBindings& b, int up, int down, int left, int right, int shoot, int special, int start) {
+        b.keys[static_cast<int>(A::Up)] = up;
+        b.keys[static_cast<int>(A::Down)] = down;
+        b.keys[static_cast<int>(A::Left)] = left;
+        b.keys[static_cast<int>(A::Right)] = right;
+        b.keys[static_cast<int>(A::Shoot)] = shoot;
+        b.keys[static_cast<int>(A::Special)] = special;
+        b.keys[static_cast<int>(A::Start)] = start;
+    };
+    set(playerBindings_[0], KEY_W, KEY_S, KEY_A, KEY_D, KEY_LEFT_CONTROL, KEY_SPACE, KEY_ONE);
+    set(playerBindings_[1], KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_RIGHT_CONTROL, KEY_RIGHT_SHIFT, KEY_TWO);
+    set(playerBindings_[2], KEY_I, KEY_K, KEY_J, KEY_L, KEY_U, KEY_O, KEY_THREE);
+    set(playerBindings_[3], KEY_KP_8, KEY_KP_5, KEY_KP_4, KEY_KP_6, KEY_KP_0, KEY_KP_ENTER, KEY_FOUR);
 }
 
 // Vuelve a dejar la partida como recien arrancada: recarga el mapa (repone
 // los ladrillos rotos), y reinicia tanque, balas, explosiones y power-ups.
 // Pensado para probar rapido (ESC), sin tener que cerrar y volver a abrir.
-void Game::ResetState() {
-    const LevelData level = LoadLevel(std::string(BC_ASSETS_DIR) + "levels/test_map.json");
+std::string Game::LevelFilePath(int levelNumber) const {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "levels/level_%02d.json", levelNumber);
+    const std::string customPath = std::string(BC_ASSETS_DIR) + buf;
+    if (std::filesystem::exists(customPath)) {
+        return customPath;
+    }
+    // Todavia no se diseño ese nivel con el editor: se usa el mapa de
+    // siempre como respaldo, para que el juego nunca se rompa por un nivel
+    // faltante (van a ir apareciendo los 40 de a poco).
+    return std::string(BC_ASSETS_DIR) + "levels/test_map.json";
+}
+
+void Game::LoadCurrentLevelMap() {
+    const LevelData level = LoadLevel(LevelFilePath(currentLevel_));
     map_.LoadFrom(level);
 
     basePositionX_ = level.base_position[0];
     basePositionY_ = level.base_position[1];
     fortifiedCells_.clear();
     baseFortifyTimer_ = 0.0;
-    gameOver_ = false;
 
-    // Anillo de proteccion de la base (ver test_map.json: ladrillo arriba
-    // -izquierda/arriba-centro/arriba-derecha, pegado directo a la base, y a
-    // los costados): se recorta a 2 unidades de espesor, pegadas al lado que
-    // da hacia la base.
+    // Anillo de proteccion de la base (ladrillo arriba-izquierda/arriba-centro/
+    // arriba-derecha, pegado directo a la base, y a los costados): se recorta
+    // a 2 unidades de espesor, pegadas al lado que da hacia la base.
     ThinBrickCellVertical(basePositionX_ - 1, basePositionY_ - 1, true);
     ThinBrickCellVertical(basePositionX_, basePositionY_ - 1, true);
     ThinBrickCellVertical(basePositionX_ + 1, basePositionY_ - 1, true);
@@ -300,6 +462,14 @@ void Game::ResetState() {
         player4SpawnY_ = player1SpawnY_;
     }
 
+    enemySpawnPositions_ = level.enemy_spawns;
+}
+
+void Game::ResetState() {
+    currentLevel_ = 1;
+    LoadCurrentLevelMap();
+    gameOver_ = false;
+
     player1_ = Tank{};
     player2_ = Tank{};
     player3_ = Tank{};
@@ -312,31 +482,36 @@ void Game::ResetState() {
 
     bullets_ = BulletSystem{};
     bulletImpacts_ = BulletImpactSystem{};
+    scorePopups_ = ScorePopupSystem{};
     specialExplosions_ = SpecialExplosionSystem{};
     specialExplosionEvents_.clear();
     powerUps_ = PowerUpSystem{};
     screenShakeTimer_ = 0.0;
 
-    // El spawneo automatico (TickEnemySpawning) se encarga de poblar cada
-    // celda de spawn del nivel; F10/Shift+F10/Ctrl+F10/Ctrl+Shift+F10 siguen
-    // disponibles como spawn manual de depuracion sobre estos mismos sistemas.
     enemies_ = EnemySystem{};
     fastEnemies_ = FastEnemySystem{};
     armorEnemies_ = ArmorEnemySystem{};
     powerEnemies_ = PowerEnemySystem{};
-    enemySpawnPositions_ = level.enemy_spawns;
 
-    currentLevel_ = 1;
     enemiesKilledThisLevel_ = 0;
     enemiesSpawnedThisLevel_ = 0;
     enemySpawnTimer_ = 0.0;
     nextEnemySpawnCellIndex_ = 0;
+    player1Score_ = 0;
+    player2Score_ = 0;
+    player3Score_ = 0;
+    player4Score_ = 0;
+    playerLevelStats_ = {};
+    highScoreHolderId_ = -1;
+    scoreTallyPhase_ = ScoreTallyPhase::None;
+    scoreTallyBonusAwarded_ = {};
     ApplyAggressivenessForCurrentLevel();
     BuildEnemyTypeSequenceForLevel();
-    SpawnInitialWaveForLevel();
+    // El enjambre inicial NO se arma aca: recien lo hace SpawnInitialWaveForLevel
+    // cuando termina la transicion de nivel (ver StartArcadeLocal/BeginLevelTransition).
 
-    // Al empezar (o reiniciar con ESC) solo esta presente el jugador 1; P2/P3/P4
-    // se traen con las teclas 1/2/3/4 (ver ProcessInput y SetPlayerActive).
+    // Al empezar solo esta presente el jugador 1; P2/P3/P4 se suman con su
+    // tecla de Inicio (ver ProcessInput/playerBindings_).
     player1Active_ = true;
     player2Active_ = false;
     player3Active_ = false;
@@ -505,37 +680,26 @@ void Game::ApplyGamepadInput(PlayerInput& input, int gamepadId) const {
 }
 
 void Game::ProcessInput() {
-    // Esquema de teclado WASD para P1 (seccion 9).
-    input1_.moveUp = IsKeyDown(KEY_W);
-    input1_.moveDown = IsKeyDown(KEY_S);
-    input1_.moveLeft = IsKeyDown(KEY_A);
-    input1_.moveRight = IsKeyDown(KEY_D);
-    input1_.shoot = IsKeyDown(KEY_LEFT_CONTROL);
-    input1_.specialShoot = IsKeyDown(KEY_SPACE);
+    if (appState_ != AppState::Playing) {
+        ProcessMenuInput();
+        return;
+    }
 
-    // Esquema de flechas para P2.
-    input2_.moveUp = IsKeyDown(KEY_UP);
-    input2_.moveDown = IsKeyDown(KEY_DOWN);
-    input2_.moveLeft = IsKeyDown(KEY_LEFT);
-    input2_.moveRight = IsKeyDown(KEY_RIGHT);
-    input2_.shoot = IsKeyDown(KEY_RIGHT_CONTROL);
-    input2_.specialShoot = IsKeyDown(KEY_RIGHT_SHIFT);
-
-    // Esquema IJKL para P3.
-    input3_.moveUp = IsKeyDown(KEY_I);
-    input3_.moveDown = IsKeyDown(KEY_K);
-    input3_.moveLeft = IsKeyDown(KEY_J);
-    input3_.moveRight = IsKeyDown(KEY_L);
-    input3_.shoot = IsKeyDown(KEY_U);
-    input3_.specialShoot = IsKeyDown(KEY_O);
-
-    // Esquema numpad (8456) para P4.
-    input4_.moveUp = IsKeyDown(KEY_KP_8);
-    input4_.moveDown = IsKeyDown(KEY_KP_5);
-    input4_.moveLeft = IsKeyDown(KEY_KP_4);
-    input4_.moveRight = IsKeyDown(KEY_KP_6);
-    input4_.shoot = IsKeyDown(KEY_KP_0);
-    input4_.specialShoot = IsKeyDown(KEY_KP_ENTER);
+    // Esquema de teclado por jugador (seccion 9): configurable desde el menu
+    // (Opciones > Mapeo de controles, ver playerBindings_/InitDefaultKeyBindings),
+    // arranca en WASD/flechas/IJKL/numpad como antes de que existiera el menu.
+    auto ApplyKeyBindings = [](PlayerInput& input, const PlayerKeyBindings& bindings) {
+        input.moveUp = IsKeyDown(bindings.keys[static_cast<int>(InputAction::Up)]);
+        input.moveDown = IsKeyDown(bindings.keys[static_cast<int>(InputAction::Down)]);
+        input.moveLeft = IsKeyDown(bindings.keys[static_cast<int>(InputAction::Left)]);
+        input.moveRight = IsKeyDown(bindings.keys[static_cast<int>(InputAction::Right)]);
+        input.shoot = IsKeyDown(bindings.keys[static_cast<int>(InputAction::Shoot)]);
+        input.specialShoot = IsKeyDown(bindings.keys[static_cast<int>(InputAction::Special)]);
+    };
+    ApplyKeyBindings(input1_, playerBindings_[0]);
+    ApplyKeyBindings(input2_, playerBindings_[1]);
+    ApplyKeyBindings(input3_, playerBindings_[2]);
+    ApplyKeyBindings(input4_, playerBindings_[3]);
 
     // Mandos (seccion custom): se suman al teclado de cada jugador (no lo
     // reemplazan, cualquiera de los dos mueve/dispara). El primer mando que
@@ -558,131 +722,254 @@ void Game::ProcessInput() {
     // calibrar kGamepadShootButton/kGamepadSpecialButton en ApplyGamepadInput
     // (se muestra en el HUD, ver Render). Se guarda el ultimo apretado en
     // cualquier mando, no se pierde hasta el siguiente boton.
-    const int pressedButton = GetGamepadButtonPressed();
-    if (pressedButton != -1) {
-        lastGamepadButtonPressed_ = pressedButton;
+    if (kDebugFeaturesEnabled) {
+        const int pressedButton = GetGamepadButtonPressed();
+        if (pressedButton != -1) {
+            lastGamepadButtonPressed_ = pressedButton;
+        }
     }
 
-    // Botones de prueba: traen o hacen desaparecer a cada jugador (al
-    // arrancar solo esta presente el jugador 1, ver ResetState).
-    if (IsKeyPressed(KEY_ONE)) {
+    // Traen o hacen desaparecer a cada jugador (al arrancar solo esta
+    // presente el jugador 1, ver ResetState); la tecla usada es la de
+    // Inicio de cada uno (InputAction::Start), configurable desde el menu
+    // igual que el resto (antes fija en 1/2/3/4).
+    if (IsKeyPressed(playerBindings_[0].keys[static_cast<int>(InputAction::Start)])) {
         SetPlayerActive(player1Active_, player1_, player1Spawn_, player1SpawnX_, player1SpawnY_, !player1Active_);
     }
-    if (IsKeyPressed(KEY_TWO)) {
+    if (IsKeyPressed(playerBindings_[1].keys[static_cast<int>(InputAction::Start)])) {
         SetPlayerActive(player2Active_, player2_, player2Spawn_, player2SpawnX_, player2SpawnY_, !player2Active_);
     }
-    if (IsKeyPressed(KEY_THREE)) {
+    if (IsKeyPressed(playerBindings_[2].keys[static_cast<int>(InputAction::Start)])) {
         SetPlayerActive(player3Active_, player3_, player3Spawn_, player3SpawnX_, player3SpawnY_, !player3Active_);
     }
-    if (IsKeyPressed(KEY_FOUR)) {
+    if (IsKeyPressed(playerBindings_[3].keys[static_cast<int>(InputAction::Start)])) {
         SetPlayerActive(player4Active_, player4_, player4Spawn_, player4SpawnX_, player4SpawnY_, !player4Active_);
     }
 
     // Boton de prueba: repite el respawn en el punto de spawn inicial, para
     // poder ver el destello sin tener que reiniciar el juego (solo a los
     // jugadores presentes).
-    if (IsKeyPressed(KEY_R)) {
+    if (kDebugFeaturesEnabled && IsKeyPressed(KEY_R)) {
         if (player1Active_) RespawnPlayer1();
         if (player2Active_) RespawnPlayer2();
         if (player3Active_) RespawnPlayer3();
         if (player4Active_) RespawnPlayer4();
     }
 
-    // Boton de prueba: reinicia toda la partida (mapa, tanque, balas, power-ups).
+    // Esc corta la partida en curso y vuelve al menu principal (antes
+    // reiniciaba la partida entera; era un boton de prueba, superado ahora
+    // que existe un menu de verdad).
     if (IsKeyPressed(KEY_ESCAPE)) {
-        ResetState();
+        appState_ = AppState::Menu;
+        menuScreen_ = MenuScreen::Main;
     }
 
-    // Botones de prueba: fuerzan la aparicion de cada power-up (F1 Estrella,
-    // F2 Casco, ...). No son mecanicas del juego final.
-    if (IsKeyPressed(KEY_F1)) {
-        powerUps_.ForceSpawn(PowerUpType::Star, map_, ActiveTankBounds());
-    }
-    if (IsKeyPressed(KEY_F2)) {
-        powerUps_.ForceSpawn(PowerUpType::Helmet, map_, ActiveTankBounds());
-    }
-    if (IsKeyPressed(KEY_F4)) {
-        powerUps_.ForceSpawn(PowerUpType::Gun, map_, ActiveTankBounds());
-    }
-    if (IsKeyPressed(KEY_F5)) {
-        powerUps_.ForceSpawn(PowerUpType::Life, map_, ActiveTankBounds());
-    }
-    if (IsKeyPressed(KEY_F7)) {
-        powerUps_.ForceSpawn(PowerUpType::Grenade, map_, ActiveTankBounds());
-    }
-    if (IsKeyPressed(KEY_F8)) {
-        powerUps_.ForceSpawn(PowerUpType::Shovel, map_, ActiveTankBounds());
-    }
-    if (IsKeyPressed(KEY_F9)) {
-        powerUps_.ForceSpawn(PowerUpType::Clock, map_, ActiveTankBounds());
-    }
+    // Todo lo de aca abajo (F1-F12, +/-) son botones de prueba: forzar
+    // power-ups, spawnear enemigos a mano, subir/bajar agresividad, saltar
+    // de nivel, alternar fuego amigo por tecla y la grilla de referencia.
+    // Ninguno es mecanica del juego final (fuego amigo y grilla ya tienen
+    // su lugar en el menu/editor), por eso quedan atras de kDebugFeaturesEnabled.
+    if (kDebugFeaturesEnabled) {
+        if (IsKeyPressed(KEY_F1)) {
+            powerUps_.ForceSpawn(PowerUpType::Star, map_, ActiveTankBounds());
+        }
+        if (IsKeyPressed(KEY_F2)) {
+            powerUps_.ForceSpawn(PowerUpType::Helmet, map_, ActiveTankBounds());
+        }
+        if (IsKeyPressed(KEY_F4)) {
+            powerUps_.ForceSpawn(PowerUpType::Gun, map_, ActiveTankBounds());
+        }
+        if (IsKeyPressed(KEY_F5)) {
+            powerUps_.ForceSpawn(PowerUpType::Life, map_, ActiveTankBounds());
+        }
+        if (IsKeyPressed(KEY_F7)) {
+            powerUps_.ForceSpawn(PowerUpType::Grenade, map_, ActiveTankBounds());
+        }
+        if (IsKeyPressed(KEY_F8)) {
+            powerUps_.ForceSpawn(PowerUpType::Shovel, map_, ActiveTankBounds());
+        }
+        if (IsKeyPressed(KEY_F9)) {
+            powerUps_.ForceSpawn(PowerUpType::Clock, map_, ActiveTankBounds());
+        }
 
-    // Boton de prueba: agrega otro enemigo "Basico" (rotando entre los
-    // puntos de spawn del nivel), mientras no haya oleadas de verdad
-    // todavia. Shift+F10 agrega uno "Rapido", Ctrl+F10 uno "Blindado" y
-    // Ctrl+Shift+F10 uno "Power" en su lugar.
-    if (IsKeyPressed(KEY_F10) && !enemySpawnPositions_.empty()) {
-        const bool ctrlDown = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
-        const bool shiftDown = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
-        if (ctrlDown && shiftDown) {
-            const size_t spawnIndex = powerEnemies_.Enemies().size() % enemySpawnPositions_.size();
-            const std::array<int, 2>& pos = enemySpawnPositions_[spawnIndex];
-            powerEnemies_.SpawnAt(static_cast<float>(pos[0]), static_cast<float>(pos[1]));
-        } else if (ctrlDown) {
-            const size_t spawnIndex = armorEnemies_.Enemies().size() % enemySpawnPositions_.size();
-            const std::array<int, 2>& pos = enemySpawnPositions_[spawnIndex];
-            armorEnemies_.SpawnAt(static_cast<float>(pos[0]), static_cast<float>(pos[1]));
-        } else if (shiftDown) {
-            const size_t spawnIndex = fastEnemies_.Enemies().size() % enemySpawnPositions_.size();
-            const std::array<int, 2>& pos = enemySpawnPositions_[spawnIndex];
-            fastEnemies_.SpawnAt(static_cast<float>(pos[0]), static_cast<float>(pos[1]));
-        } else {
-            const size_t spawnIndex = enemies_.Enemies().size() % enemySpawnPositions_.size();
-            const std::array<int, 2>& pos = enemySpawnPositions_[spawnIndex];
-            enemies_.SpawnAt(static_cast<float>(pos[0]), static_cast<float>(pos[1]));
+        // Agrega otro enemigo "Basico" (rotando entre los puntos de spawn
+        // del nivel). Shift+F10 agrega uno "Rapido", Ctrl+F10 uno
+        // "Blindado" y Ctrl+Shift+F10 uno "Power" en su lugar.
+        if (IsKeyPressed(KEY_F10) && !enemySpawnPositions_.empty()) {
+            const bool ctrlDown = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+            const bool shiftDown = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+            if (ctrlDown && shiftDown) {
+                const size_t spawnIndex = powerEnemies_.Enemies().size() % enemySpawnPositions_.size();
+                const std::array<int, 2>& pos = enemySpawnPositions_[spawnIndex];
+                powerEnemies_.SpawnAt(static_cast<float>(pos[0]), static_cast<float>(pos[1]));
+            } else if (ctrlDown) {
+                const size_t spawnIndex = armorEnemies_.Enemies().size() % enemySpawnPositions_.size();
+                const std::array<int, 2>& pos = enemySpawnPositions_[spawnIndex];
+                armorEnemies_.SpawnAt(static_cast<float>(pos[0]), static_cast<float>(pos[1]));
+            } else if (shiftDown) {
+                const size_t spawnIndex = fastEnemies_.Enemies().size() % enemySpawnPositions_.size();
+                const std::array<int, 2>& pos = enemySpawnPositions_[spawnIndex];
+                fastEnemies_.SpawnAt(static_cast<float>(pos[0]), static_cast<float>(pos[1]));
+            } else {
+                const size_t spawnIndex = enemies_.Enemies().size() % enemySpawnPositions_.size();
+                const std::array<int, 2>& pos = enemySpawnPositions_[spawnIndex];
+                enemies_.SpawnAt(static_cast<float>(pos[0]), static_cast<float>(pos[1]));
+            }
+        }
+
+        // Bajan/suben el nivel de agresividad de los enemigos (1 a 5, 3 es
+        // el comportamiento de base), para los 4 tipos a la vez. Ver
+        // EnemySystem::SetAggressivenessLevel.
+        if (IsKeyPressed(KEY_F11)) {
+            enemies_.SetAggressivenessLevel(enemies_.AggressivenessLevel() - 1);
+            fastEnemies_.SetAggressivenessLevel(fastEnemies_.AggressivenessLevel() - 1);
+            armorEnemies_.SetAggressivenessLevel(armorEnemies_.AggressivenessLevel() - 1);
+            powerEnemies_.SetAggressivenessLevel(powerEnemies_.AggressivenessLevel() - 1);
+        }
+        if (IsKeyPressed(KEY_F12)) {
+            enemies_.SetAggressivenessLevel(enemies_.AggressivenessLevel() + 1);
+            fastEnemies_.SetAggressivenessLevel(fastEnemies_.AggressivenessLevel() + 1);
+            armorEnemies_.SetAggressivenessLevel(armorEnemies_.AggressivenessLevel() + 1);
+            powerEnemies_.SetAggressivenessLevel(powerEnemies_.AggressivenessLevel() + 1);
+        }
+
+        // +/- saltan directo al siguiente/anterior nivel de juego (1-40),
+        // reiniciando todo (ver JumpToLevel) y arrancando ya con los
+        // parametros de dificultad (agresividad, cuota, tope en pantalla,
+        // y ahora tambien el mapa) que le correspondan a ese nivel.
+        if (IsKeyPressed(KEY_KP_ADD) || IsKeyPressed(KEY_EQUAL)) {
+            JumpToLevel(currentLevel_ + 1);
+        }
+        if (IsKeyPressed(KEY_KP_SUBTRACT) || IsKeyPressed(KEY_MINUS)) {
+            JumpToLevel(currentLevel_ - 1);
+        }
+
+        // Rota el modo de fuego amigo Off -> nivel 1 -> nivel 2 -> Off
+        // (mismo control ya disponible en Opciones > Fuego amigo).
+        if (IsKeyPressed(KEY_F3)) {
+            switch (friendlyFireMode_) {
+                case FriendlyFireMode::Off:      friendlyFireMode_ = FriendlyFireMode::Paralyze; break;
+                case FriendlyFireMode::Paralyze: friendlyFireMode_ = FriendlyFireMode::Damage;    break;
+                case FriendlyFireMode::Damage:   friendlyFireMode_ = FriendlyFireMode::Off;       break;
+            }
+        }
+
+        // Muestra/oculta la grilla de referencia sobre el mapa (ver
+        // Render), para ubicar bloques al diseñar el escenario.
+        if (IsKeyPressed(KEY_F6)) {
+            showGrid_ = !showGrid_;
         }
     }
+}
 
-    // Botones de prueba: bajan/suben el nivel de agresividad de los
-    // enemigos (1 a 5, 3 es el comportamiento de base), para los 4 tipos a
-    // la vez. Ver EnemySystem::SetAggressivenessLevel.
-    if (IsKeyPressed(KEY_F11)) {
-        enemies_.SetAggressivenessLevel(enemies_.AggressivenessLevel() - 1);
-        fastEnemies_.SetAggressivenessLevel(fastEnemies_.AggressivenessLevel() - 1);
-        armorEnemies_.SetAggressivenessLevel(armorEnemies_.AggressivenessLevel() - 1);
-        powerEnemies_.SetAggressivenessLevel(powerEnemies_.AggressivenessLevel() - 1);
-    }
-    if (IsKeyPressed(KEY_F12)) {
-        enemies_.SetAggressivenessLevel(enemies_.AggressivenessLevel() + 1);
-        fastEnemies_.SetAggressivenessLevel(fastEnemies_.AggressivenessLevel() + 1);
-        armorEnemies_.SetAggressivenessLevel(armorEnemies_.AggressivenessLevel() + 1);
-        powerEnemies_.SetAggressivenessLevel(powerEnemies_.AggressivenessLevel() + 1);
-    }
+void Game::StartArcadeLocal() {
+    ResetState();
+    appState_ = AppState::Playing;
+    BeginLevelTransition();
+}
 
-    // Botones de prueba: +/- saltan directo al siguiente/anterior nivel de
-    // juego (1-40), reiniciando todo (ver JumpToLevel) y arrancando ya con
-    // los parametros de dificultad (agresividad, cuota, tope en pantalla)
-    // que le correspondan a ese nivel.
-    if (IsKeyPressed(KEY_KP_ADD) || IsKeyPressed(KEY_EQUAL)) {
-        JumpToLevel(currentLevel_ + 1);
-    }
-    if (IsKeyPressed(KEY_KP_SUBTRACT) || IsKeyPressed(KEY_MINUS)) {
-        JumpToLevel(currentLevel_ - 1);
-    }
+void Game::ProcessMenuInput() {
+    const bool up = IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_W);
+    const bool down = IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_S);
+    const bool left = IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_A);
+    const bool right = IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_D);
+    const bool confirm = IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE);
+    const bool back = IsKeyPressed(KEY_ESCAPE);
 
-    // Boton de prueba: rota el modo de fuego amigo Off -> nivel 1 -> nivel 2 -> Off.
-    if (IsKeyPressed(KEY_F3)) {
-        switch (friendlyFireMode_) {
-            case FriendlyFireMode::Off:      friendlyFireMode_ = FriendlyFireMode::Paralyze; break;
-            case FriendlyFireMode::Paralyze: friendlyFireMode_ = FriendlyFireMode::Damage;    break;
-            case FriendlyFireMode::Damage:   friendlyFireMode_ = FriendlyFireMode::Off;       break;
+    if (menuScreen_ == MenuScreen::Main) {
+        constexpr int kItemCount = 5; // Arcade/Supervivencia/Versus/Modo construccion/Opciones
+        if (up)   mainMenuIndex_ = (mainMenuIndex_ + kItemCount - 1) % kItemCount;
+        if (down) mainMenuIndex_ = (mainMenuIndex_ + 1) % kItemCount;
+        if (confirm) {
+            if (mainMenuIndex_ <= 2) {
+                selectedMainModeIndex_ = mainMenuIndex_;
+                modeSubmenuIndex_ = 0;
+                menuScreen_ = MenuScreen::ModeSubmenu;
+            } else if (mainMenuIndex_ == 4) {
+                optionsIndex_ = 0;
+                menuScreen_ = MenuScreen::Options;
+            }
+            // mainMenuIndex_ == 3 (Modo construccion): todavia no
+            // seleccionable, Enter no hace nada (ver RenderMenu para el
+            // aviso en pantalla).
         }
-    }
-
-    // Boton de prueba: muestra/oculta la grilla de referencia sobre el mapa
-    // (ver Render), para ubicar bloques al diseñar el escenario.
-    if (IsKeyPressed(KEY_F6)) {
-        showGrid_ = !showGrid_;
+    } else if (menuScreen_ == MenuScreen::ModeSubmenu) {
+        constexpr int kItemCount = 2; // Local/Lan ("Opciones" solo esta en la pantalla principal)
+        if (up)   modeSubmenuIndex_ = (modeSubmenuIndex_ + kItemCount - 1) % kItemCount;
+        if (down) modeSubmenuIndex_ = (modeSubmenuIndex_ + 1) % kItemCount;
+        if (confirm && modeSubmenuIndex_ == 0 && selectedMainModeIndex_ == 0) {
+            // Arcade > Local: el unico modo con partida real por ahora.
+            // Local en Supervivencia/Versus, y Lan en cualquier modo:
+            // todavia no implementados, Enter no hace nada.
+            StartArcadeLocal();
+        }
+        if (back) {
+            menuScreen_ = MenuScreen::Main;
+        }
+    } else if (menuScreen_ == MenuScreen::Options) {
+        constexpr int kItemCount = 3; // Fuego amigo/Pantalla/Mapeo de controles
+        if (up)   optionsIndex_ = (optionsIndex_ + kItemCount - 1) % kItemCount;
+        if (down) optionsIndex_ = (optionsIndex_ + 1) % kItemCount;
+        if (left || right) {
+            if (optionsIndex_ == 0) {
+                switch (friendlyFireMode_) {
+                    case FriendlyFireMode::Off:      friendlyFireMode_ = FriendlyFireMode::Paralyze; break;
+                    case FriendlyFireMode::Paralyze: friendlyFireMode_ = FriendlyFireMode::Damage;    break;
+                    case FriendlyFireMode::Damage:   friendlyFireMode_ = FriendlyFireMode::Off;       break;
+                }
+            } else if (optionsIndex_ == 1) {
+                ToggleFullscreen();
+            }
+            // optionsIndex_ == 2 (Mapeo de controles): no es un valor para
+            // ciclar con flechas, se entra con Enter.
+        }
+        if (confirm && optionsIndex_ == 2) {
+            controlMappingIndex_ = 0;
+            menuScreen_ = MenuScreen::ControlMapping;
+        }
+        if (back) {
+            menuScreen_ = MenuScreen::Main; // Opciones solo se entra desde la pantalla principal
+        }
+    } else if (menuScreen_ == MenuScreen::ControlMapping) {
+        constexpr int kItemCount = 4; // Jugador 1-4
+        if (up)   controlMappingIndex_ = (controlMappingIndex_ + kItemCount - 1) % kItemCount;
+        if (down) controlMappingIndex_ = (controlMappingIndex_ + 1) % kItemCount;
+        if (confirm) {
+            mappingPlayerIndex_ = controlMappingIndex_;
+            playerActionIndex_ = 0;
+            menuScreen_ = MenuScreen::PlayerActions;
+        }
+        if (back) {
+            menuScreen_ = MenuScreen::Options;
+        }
+    } else if (menuScreen_ == MenuScreen::PlayerActions) {
+        if (up)   playerActionIndex_ = (playerActionIndex_ + kInputActionCount - 1) % kInputActionCount;
+        if (down) playerActionIndex_ = (playerActionIndex_ + 1) % kInputActionCount;
+        if (confirm) {
+            capturedKey_ = 0;
+            menuScreen_ = MenuScreen::CapturingKey;
+        }
+        if (back) {
+            menuScreen_ = MenuScreen::ControlMapping;
+        }
+    } else { // MenuScreen::CapturingKey
+        // Cualquier tecla detectada (menos Enter/Esc, reservadas para
+        // guardar/cancelar) queda como candidata; se puede seguir probando
+        // otras antes de confirmar.
+        int pressed = GetKeyPressed();
+        while (pressed != 0) {
+            if (pressed != KEY_ENTER && pressed != KEY_ESCAPE) {
+                capturedKey_ = pressed;
+            }
+            pressed = GetKeyPressed();
+        }
+        if (confirm && capturedKey_ != 0) {
+            playerBindings_[mappingPlayerIndex_].keys[playerActionIndex_] = capturedKey_;
+            menuScreen_ = MenuScreen::PlayerActions;
+        }
+        if (back) {
+            menuScreen_ = MenuScreen::PlayerActions;
+        }
     }
 }
 
@@ -741,10 +1028,14 @@ void Game::UpdatePlayer(Tank& tank, PlayerInput& input, SpawnFlash& spawn, int o
         } else if (pickedType == PowerUpType::Shovel) {
             ApplyShovelFortification();
         } else if (pickedType == PowerUpType::Grenade) {
-            DestroyAllEnemies();
+            DestroyAllEnemies(ownerId);
         } else if (pickedType == PowerUpType::Clock) {
             FreezeAllEnemies(kClockFreezeDuration);
         }
+
+        // Cualquier item agarrado suma lo mismo (investigado del juego
+        // original: 500 parejo para los 7, no varia por tipo).
+        AwardScoreAt(ownerId, tank.X() + 0.5f, tank.Y() + 0.5f, kScorePowerUpPickup);
     }
 }
 
@@ -903,7 +1194,7 @@ void Game::ApplyEnemyPowerUpPickups() {
     }
 }
 
-void Game::DestroyAllEnemies() {
+void Game::DestroyAllEnemies(int creditOwnerId) {
     for (Enemy& enemy : enemies_.Enemies()) {
         if (!enemy.alive) {
             continue;
@@ -911,6 +1202,7 @@ void Game::DestroyAllEnemies() {
         specialExplosions_.Spawn(enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, /*nativeScale=*/true);
         enemy.alive = false;
         ++enemiesKilledThisLevel_;
+        AwardScoreAt(creditOwnerId, enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, kScoreBasicKill);
     }
     for (Enemy& enemy : fastEnemies_.Enemies()) {
         if (!enemy.alive) {
@@ -919,6 +1211,7 @@ void Game::DestroyAllEnemies() {
         specialExplosions_.Spawn(enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, /*nativeScale=*/true);
         enemy.alive = false;
         ++enemiesKilledThisLevel_;
+        AwardScoreAt(creditOwnerId, enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, kScoreFastKill);
     }
     for (Enemy& enemy : armorEnemies_.Enemies()) {
         if (!enemy.alive) {
@@ -927,6 +1220,7 @@ void Game::DestroyAllEnemies() {
         specialExplosions_.Spawn(enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, /*nativeScale=*/true);
         enemy.alive = false;
         ++enemiesKilledThisLevel_;
+        AwardScoreAt(creditOwnerId, enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, kScoreArmorKill);
     }
     for (Enemy& enemy : powerEnemies_.Enemies()) {
         if (!enemy.alive) {
@@ -935,6 +1229,57 @@ void Game::DestroyAllEnemies() {
         specialExplosions_.Spawn(enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, /*nativeScale=*/true);
         enemy.alive = false;
         ++enemiesKilledThisLevel_;
+        AwardScoreAt(creditOwnerId, enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, kScorePowerKill);
+    }
+}
+
+void Game::AwardScoreAt(int ownerId, float x, float y, int points) {
+    int* score = nullptr;
+    switch (ownerId) {
+        case kPlayer1Id: score = &player1Score_; break;
+        case kPlayer2Id: score = &player2Score_; break;
+        case kPlayer3Id: score = &player3Score_; break;
+        case kPlayer4Id: score = &player4Score_; break;
+        default: return; // no era un jugador (por ejemplo un enemigo Power disparando su propio especial): no hay a quien acreditarle
+    }
+    *score += points;
+    MaybeUpdateHighScore(*score, ownerId);
+    scorePopups_.Spawn(x, y, points);
+
+    // Estadisticas del nivel actual, solo para la pantalla de puntuacion de
+    // fin de nivel (ver PlayerLevelStats/ScoreTallyPhase): el total suma
+    // cualquier puntaje (eliminacion o item), pero el conteo por tipo solo
+    // se toca si points es exactamente uno de los 4 puntajes de eliminacion.
+    PlayerLevelStats& levelStats = playerLevelStats_[ownerId];
+    levelStats.scoreGained += points;
+    switch (points) {
+        case kScoreBasicKill: ++levelStats.kills[0]; break;
+        case kScoreFastKill:  ++levelStats.kills[1]; break;
+        case kScoreArmorKill: ++levelStats.kills[2]; break;
+        case kScorePowerKill: ++levelStats.kills[3]; break;
+        default: break; // por ejemplo un item agarrado: no es la eliminacion de ningun tipo
+    }
+}
+
+void Game::LoadHighScore() {
+    std::ifstream file(std::string(BC_ASSETS_DIR) + "highscore.txt");
+    if (file.is_open()) {
+        file >> highScore_;
+    }
+}
+
+void Game::SaveHighScore() {
+    std::ofstream file(std::string(BC_ASSETS_DIR) + "highscore.txt");
+    if (file.is_open()) {
+        file << highScore_;
+    }
+}
+
+void Game::MaybeUpdateHighScore(int candidateScore, int ownerId) {
+    if (candidateScore > highScore_) {
+        highScore_ = candidateScore;
+        highScoreHolderId_ = ownerId;
+        SaveHighScore();
     }
 }
 
@@ -971,12 +1316,17 @@ void Game::ApplyAggressivenessForCurrentLevel() {
 
 void Game::JumpToLevel(int newLevel) {
     // ResetState ya deja todo (mapa, jugadores, balas, power-ups) como al
-    // arrancar la partida, pero siempre arma el enjambre inicial para el
-    // nivel 1: se descarta y se vuelve a armar entero para el nivel
-    // destino, para que la composicion de tipos de enemigo (ver
-    // BuildEnemyTypeSequenceForLevel) sea la que le corresponde ahi.
+    // arrancar la partida, pero siempre carga el mapa del nivel 1: se
+    // descarta y se vuelve a cargar entero (mapa + spawns + enjambre
+    // inicial) para el nivel destino.
     ResetState();
     currentLevel_ = std::clamp(newLevel, 1, kMaxGameLevel);
+    LoadCurrentLevelMap();
+
+    if (player1Active_) RespawnPlayer1();
+    if (player2Active_) RespawnPlayer2();
+    if (player3Active_) RespawnPlayer3();
+    if (player4Active_) RespawnPlayer4();
 
     enemies_ = EnemySystem{};
     fastEnemies_ = FastEnemySystem{};
@@ -984,10 +1334,11 @@ void Game::JumpToLevel(int newLevel) {
     powerEnemies_ = PowerEnemySystem{};
     enemiesSpawnedThisLevel_ = 0;
     enemiesKilledThisLevel_ = 0;
+    playerLevelStats_ = {};
 
     ApplyAggressivenessForCurrentLevel();
     BuildEnemyTypeSequenceForLevel();
-    SpawnInitialWaveForLevel();
+    BeginLevelTransition();
 }
 
 int Game::CountAliveEnemies() const {
@@ -1076,6 +1427,11 @@ void Game::SpawnInitialWaveForLevel() {
     enemySpawnTimer_ = kEnemySpawnInterval;
 }
 
+void Game::BeginLevelTransition() {
+    levelTransitionPhase_ = LevelTransitionPhase::ShowingText;
+    levelTransitionTimer_ = kLevelTransitionTextDuration;
+}
+
 void Game::TickEnemySpawning(double dt) {
     if (enemySpawnPositions_.empty()) {
         return;
@@ -1110,21 +1466,137 @@ void Game::TickEnemySpawning(double dt) {
     nextEnemySpawnCellIndex_ = (nextEnemySpawnCellIndex_ + 1) % enemySpawnPositions_.size();
 }
 
-void Game::CheckLevelCompletion() {
+void Game::CheckLevelCompletion(double dt) {
+    if (levelClearPending_) {
+        levelClearTimer_ -= dt;
+        if (levelClearTimer_ <= 0.0) {
+            levelClearPending_ = false;
+            BeginScoreTally();
+        }
+        return;
+    }
+
     const EnemyWaveTier& tier = WaveTierForLevel(currentLevel_);
     const int activePlayers = (player1Active_ ? 1 : 0) + (player2Active_ ? 1 : 0) + (player3Active_ ? 1 : 0) + (player4Active_ ? 1 : 0);
     const int killQuota = (activePlayers <= 2) ? tier.killQuotaFewPlayers : tier.killQuotaManyPlayers;
     if (enemiesKilledThisLevel_ < killQuota) {
         return;
     }
+
+    levelClearPending_ = true;
+    levelClearTimer_ = kLevelClearDelay;
+}
+
+void Game::AdvanceToNextLevel() {
     if (currentLevel_ < kMaxGameLevel) {
         ++currentLevel_;
     }
+
+    // Nivel nuevo = mapa nuevo (ver LoadCurrentLevelMap): se limpia todo lo
+    // que no tiene sentido llevarse de un mapa al otro (enemigos, balas,
+    // power-ups) y se reubica a los jugadores activos en los spawns del
+    // mapa nuevo, con el mismo destello+escudo que al aparecer. Vidas,
+    // nivel de arma y puntaje de cada jugador NO se tocan: siguen de un
+    // nivel al otro.
+    LoadCurrentLevelMap();
+    bullets_ = BulletSystem{};
+    bulletImpacts_ = BulletImpactSystem{};
+    specialExplosions_ = SpecialExplosionSystem{};
+    specialExplosionEvents_.clear();
+    powerUps_ = PowerUpSystem{};
+    screenShakeTimer_ = 0.0;
+    enemies_ = EnemySystem{};
+    fastEnemies_ = FastEnemySystem{};
+    armorEnemies_ = ArmorEnemySystem{};
+    powerEnemies_ = PowerEnemySystem{};
+
+    if (player1Active_) RespawnPlayer1();
+    if (player2Active_) RespawnPlayer2();
+    if (player3Active_) RespawnPlayer3();
+    if (player4Active_) RespawnPlayer4();
+
     enemiesKilledThisLevel_ = 0;
     enemiesSpawnedThisLevel_ = 0;
+    enemySpawnTimer_ = 0.0;
+    nextEnemySpawnCellIndex_ = 0;
+    playerLevelStats_ = {}; // el conteo/puntaje de la pantalla de puntuacion es solo del nivel que se esta por empezar
     ApplyAggressivenessForCurrentLevel();
     BuildEnemyTypeSequenceForLevel();
-    SpawnInitialWaveForLevel();
+    BeginLevelTransition();
+}
+
+void Game::BeginScoreTally() {
+    scoreTallyPhase_ = ScoreTallyPhase::Counting;
+    scoreTallyLevelShown_ = currentLevel_;
+    scoreTallyAnim_ = {};
+    scoreTallyBonusAwarded_ = {};
+}
+
+void Game::TickScoreTally(double dt) {
+    if (scoreTallyPhase_ == ScoreTallyPhase::Holding) {
+        scoreTallyTimer_ -= dt;
+        if (scoreTallyTimer_ <= 0.0) {
+            scoreTallyPhase_ = ScoreTallyPhase::None;
+            AdvanceToNextLevel();
+        }
+        return;
+    }
+
+    // Counting: cada jugador activo cuenta su propia fila en paralelo (ver
+    // ScoreTallyRowAnim) — un slot de tipo de enemigo a la vez, revelando el
+    // icono y contando de 0 hasta lo que mato de ese tipo, con una pausa
+    // antes de pasar al siguiente; al llegar al slot 4 esa fila ya termino
+    // (se ve TOTAL). Cuando todas las filas activas llegaron ahi, pasa a
+    // Holding (pausa final antes de avanzar de nivel).
+    const bool active[4] = {player1Active_, player2Active_, player3Active_, player4Active_};
+    bool allRowsDone = true;
+    for (int i = 0; i < 4; ++i) {
+        if (!active[i]) {
+            continue;
+        }
+        ScoreTallyRowAnim& anim = scoreTallyAnim_[i];
+        if (anim.currentSlot >= 4) {
+            continue;
+        }
+        allRowsDone = false;
+        const int target = playerLevelStats_[i].kills[anim.currentSlot];
+        anim.timer += dt;
+        if (anim.currentCount < target) {
+            if (anim.timer >= kScoreTallyCountInterval) {
+                anim.timer -= kScoreTallyCountInterval;
+                ++anim.currentCount;
+            }
+        } else if (anim.timer >= kScoreTallyRowPause) {
+            anim.timer = 0.0;
+            anim.currentCount = 0;
+            ++anim.currentSlot;
+        }
+    }
+
+    if (allRowsDone) {
+        // Bono de fin de nivel (pedido explicito): el/los jugador(es) con
+        // mayor scoreGained este nivel (empate incluido) reciben el bono,
+        // sumado ya a su puntaje real; el TOTAL ya contado en pantalla
+        // (playerLevelStats_.scoreGained) no se toca, el bono se dibuja
+        // aparte (ver RenderScoreTally).
+        int* scores[4] = {&player1Score_, &player2Score_, &player3Score_, &player4Score_};
+        int maxGained = -1;
+        for (int i = 0; i < 4; ++i) {
+            if (active[i]) {
+                maxGained = std::max(maxGained, playerLevelStats_[i].scoreGained);
+            }
+        }
+        for (int i = 0; i < 4; ++i) {
+            scoreTallyBonusAwarded_[i] = active[i] && maxGained >= 0 && playerLevelStats_[i].scoreGained == maxGained;
+            if (scoreTallyBonusAwarded_[i]) {
+                *scores[i] += kScoreTallyClearBonus;
+                MaybeUpdateHighScore(*scores[i], i);
+            }
+        }
+
+        scoreTallyPhase_ = ScoreTallyPhase::Holding;
+        scoreTallyTimer_ = kScoreTallyHoldDuration;
+    }
 }
 
 int Game::EnemiesRemainingThisLevel() const {
@@ -1150,6 +1622,108 @@ std::vector<Tank*> Game::ActivePlayerTanks() {
         tanks.push_back(tank);
     }
     return tanks;
+}
+
+bool Game::IsPositionBlockedByMap(const Tank& tank, float newX, float newY) const {
+    float left = 0.0f, right = 0.0f, top = 0.0f, bottom = 0.0f;
+    tank.GetBounds(left, right, top, bottom);
+    const float width = right - left;
+    const float height = bottom - top;
+    const float newLeft = newX;
+    const float newRight = newX + width;
+    const float newTop = newY;
+    const float newBottom = newY + height;
+    if (newLeft < 0.0f || newTop < 0.0f || newRight > static_cast<float>(map_.Width()) || newBottom > static_cast<float>(map_.Height())) {
+        return true;
+    }
+    return map_.IsBoxBlocked(newLeft, newRight, newTop, newBottom);
+}
+
+void Game::ResolveTankOverlaps() {
+    // Solo tanques ya "materializados" (vivos/activos y con el destello de
+    // aparicion terminado: mientras dura no se mueven ni son colisionables
+    // de verdad, ver UpdatePlayer/EnemySystem::Update). Recolectados en una
+    // sola lista pareja (jugadores + los 4 tipos de enemigo) para resolver
+    // cualquier combinacion de a pares.
+    std::vector<Tank*> tanks;
+    tanks.reserve(24);
+
+    struct PlayerRef {
+        Tank* tank;
+        bool active;
+        const SpawnFlash* spawn;
+    };
+    const PlayerRef playerRefs[4] = {
+        {&player1_, player1Active_, &player1Spawn_},
+        {&player2_, player2Active_, &player2Spawn_},
+        {&player3_, player3Active_, &player3Spawn_},
+        {&player4_, player4Active_, &player4Spawn_},
+    };
+    for (const PlayerRef& ref : playerRefs) {
+        if (ref.active && !ref.tank->IsEliminated() && !ref.spawn->IsActive()) {
+            tanks.push_back(ref.tank);
+        }
+    }
+
+    auto addAliveEnemies = [&tanks](auto& enemySystem) {
+        for (Enemy& enemy : enemySystem.Enemies()) {
+            if (enemy.alive && !enemy.spawn.IsActive()) {
+                tanks.push_back(&enemy.tank);
+            }
+        }
+    };
+    addAliveEnemies(enemies_);
+    addAliveEnemies(fastEnemies_);
+    addAliveEnemies(armorEnemies_);
+    addAliveEnemies(powerEnemies_);
+
+    // Separa cada par que este solapado, mitad y mitad, por el eje de MENOR
+    // penetracion (el "camino mas corto" para dejar de tocarse). Cada
+    // propuesta se valida antes contra el mapa (nunca empuja a un tanque
+    // adentro de una pared); si quedaria bloqueada, ese tanque en particular
+    // simplemente no se mueve este frame (el otro del par si puede, y si
+    // ninguno puede, se vuelve a intentar el proximo frame).
+    constexpr float kSeparationEpsilon = 0.01f;
+    for (size_t i = 0; i < tanks.size(); ++i) {
+        for (size_t j = i + 1; j < tanks.size(); ++j) {
+            Tank* a = tanks[i];
+            Tank* b = tanks[j];
+            float aLeft = 0.0f, aRight = 0.0f, aTop = 0.0f, aBottom = 0.0f;
+            float bLeft = 0.0f, bRight = 0.0f, bTop = 0.0f, bBottom = 0.0f;
+            a->GetBounds(aLeft, aRight, aTop, aBottom);
+            b->GetBounds(bLeft, bRight, bTop, bBottom);
+            if (!(aLeft < bRight && aRight > bLeft && aTop < bBottom && aBottom > bTop)) {
+                continue; // no se solapan: nada que hacer
+            }
+
+            const float overlapX = std::min(aRight, bRight) - std::max(aLeft, bLeft);
+            const float overlapY = std::min(aBottom, bBottom) - std::max(aTop, bTop);
+
+            if (overlapX < overlapY) {
+                const float sign = ((aLeft + aRight) <= (bLeft + bRight)) ? -1.0f : 1.0f;
+                const float push = overlapX * 0.5f + kSeparationEpsilon;
+                const float aNewX = a->X() + sign * push;
+                const float bNewX = b->X() - sign * push;
+                if (!IsPositionBlockedByMap(*a, aNewX, a->Y())) {
+                    a->SetPosition(aNewX, a->Y());
+                }
+                if (!IsPositionBlockedByMap(*b, bNewX, b->Y())) {
+                    b->SetPosition(bNewX, b->Y());
+                }
+            } else {
+                const float sign = ((aTop + aBottom) <= (bTop + bBottom)) ? -1.0f : 1.0f;
+                const float push = overlapY * 0.5f + kSeparationEpsilon;
+                const float aNewY = a->Y() + sign * push;
+                const float bNewY = b->Y() - sign * push;
+                if (!IsPositionBlockedByMap(*a, a->X(), aNewY)) {
+                    a->SetPosition(a->X(), aNewY);
+                }
+                if (!IsPositionBlockedByMap(*b, b->X(), bNewY)) {
+                    b->SetPosition(b->X(), bNewY);
+                }
+            }
+        }
+    }
 }
 
 void Game::DestroyTank(Tank& tank) {
@@ -1286,6 +1860,38 @@ bool Game::ProcessFriendlyFireDamageHit(Tank& tank, int shooterWeaponLevel) {
 }
 
 void Game::Update(double fixedDt) {
+    if (appState_ != AppState::Playing) {
+        return; // en el menu no hay simulacion a paso fijo, solo se dibuja (ver RenderMenu)
+    }
+
+    // Transicion de nivel ("NIVEL N" + telon, ver BeginLevelTransition):
+    // mientras dure, el resto del juego queda congelado (nada se mueve, no
+    // hay IA ni spawns), solo avanza este temporizador. Al terminar el
+    // telon recien ahi arranca el enjambre inicial del nivel.
+    if (levelTransitionPhase_ != LevelTransitionPhase::None) {
+        levelTransitionTimer_ -= fixedDt;
+        if (levelTransitionTimer_ <= 0.0) {
+            if (levelTransitionPhase_ == LevelTransitionPhase::ShowingText) {
+                levelTransitionPhase_ = LevelTransitionPhase::Curtain;
+                levelTransitionTimer_ = kLevelTransitionCurtainDuration;
+            } else {
+                levelTransitionPhase_ = LevelTransitionPhase::None;
+                SpawnInitialWaveForLevel();
+            }
+        }
+        return;
+    }
+
+    // Pantalla de puntuacion de fin de nivel (ver ScoreTallyPhase): mientras
+    // dure, el juego queda congelado igual que la transicion de arriba, solo
+    // avanza su propia animacion (ver TickScoreTally). Al terminar (Holding
+    // agotado) llama sola a AdvanceToNextLevel(), que arranca la transicion
+    // "NIVEL N" del nivel siguiente.
+    if (scoreTallyPhase_ != ScoreTallyPhase::None) {
+        TickScoreTally(fixedDt);
+        return;
+    }
+
     if (gameOver_) {
         return; // el aguila fue destruida: se congela todo hasta reiniciar (ESC)
     }
@@ -1301,7 +1907,10 @@ void Game::Update(double fixedDt) {
     if (player4Active_) UpdatePlayer(player4_, input4_, player4Spawn_, kPlayer4Id, ActiveOthers(kPlayer4Id), fixedDt);
 
     TickEnemySpawning(fixedDt);
-    const int aliveEnemiesBeforeCombat = CountAliveEnemies();
+    const int basicAliveBeforeCombat = CountAliveInList(enemies_.Enemies());
+    const int fastAliveBeforeCombat = CountAliveInList(fastEnemies_.Enemies());
+    const int armorAliveBeforeCombat = CountAliveInList(armorEnemies_.Enemies());
+    const int powerAliveBeforeCombat = CountAliveInList(powerEnemies_.Enemies());
 
     // Cada sistema de enemigos recibe a los otros 2 tipos como obstaculo de
     // colision (nunca como blanco de combate: eso solo aplica a jugadores
@@ -1348,18 +1957,32 @@ void Game::Update(double fixedDt) {
     otherThanPower.insert(otherThanPower.end(), fastEnemyTanks.begin(), fastEnemyTanks.end());
     otherThanPower.insert(otherThanPower.end(), armorEnemyTanks.begin(), armorEnemyTanks.end());
 
-    enemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), otherThanBasic, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_));
-    fastEnemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), otherThanFast, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_));
-    armorEnemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), otherThanArmor, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_));
-    powerEnemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), otherThanPower, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_));
+    std::vector<ScoreEvent> basicScoreEvents;
+    std::vector<ScoreEvent> fastScoreEvents;
+    std::vector<ScoreEvent> armorScoreEvents;
+    std::vector<ScoreEvent> powerScoreEvents;
+    enemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), otherThanBasic, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_), basicScoreEvents);
+    fastEnemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), otherThanFast, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_), fastScoreEvents);
+    armorEnemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), otherThanArmor, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_), armorScoreEvents);
+    powerEnemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), otherThanPower, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_), powerScoreEvents);
 
     // Balas normales matando enemigos (ver los 4 Update() de arriba): la
     // diferencia de vivos antes/despues de la combinacion la cuenta como
     // eliminados. ApplyEnemyPowerUpPickups() (justo abajo) tambien puede
     // bajar el conteo de vivos al convertir un enemigo en otro tipo, pero
     // eso NO es una eliminacion, por eso el conteo se toma ANTES de
-    // llamarla.
-    enemiesKilledThisLevel_ += std::max(0, aliveEnemiesBeforeCombat - CountAliveEnemies());
+    // llamarla. El puntaje (a quien disparo, ver ScoreEvent) ya viene
+    // resuelto en los 4 vectores de arriba, uno por eliminacion real.
+    const int basicKilled = std::max(0, basicAliveBeforeCombat - CountAliveInList(enemies_.Enemies()));
+    const int fastKilled = std::max(0, fastAliveBeforeCombat - CountAliveInList(fastEnemies_.Enemies()));
+    const int armorKilled = std::max(0, armorAliveBeforeCombat - CountAliveInList(armorEnemies_.Enemies()));
+    const int powerKilled = std::max(0, powerAliveBeforeCombat - CountAliveInList(powerEnemies_.Enemies()));
+    enemiesKilledThisLevel_ += basicKilled + fastKilled + armorKilled + powerKilled;
+    for (const std::vector<ScoreEvent>* events : {&basicScoreEvents, &fastScoreEvents, &armorScoreEvents, &powerScoreEvents}) {
+        for (const ScoreEvent& event : *events) {
+            AwardScoreAt(event.ownerId, event.x, event.y, event.points);
+        }
+    }
 
     ApplyEnemyPowerUpPickups();
 
@@ -1417,6 +2040,7 @@ void Game::Update(double fixedDt) {
                 specialExplosions_.Spawn(enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, /*nativeScale=*/true);
                 enemy.alive = false;
                 ++enemiesKilledThisLevel_;
+                AwardScoreAt(event.ownerId, enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, kScorePowerKill);
                 break;
             }
         }
@@ -1431,6 +2055,7 @@ void Game::Update(double fixedDt) {
     }
 
     bulletImpacts_.Update(fixedDt);
+    scorePopups_.Update(fixedDt);
     specialExplosions_.Update(fixedDt);
     powerUps_.Update(fixedDt, map_, ActiveTankBounds());
 
@@ -1501,7 +2126,11 @@ void Game::Update(double fixedDt) {
         }
     }
 
-    CheckLevelCompletion();
+    // Ultimo paso del frame, con todas las posiciones ya finales: corrige
+    // cualquier solape de hitboxes que haya quedado (ver ResolveTankOverlaps).
+    ResolveTankOverlaps();
+
+    CheckLevelCompletion(fixedDt);
 }
 
 void Game::RenderTank(const Tank& tank, const SpawnFlash& spawn, const TankSpriteSet& sprites, const MapViewport& viewport) {
@@ -1624,16 +2253,16 @@ void Game::RenderEnemy(const Enemy& enemy, const EnemySprites& sprites, const Ma
         DrawTexturePro(shieldTex, shieldSrc, dst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
     }
 
-    // Debug (temporal, para diagnosticar si se traba): modo de movimiento
-    // actual (ver Enemy::debugMode) + cuantos frames seguidos lleva sin
-    // poder moverse, en cuanto pasa medio segundo.
-    if (enemy.stuckFrames > 30) {
+    // Debug (para diagnosticar si se traba): modo de movimiento actual (ver
+    // Enemy::debugMode) + cuantos frames seguidos lleva sin poder moverse,
+    // en cuanto pasa medio segundo.
+    if (kDebugFeaturesEnabled && enemy.stuckFrames > 30) {
         const char* label = TextFormat("%c %.1fs", enemy.debugMode, enemy.stuckFrames / 60.0f);
         DrawText(label, static_cast<int>(dst.x), static_cast<int>(dst.y) - 12, 10, RED);
     }
 }
 
-void Game::RenderPlayerHud(const Tank& tank, const char* label, int centerX, int y) {
+void Game::RenderPlayerHud(const Tank& tank, const char* label, int centerX, int y, int score) {
     // Parpadeo de texto (calor al 100% / municion especial lista): mismo
     // criterio de "visible la mitad del tiempo" que ya se usa para el tanque
     // paralizado (ver kFrozenBlinkInterval), pero un poco mas lento porque es
@@ -1644,7 +2273,7 @@ void Game::RenderPlayerHud(const Tank& tank, const char* label, int centerX, int
     // temperatura junto con su texto) se centra en centerX, en vez de
     // arrancar de un borde fijo.
     if (tank.IsEliminated()) {
-        const char* text = TextFormat("%s - SIN VIDAS", label);
+        const char* text = TextFormat("%s - SIN VIDAS  Puntaje: %d", label, score);
         DrawText(text, centerX - MeasureText(text, 20) / 2, y, 20, RED);
         return;
     }
@@ -1688,6 +2317,14 @@ void Game::RenderPlayerHud(const Tank& tank, const char* label, int centerX, int
     DrawText(percentText, barX + kHeatBarWidth + kBarTextGap, heatBarY - 2, 18, overheated ? RED : RAYWHITE);
 
     int nextY = heatBarY + kHeatBarHeight + 4;
+
+    // Puntaje propio de este jugador, justo debajo de la barra de calor
+    // (pedido explicitamente), en letra chica para no competir con el resto.
+    constexpr int kScoreFontSize = 14;
+    const char* scoreText = TextFormat("Puntaje: %d", score);
+    DrawText(scoreText, centerX - MeasureText(scoreText, kScoreFontSize) / 2, nextY, kScoreFontSize, RAYWHITE);
+    nextY += kLinePitch;
+
     if (overheated && textBlinkOn) {
         const char* warningText = "Sobrecalentamiento";
         DrawText(warningText, centerX - MeasureText(warningText, 18) / 2, nextY, 18, RED);
@@ -1713,6 +2350,19 @@ void Game::RenderPlayerHud(const Tank& tank, const char* label, int centerX, int
 void Game::Render(double /*interpolationAlpha*/) {
     windowWidth_ = GetScreenWidth();
     windowHeight_ = GetScreenHeight();
+
+    if (appState_ != AppState::Playing) {
+        RenderMenu();
+        return;
+    }
+
+    // Pantalla de puntuacion de fin de nivel (ver ScoreTallyPhase): pantalla
+    // negra propia, reemplaza a la escena de juego por completo (no un
+    // overlay encima) mientras dure.
+    if (scoreTallyPhase_ != ScoreTallyPhase::None) {
+        RenderScoreTally();
+        return;
+    }
 
     // El campo de juego (rectangular, ver test_map.json) se encaja en el area
     // que queda entre la barra gris de la izquierda (solo de marco, sin
@@ -1876,6 +2526,19 @@ void Game::Render(double /*interpolationAlpha*/) {
         DrawTexturePro(impactTex, impactSrc, impactDst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
     }
 
+    // Popup del numero de puntos (100/200/300/400/500), al matar un enemigo
+    // o agarrar un item (ver ScorePopupSystem/AwardScoreAt), a escala
+    // nativa (achicado a pedido, antes se dibujaba al doble).
+    const float scorePopupScale = pixelScale;
+    for (const ScorePopup& popup : scorePopups_.Popups()) {
+        const Texture2D popupTex = scorePopupSprites_.Get(popup.points);
+        const float popupW = static_cast<float>(popupTex.width) * scorePopupScale;
+        const float popupH = static_cast<float>(popupTex.height) * scorePopupScale;
+        const Rectangle popupSrc{0.0f, 0.0f, static_cast<float>(popupTex.width), static_cast<float>(popupTex.height)};
+        const Rectangle popupDst{viewport.TileToScreenX(popup.x) - popupW * 0.5f, viewport.TileToScreenY(popup.y) - popupH * 0.5f, popupW, popupH};
+        DrawTexturePro(popupTex, popupSrc, popupDst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+    }
+
     // Diametro del radio de la explosion especial, en pantalla.
     const float specialExplosionSize = viewport.tileScreenSize * kSpecialExplosionRadius * 2.0f;
     for (const SpecialExplosion& explosion : specialExplosions_.Explosions()) {
@@ -1975,27 +2638,34 @@ void Game::Render(double /*interpolationAlpha*/) {
         // (cuota segun cantidad de jugadores activos, ver EnemiesRemainingThisLevel).
         DrawText(TextFormat("Enemigos: %d", EnemiesRemainingThisLevel()), panelLeftX, stageNumberY + 40, 20, RAYWHITE);
 
-        // Debug (temporal): nivel de agresividad actual (F11/F12 para
-        // bajar/subir, ver EnemySystem::SetAggressivenessLevel).
-        const char* aggroLabel = TextFormat("Agresividad: %d", enemies_.AggressivenessLevel());
-        DrawText(aggroLabel, panelLeftX, stageNumberY + 70, 16, YELLOW);
+        // El puntaje ahora es propio de cada jugador (ver RenderPlayerHud),
+        // no compartido: no va aca.
+
+        // Debug: nivel de agresividad actual (F11/F12 para bajar/subir, ver
+        // EnemySystem::SetAggressivenessLevel).
+        if (kDebugFeaturesEnabled) {
+            const char* aggroLabel = TextFormat("Agresividad: %d", enemies_.AggressivenessLevel());
+            DrawText(aggroLabel, panelLeftX, stageNumberY + 70, 16, YELLOW);
+        }
     }
     const int panelCenterX = windowWidth_ - panelW / 2;
     const int p4Y = windowHeight_ - hudMargin - blockH;
     const int p3Y = p4Y - rowH;
     const int p2Y = p3Y - rowH;
     const int p1Y = p2Y - rowH;
-    if (player1Active_) RenderPlayerHud(player1_, "P1", panelCenterX, p1Y); else DrawText("P1 - Pulse iniciar", panelCenterX - MeasureText("P1 - Pulse iniciar", 20) / 2, p1Y, 20, RED);
-    if (player2Active_) RenderPlayerHud(player2_, "P2", panelCenterX, p2Y); else DrawText("P2 - Pulse iniciar", panelCenterX - MeasureText("P2 - Pulse iniciar", 20) / 2, p2Y, 20, RED);
-    if (player3Active_) RenderPlayerHud(player3_, "P3", panelCenterX, p3Y); else DrawText("P3 - Pulse iniciar", panelCenterX - MeasureText("P3 - Pulse iniciar", 20) / 2, p3Y, 20, RED);
-    if (player4Active_) RenderPlayerHud(player4_, "P4", panelCenterX, p4Y); else DrawText("P4 - Pulse iniciar", panelCenterX - MeasureText("P4 - Pulse iniciar", 20) / 2, p4Y, 20, RED);
-    const char* fpsText = TextFormat("FPS: %d", GetFPS());
-    DrawText(fpsText, panelRightX - MeasureText(fpsText, 12), hudMargin, 12, RAYWHITE);
-
-    // Debug: numero de boton del mando (ver ApplyGamepadInput / lastGamepadButtonPressed_).
-    if (lastGamepadButtonPressed_ != -1) {
-        const char* gamepadBtnText = TextFormat("Mando boton: %d", lastGamepadButtonPressed_);
-        DrawText(gamepadBtnText, panelRightX - MeasureText(gamepadBtnText, 12), hudMargin + 14, 12, YELLOW);
+    if (player1Active_) RenderPlayerHud(player1_, "P1", panelCenterX, p1Y, player1Score_); else DrawText("P1 - Pulse iniciar", panelCenterX - MeasureText("P1 - Pulse iniciar", 20) / 2, p1Y, 20, RED);
+    if (player2Active_) RenderPlayerHud(player2_, "P2", panelCenterX, p2Y, player2Score_); else DrawText("P2 - Pulse iniciar", panelCenterX - MeasureText("P2 - Pulse iniciar", 20) / 2, p2Y, 20, RED);
+    if (player3Active_) RenderPlayerHud(player3_, "P3", panelCenterX, p3Y, player3Score_); else DrawText("P3 - Pulse iniciar", panelCenterX - MeasureText("P3 - Pulse iniciar", 20) / 2, p3Y, 20, RED);
+    if (player4Active_) RenderPlayerHud(player4_, "P4", panelCenterX, p4Y, player4Score_); else DrawText("P4 - Pulse iniciar", panelCenterX - MeasureText("P4 - Pulse iniciar", 20) / 2, p4Y, 20, RED);
+    // Debug: contador de FPS y numero de boton del mando (ver
+    // ApplyGamepadInput / lastGamepadButtonPressed_).
+    if (kDebugFeaturesEnabled) {
+        const char* fpsText = TextFormat("FPS: %d", GetFPS());
+        DrawText(fpsText, panelRightX - MeasureText(fpsText, 12), hudMargin, 12, RAYWHITE);
+        if (lastGamepadButtonPressed_ != -1) {
+            const char* gamepadBtnText = TextFormat("Mando boton: %d", lastGamepadButtonPressed_);
+            DrawText(gamepadBtnText, panelRightX - MeasureText(gamepadBtnText, 12), hudMargin + 14, 12, YELLOW);
+        }
     }
 
     const char* friendlyFireLabel = "Apagado";
@@ -2004,14 +2674,14 @@ void Game::Render(double /*interpolationAlpha*/) {
     } else if (friendlyFireMode_ == FriendlyFireMode::Damage) {
         friendlyFireLabel = "Nivel 2 (dana)";
     }
-    const char* friendlyFireText = TextFormat("Fuego amigo (F3): %s", friendlyFireLabel);
+    const char* friendlyFireText = TextFormat("Fuego amigo: %s", friendlyFireLabel);
     const int friendlyFireTextX = leftBarW + (static_cast<int>(playAreaWidth) - MeasureText(friendlyFireText, 20)) / 2;
     DrawText(friendlyFireText, friendlyFireTextX, 10, 20, RAYWHITE);
 
     // El aguila fue destruida: partida terminada (ver Update), congelado
     // hasta reiniciar con ESC.
     if (gameOver_) {
-        const char* gameOverText = "FIN DE LA PARTIDA - Presiona ESC para reiniciar";
+        const char* gameOverText = "FIN DE LA PARTIDA - Presiona ESC para volver al menu";
         const int gameOverFontSize = 28;
         const int gameOverTextX = leftBarW + (static_cast<int>(playAreaWidth) - MeasureText(gameOverText, gameOverFontSize)) / 2;
         const int gameOverTextY = windowHeight_ / 2 - gameOverFontSize / 2;
@@ -2019,11 +2689,319 @@ void Game::Render(double /*interpolationAlpha*/) {
         DrawText(gameOverText, gameOverTextX, gameOverTextY, gameOverFontSize, RED);
     }
 
+    RenderLevelTransition();
+
+    EndDrawing();
+}
+
+void Game::RenderLevelTransition() {
+    if (levelTransitionPhase_ == LevelTransitionPhase::None) {
+        return;
+    }
+
+    if (levelTransitionPhase_ == LevelTransitionPhase::ShowingText) {
+        DrawRectangle(0, 0, windowWidth_, windowHeight_, kLevelTransitionGray);
+        const char* text = TextFormat("NIVEL %d", currentLevel_);
+        constexpr int kFontSize = 40;
+        DrawText(text, windowWidth_ / 2 - MeasureText(text, kFontSize) / 2, windowHeight_ / 2 - kFontSize / 2, kFontSize, RAYWHITE);
+        return;
+    }
+
+    // Curtain: la misma pantalla gris partida al medio, una mitad se va
+    // para arriba y la otra para abajo hasta salir del todo, como un telon
+    // que se abre (el nivel de fondo, ya dibujado arriba, se ve por el
+    // hueco que va creciendo en el medio).
+    const float progress = 1.0f - static_cast<float>(levelTransitionTimer_ / kLevelTransitionCurtainDuration);
+    const float halfH = static_cast<float>(windowHeight_) * 0.5f;
+    const float topY = -halfH * progress;
+    const float bottomY = halfH + halfH * progress;
+    DrawRectangle(0, static_cast<int>(topY), windowWidth_, static_cast<int>(halfH) + 1, kLevelTransitionGray);
+    DrawRectangle(0, static_cast<int>(bottomY), windowWidth_, static_cast<int>(halfH) + 1, kLevelTransitionGray);
+}
+
+void Game::RenderScoreTally() {
+    BeginDrawing();
+    ClearBackground(BLACK);
+
+    const int centerX = windowWidth_ / 2;
+
+    // Puntaje maximo + quien lo tiene en esta partida (ver
+    // highScoreHolderId_/MaybeUpdateHighScore), arriba de todo.
+    const char* holderLabel = "-";
+    switch (highScoreHolderId_) {
+        case kPlayer1Id: holderLabel = "P1"; break;
+        case kPlayer2Id: holderLabel = "P2"; break;
+        case kPlayer3Id: holderLabel = "P3"; break;
+        case kPlayer4Id: holderLabel = "P4"; break;
+        default: break; // -1: todavia nadie en esta partida supero el record historico
+    }
+    constexpr int kHiScoreFontSize = 28;
+    const char* hiScoreText = TextFormat("HI-SCORE %06d  %s", highScore_, holderLabel);
+    DrawText(hiScoreText, centerX - MeasureText(hiScoreText, kHiScoreFontSize) / 2, 30, kHiScoreFontSize, RAYWHITE);
+
+    // "NIVEL N" del nivel recien terminado (currentLevel_ ya se pisa recien
+    // en AdvanceToNextLevel, por eso se guarda aparte en scoreTallyLevelShown_
+    // al arrancar esta pantalla, ver BeginScoreTally).
+    constexpr int kLevelFontSize = 32;
+    const char* levelText = TextFormat("NIVEL %d", scoreTallyLevelShown_);
+    DrawText(levelText, centerX - MeasureText(levelText, kLevelFontSize) / 2, 80, kLevelFontSize, RAYWHITE);
+
+    // Una fila por jugador activo: [icono jugador] : [icono enemigo + conteo]
+    // x4 (Basico/Rapido/Blindado/Power, siempre los 4 aunque el conteo sea
+    // 0) y al final TOTAL <suma>. Cada fila se revela de a un slot segun
+    // scoreTallyAnim_ (ver TickScoreTally).
+    struct RowSource {
+        int ownerId;
+        const TankSpriteSet* sprites;
+        bool active;
+    };
+    const RowSource sources[4] = {
+        {kPlayer1Id, &player1Sprites_, player1Active_},
+        {kPlayer2Id, &player2Sprites_, player2Active_},
+        {kPlayer3Id, &player3Sprites_, player3Active_},
+        {kPlayer4Id, &player4Sprites_, player4Active_},
+    };
+    const EnemySprites* enemySpriteSets[4] = {&enemySprites_, &fastEnemySprites_, &armorEnemySprites_, &powerEnemySprites_};
+
+    constexpr float kIconSize = 32.0f;
+    constexpr float kColonWidth = 24.0f;
+    constexpr float kSlotWidth = 90.0f; // icono de enemigo + su numero
+    constexpr float kTotalLabelWidth = 90.0f;
+    constexpr float kTotalValueWidth = 100.0f;
+    constexpr float kRowHeight = 56.0f;
+    constexpr float kListTop = 160.0f;
+    const float rowWidth = kIconSize + kColonWidth + 4.0f * kSlotWidth + kTotalLabelWidth + kTotalValueWidth;
+    const float rowStartX = static_cast<float>(centerX) - rowWidth * 0.5f;
+
+    int rowIndex = 0;
+    for (int i = 0; i < 4; ++i) {
+        const RowSource& src = sources[i];
+        if (!src.active) {
+            continue;
+        }
+        const float rowY = kListTop + static_cast<float>(rowIndex) * kRowHeight;
+        ++rowIndex;
+
+        float x = rowStartX;
+        const Texture2D playerTex = src.sprites->Get(1, Direction::Down, 0);
+        const Rectangle playerSrc{0.0f, 0.0f, static_cast<float>(playerTex.width), static_cast<float>(playerTex.height)};
+        DrawTexturePro(playerTex, playerSrc, Rectangle{x, rowY, kIconSize, kIconSize}, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+        x += kIconSize;
+        DrawText(":", static_cast<int>(x) + 6, static_cast<int>(rowY) + 4, 24, RAYWHITE);
+        x += kColonWidth;
+
+        const ScoreTallyRowAnim& anim = scoreTallyAnim_[i];
+        const PlayerLevelStats& stats = playerLevelStats_[i];
+        for (int type = 0; type < 4; ++type) {
+            if (type > anim.currentSlot) {
+                x += kSlotWidth;
+                continue; // todavia no le toca aparecer a este tipo
+            }
+            const int shownCount = (type < anim.currentSlot) ? stats.kills[type] : anim.currentCount;
+            const Texture2D enemyTex = enemySpriteSets[type]->Get(Direction::Down, 0);
+            const Rectangle enemySrc{0.0f, 0.0f, static_cast<float>(enemyTex.width), static_cast<float>(enemyTex.height)};
+            DrawTexturePro(enemyTex, enemySrc, Rectangle{x, rowY, kIconSize, kIconSize}, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+            const char* countText = TextFormat("%d", shownCount);
+            DrawText(countText, static_cast<int>(x + kIconSize + 8.0f), static_cast<int>(rowY) + 6, 22, RAYWHITE);
+            x += kSlotWidth;
+        }
+
+        if (anim.currentSlot >= 4) {
+            DrawText("TOTAL", static_cast<int>(x), static_cast<int>(rowY) + 4, 22, YELLOW);
+            x += kTotalLabelWidth;
+            const char* totalText = TextFormat("%d", stats.scoreGained);
+            DrawText(totalText, static_cast<int>(x), static_cast<int>(rowY) + 4, 22, YELLOW);
+
+            // Bono de fin de nivel (ver scoreTallyBonusAwarded_/TickScoreTally):
+            // recien aparece cuando terminan de contar TODAS las filas, no
+            // apenas termina esta.
+            if (scoreTallyBonusAwarded_[i]) {
+                x += static_cast<float>(MeasureText(totalText, 22)) + 12.0f;
+                const char* bonusText = TextFormat("+%d", kScoreTallyClearBonus);
+                DrawText(bonusText, static_cast<int>(x), static_cast<int>(rowY) + 4, 22, RED);
+            }
+        }
+    }
+
+    EndDrawing();
+}
+
+void Game::DrawMenuLine(const char* text, float y, bool selected, bool enabled) {
+    constexpr int kFontSize = 24;
+    const int centerX = windowWidth_ / 2;
+    const int textWidth = MeasureText(text, kFontSize);
+    const Color color = !enabled ? Color{90, 90, 90, 255} : (selected ? YELLOW : RAYWHITE);
+    DrawText(text, centerX - textWidth / 2, static_cast<int>(y), kFontSize, color);
+
+    if (selected) {
+        // El tanque amarillo (Documentaciones/Titulo.png) senala la opcion
+        // resaltada, a la izquierda del texto, como en el original.
+        constexpr float kSelectorScale = 1.6f;
+        const float selW = static_cast<float>(menuSelectorTexture_.width) * kSelectorScale;
+        const float selH = static_cast<float>(menuSelectorTexture_.height) * kSelectorScale;
+        const float selX = centerX - textWidth * 0.5f - selW - 14.0f;
+        const float selY = y + (static_cast<float>(kFontSize) - selH) * 0.5f;
+        const Rectangle src{0.0f, 0.0f, static_cast<float>(menuSelectorTexture_.width), static_cast<float>(menuSelectorTexture_.height)};
+        DrawTexturePro(menuSelectorTexture_, src, Rectangle{selX, selY, selW, selH}, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+    }
+}
+
+void Game::RenderMenu() {
+    BeginDrawing();
+    ClearBackground(BLACK);
+
+    const int centerX = windowWidth_ / 2;
+    constexpr float kLineHeight = 40.0f;
+
+    // Posiciones fijas (pedido explicitamente: el puntaje pegado arriba de
+    // todo, el titulo centrado verticalmente en la ventana, y la lista mas
+    // abajo con un margen mas grande) — ya no dependen de cuantas lineas
+    // tenga la lista de cada pantalla, a diferencia del centrado dinamico
+    // de la primera version.
+    constexpr float kHiScoreY = 16.0f;
+    constexpr float kGapLogoList = 70.0f;
+
+    // Puntaje maximo historico, pegado arriba de todo.
+    const char* hiScoreText = TextFormat("HI-SCORE  %06d", highScore_);
+    DrawText(hiScoreText, centerX - MeasureText(hiScoreText, 24) / 2, static_cast<int>(kHiScoreY), 24, RAYWHITE);
+
+    // Logo "BATTLE CITY" (Documentaciones/Titulo.png, extraido en ladrillos):
+    // mas grande y centrado verticalmente en la ventana, pedido explicitamente.
+    constexpr float kLogoScale = 3.2f;
+    const float logoW = static_cast<float>(titleLogoTexture_.width) * kLogoScale;
+    const float logoH = static_cast<float>(titleLogoTexture_.height) * kLogoScale;
+    // Centrado, pero corrido mas arriba (pedido explicitamente: centrado a
+    // secas quedaba muy abajo, empujando el menu casi al pie de pantalla).
+    constexpr float kLogoUpwardBias = 160.0f;
+    const float logoY = (static_cast<float>(windowHeight_) - logoH) * 0.5f - kLogoUpwardBias;
+    const float logoX = static_cast<float>(centerX) - logoW * 0.5f;
+    const Rectangle logoSrc{0.0f, 0.0f, static_cast<float>(titleLogoTexture_.width), static_cast<float>(titleLogoTexture_.height)};
+    DrawTexturePro(titleLogoTexture_, logoSrc, Rectangle{logoX, logoY, logoW, logoH}, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+
+    const float listTop = logoY + logoH + kGapLogoList;
+
+    std::string hintText; // texto de ayuda/explicacion, se llena segun la pantalla y se dibuja abajo del todo
+
+    if (menuScreen_ == MenuScreen::Main) {
+        static const char* kItems[] = {"ARCADE", "SUPERVIVENCIA", "VERSUS", "MODO CONSTRUCCION", "OPCIONES"};
+        static const bool kEnabled[] = {true, true, true, false, true};
+        for (int i = 0; i < 5; ++i) {
+            DrawMenuLine(kItems[i], listTop + static_cast<float>(i) * kLineHeight, i == mainMenuIndex_, kEnabled[i]);
+        }
+        if (!kEnabled[mainMenuIndex_]) {
+            hintText = "Todavia no disponible.";
+        }
+    } else if (menuScreen_ == MenuScreen::ModeSubmenu) {
+        static const char* kModeNames[] = {"ARCADE", "SUPERVIVENCIA", "VERSUS"};
+        const char* modeTitle = kModeNames[selectedMainModeIndex_];
+        DrawText(modeTitle, centerX - MeasureText(modeTitle, 24) / 2, static_cast<int>(listTop), 24, SKYBLUE);
+
+        static const char* kItems[] = {"LOCAL", "LAN"};
+        const bool modeHasGameplay = (selectedMainModeIndex_ == 0); // solo Arcade tiene partida real por ahora
+        const bool enabled[2] = {modeHasGameplay, false};
+        for (int i = 0; i < 2; ++i) {
+            DrawMenuLine(kItems[i], listTop + kLineHeight + static_cast<float>(i) * kLineHeight, i == modeSubmenuIndex_, enabled[i]);
+        }
+        if (!enabled[modeSubmenuIndex_]) {
+            hintText = (modeSubmenuIndex_ == 1) ? "Juego en red: todavia no disponible." : "Este modo todavia no tiene partida implementada.";
+        }
+    } else if (menuScreen_ == MenuScreen::Options) {
+        const char* items[3] = {
+            TextFormat("FUEGO AMIGO: %s", FriendlyFireLabel(friendlyFireMode_)),
+            TextFormat("PANTALLA: %s", IsWindowFullscreen() ? "COMPLETA" : "VENTANA"),
+            "MAPEO DE CONTROLES",
+        };
+        for (int i = 0; i < 3; ++i) {
+            DrawMenuLine(items[i], listTop + static_cast<float>(i) * kLineHeight, i == optionsIndex_, true);
+        }
+        if (optionsIndex_ == 0) {
+            hintText = FriendlyFireExplanation(friendlyFireMode_);
+        } else if (optionsIndex_ == 1) {
+            hintText = "Flechas: alternar entre ventana y pantalla completa.";
+        } else {
+            hintText = "Enter: elegir el jugador al que reasignarle los controles.";
+        }
+    } else if (menuScreen_ == MenuScreen::ControlMapping) {
+        static const char* kItems[] = {"JUGADOR 1", "JUGADOR 2", "JUGADOR 3", "JUGADOR 4"};
+        for (int i = 0; i < 4; ++i) {
+            DrawMenuLine(kItems[i], listTop + static_cast<float>(i) * kLineHeight, i == controlMappingIndex_, true);
+        }
+        hintText = "Enter: elegir el jugador al que reasignarle los controles.";
+    } else { // MenuScreen::PlayerActions o MenuScreen::CapturingKey (el fondo es el mismo)
+        const char* playerTitle = TextFormat("JUGADOR %d", mappingPlayerIndex_ + 1);
+        DrawText(playerTitle, centerX - MeasureText(playerTitle, 24) / 2, static_cast<int>(listTop), 24, SKYBLUE);
+
+        static const char* kActionLabels[kInputActionCount] = {nullptr, nullptr, nullptr, nullptr, "DISPARAR", "ESPECIAL", "INICIO"};
+        const PlayerKeyBindings& bindings = playerBindings_[mappingPlayerIndex_];
+        const float rowLabelX = static_cast<float>(centerX) - 150.0f;
+        const float rowKeyX = static_cast<float>(centerX) + 40.0f;
+        const float selectorX = rowLabelX - 40.0f;
+        for (int i = 0; i < kInputActionCount; ++i) {
+            const float y = listTop + kLineHeight + static_cast<float>(i) * kLineHeight;
+            const bool selected = (i == playerActionIndex_);
+            const Color rowColor = selected ? YELLOW : RAYWHITE;
+            if (selected) {
+                constexpr float kSelSize = 26.0f;
+                const Rectangle selSrc{0.0f, 0.0f, static_cast<float>(menuSelectorTexture_.width), static_cast<float>(menuSelectorTexture_.height)};
+                DrawTexturePro(menuSelectorTexture_, selSrc, Rectangle{selectorX, y - 1.0f, kSelSize, kSelSize}, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+            }
+            if (i < 4) {
+                // Flecha en vez de texto para las 4 direcciones, pedido explicitamente.
+                float dx = 0.0f, dy = 0.0f;
+                switch (static_cast<InputAction>(i)) {
+                    case InputAction::Up:    dy = -1.0f; break;
+                    case InputAction::Down:  dy = 1.0f;  break;
+                    case InputAction::Left:  dx = -1.0f; break;
+                    default:                 dx = 1.0f;  break; // Right
+                }
+                DrawArrowGlyph(rowLabelX + 12.0f, y + 12.0f, 12.0f, dx, dy, rowColor);
+            } else {
+                DrawText(kActionLabels[i], static_cast<int>(rowLabelX), static_cast<int>(y), 22, rowColor);
+            }
+            DrawText(KeyName(bindings.keys[i]), static_cast<int>(rowKeyX), static_cast<int>(y), 22, rowColor);
+        }
+        hintText = "Enter: reasignar esta tecla.";
+    }
+
+    // Pie de pagina (ayuda/explicacion + controles), siempre pegado abajo de
+    // la ventana, fuera del bloque centrado de arriba. En CapturingKey el
+    // cuadro de "Presione una tecla" (mas abajo) ya trae su propia leyenda,
+    // asi que no se repite aca.
+    if (menuScreen_ != MenuScreen::CapturingKey) {
+        if (!hintText.empty()) {
+            DrawText(hintText.c_str(), centerX - MeasureText(hintText.c_str(), 18) / 2, windowHeight_ - 62, 18, GRAY);
+        }
+        const char* controlsHint = (menuScreen_ == MenuScreen::Main)
+            ? "Flechas: moverse   Enter: elegir"
+            : "Flechas: moverse/cambiar   Enter: elegir   Esc: volver";
+        DrawText(controlsHint, centerX - MeasureText(controlsHint, 16) / 2, windowHeight_ - 32, 16, DARKGRAY);
+    }
+
+    // Prompt "Presione una tecla", encima de todo (incluida la lista de
+    // acciones de fondo), mientras se esta reasignando una tecla.
+    if (menuScreen_ == MenuScreen::CapturingKey) {
+        constexpr int kBoxW = 420, kBoxH = 140;
+        const int boxX = centerX - kBoxW / 2;
+        const int boxY = windowHeight_ / 2 - kBoxH / 2;
+        DrawRectangle(0, 0, windowWidth_, windowHeight_, Color{0, 0, 0, 150});
+        DrawRectangle(boxX, boxY, kBoxW, kBoxH, Color{0x24, 0x24, 0x28, 0xFF});
+        DrawRectangleLines(boxX, boxY, kBoxW, kBoxH, YELLOW);
+        const char* prompt = "Presione una tecla";
+        DrawText(prompt, centerX - MeasureText(prompt, 22) / 2, boxY + 20, 22, RAYWHITE);
+        const char* capturedText = (capturedKey_ != 0) ? KeyName(capturedKey_) : "...";
+        DrawText(capturedText, centerX - MeasureText(capturedText, 28) / 2, boxY + 62, 28, YELLOW);
+        const char* boxFooter = "Enter: guardar   Esc: cancelar";
+        DrawText(boxFooter, centerX - MeasureText(boxFooter, 16) / 2, boxY + 108, 16, GRAY);
+    }
+
     EndDrawing();
 }
 
 void Game::Shutdown() {
+    UnloadTexture(titleLogoTexture_);
+    UnloadTexture(menuSelectorTexture_);
     specialExplosionSprites_.Unload();
+    scorePopupSprites_.Unload();
     bulletImpactSprites_.Unload();
     shieldSprites_.Unload();
     spawnFlashSprites_.Unload();

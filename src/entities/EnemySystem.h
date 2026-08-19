@@ -6,6 +6,7 @@
 #include "BaseDistanceField.h"
 #include "Bullet.h"
 #include "Enemy.h"
+#include "ScoreEvent.h"
 #include "TileMap.h"
 
 namespace bc {
@@ -36,8 +37,10 @@ public:
     // tipos de enemigo (por ejemplo el "Rapido", ver FastEnemySystem), solo
     // para colision, nunca como blanco. specialExplosions recibe la
     // animacion chica de muerte (igual que Game::DestroyTank para los
-    // jugadores) cuando un enemigo es destruido.
-    void Update(double dt, TileMap& map, BulletSystem& bullets, BulletImpactSystem& impacts, SpecialExplosionSystem& specialExplosions, const std::vector<Tank*>& playerTanks, const std::vector<Tank*>& otherEnemyTanks, float baseX, float baseY);
+    // jugadores) cuando un enemigo es destruido. outScoreEvents se limpia y
+    // se llena aca: un ScoreEvent por cada enemigo que una bala de jugador
+    // mato este frame, para que Game le acredite el puntaje al que disparo.
+    void Update(double dt, TileMap& map, BulletSystem& bullets, BulletImpactSystem& impacts, SpecialExplosionSystem& specialExplosions, const std::vector<Tank*>& playerTanks, const std::vector<Tank*>& otherEnemyTanks, float baseX, float baseY, std::vector<ScoreEvent>& outScoreEvents);
 
     std::vector<Enemy>& Enemies() { return enemies_; }
     const std::vector<Enemy>& Enemies() const { return enemies_; }

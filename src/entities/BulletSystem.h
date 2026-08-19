@@ -98,7 +98,10 @@ public:
     // FastEnemySystem para chequear si UN ENEMIGO murio: asi las balas
     // enemigas (de cualquier tipo, incluidas las de otro enemigo) los
     // atraviesan sin hacerles nada, en vez de matarse entre ellos.
-    bool KillPlayerBulletsHittingBox(float left, float right, float top, float bottom, BulletImpactSystem& impacts, std::vector<int>& outShooterWeaponLevels);
+    // outShooterOwnerIds sale en paralelo a outShooterWeaponLevels (mismo
+    // indice = misma bala), para poder acreditarle el puntaje al jugador
+    // que disparo (ver ScoreEvent).
+    bool KillPlayerBulletsHittingBox(float left, float right, float top, float bottom, BulletImpactSystem& impacts, std::vector<int>& outShooterWeaponLevels, std::vector<int>& outShooterOwnerIds);
 
 private:
     // Destruye unidades minimas alrededor del punto de impacto (hitX,hitY):

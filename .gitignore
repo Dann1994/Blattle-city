@@ -6,3 +6,4 @@ out/
 CMakeUserPresets.json
 launch_check.log
 screenshot*.png
+battlecity_log.txt

@@ -626,7 +626,7 @@ bool BulletSystem::KillEnemyBulletsHittingBox(float left, float right, float top
     return hitAny;
 }
 
-bool BulletSystem::KillPlayerBulletsHittingBox(float left, float right, float top, float bottom, BulletImpactSystem& impacts, std::vector<int>& outShooterWeaponLevels) {
+bool BulletSystem::KillPlayerBulletsHittingBox(float left, float right, float top, float bottom, BulletImpactSystem& impacts, std::vector<int>& outShooterWeaponLevels, std::vector<int>& outShooterOwnerIds) {
     bool hitAny = false;
     for (Bullet& bullet : bullets_) {
         if (!bullet.alive || bullet.isSpecial || bullet.ownerId >= kEnemyOwnerIdBase) {
@@ -635,6 +635,7 @@ bool BulletSystem::KillPlayerBulletsHittingBox(float left, float right, float to
         if (bullet.x >= left && bullet.x <= right && bullet.y >= top && bullet.y <= bottom) {
             impacts.Spawn(bullet.x, bullet.y, bullet.weaponLevel == 4);
             outShooterWeaponLevels.push_back(bullet.weaponLevel);
+            outShooterOwnerIds.push_back(bullet.ownerId);
             bullet.alive = false;
             hitAny = true;
         }

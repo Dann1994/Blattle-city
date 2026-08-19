@@ -64,4 +64,27 @@ if (WIN32)
     target_compile_definitions(battlecity PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 
-# tools/level_editor se agrega en la Fase 6 (herramienta interna, no forma parte del build de release)
+# Editor de niveles (Fase 6, seccion 12.7 del documento de diseno): herramienta
+# interna de desarrollo, ejecutable APARTE de "battlecity" (no se empaqueta con
+# el juego). Solo usa /shared (formato de nivel) y los structs header-only de
+# terreno de src/world (BrickUnit/SteelUnit/TileTypes) para verse igual que el
+# juego real; no depende de nada de /src/core, /entities, /ai, etc.
+add_executable(level_editor
+    tools/level_editor/main.cpp
+    shared/LevelFormat.cpp
+)
+
+target_include_directories(level_editor PRIVATE
+    ${CMAKE_SOURCE_DIR}/shared
+    ${CMAKE_SOURCE_DIR}/src/world
+)
+
+target_link_libraries(level_editor PRIVATE raylib nlohmann_json::nlohmann_json)
+
+target_compile_definitions(level_editor PRIVATE
+    BC_ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets/"
+)
+
+if (WIN32)
+    target_compile_definitions(level_editor PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()

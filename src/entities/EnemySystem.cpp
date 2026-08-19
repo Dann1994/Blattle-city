@@ -273,7 +273,8 @@ void EnemySystem::SpawnAt(float x, float y) {
     enemies_.push_back(enemy);
 }
 
-void EnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, BulletImpactSystem& impacts, SpecialExplosionSystem& specialExplosions, const std::vector<Tank*>& playerTanks, const std::vector<Tank*>& otherEnemyTanks, float baseX, float baseY) {
+void EnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, BulletImpactSystem& impacts, SpecialExplosionSystem& specialExplosions, const std::vector<Tank*>& playerTanks, const std::vector<Tank*>& otherEnemyTanks, float baseX, float baseY, std::vector<ScoreEvent>& outScoreEvents) {
+    outScoreEvents.clear();
     const int baseCellX = static_cast<int>(std::round(baseX));
     const int baseCellY = static_cast<int>(std::round(baseY));
     const DirectionWeights& weights = kWeightsByLevel[aggressivenessLevel_ - 1];
@@ -304,9 +305,11 @@ void EnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, BulletI
         float eLeft = 0.0f, eRight = 0.0f, eTop = 0.0f, eBottom = 0.0f;
         enemy.tank.GetBounds(eLeft, eRight, eTop, eBottom);
         std::vector<int> hitLevels;
-        if (bullets.KillPlayerBulletsHittingBox(eLeft, eRight, eTop, eBottom, impacts, hitLevels)) {
+        std::vector<int> hitOwnerIds;
+        if (bullets.KillPlayerBulletsHittingBox(eLeft, eRight, eTop, eBottom, impacts, hitLevels, hitOwnerIds)) {
             specialExplosions.Spawn(enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, /*nativeScale=*/true);
             enemy.alive = false;
+            outScoreEvents.push_back(ScoreEvent{hitOwnerIds[0], enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, kScoreBasicKill});
             continue;
         }
 
@@ -377,24 +380,33 @@ void EnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, BulletI
         bool hardUnstuckTriggered = false;
         if (enemy.stuckFrames > kHardUnstuckFrames) {
             Direction bestDir = enemy.moveDir;
+            bool foundFreeDirection = false;
             for (int tries = 0; tries < 4; ++tries) {
                 const Direction candidate = RandomDirection(enemy.rng);
                 if (!WouldBeBlocked(enemy.tank, candidate, map, others)) {
                     bestDir = candidate;
+                    foundFreeDirection = true;
                     break;
                 }
             }
-            float ddx = 0.0f, ddy = 0.0f;
-            DirectionVector(bestDir, ddx, ddy);
-            enemy.tank.SetPosition(std::round(enemy.tank.X()) + ddx, std::round(enemy.tank.Y()) + ddy);
-            enemy.tank.SetFacing(bestDir);
-            enemy.moveDir = bestDir;
-            enemy.decisionCellX = static_cast<int>(std::round(enemy.tank.X()));
-            enemy.decisionCellY = static_cast<int>(std::round(enemy.tank.Y()));
-            enemy.deviationCellsRemaining = RandomRunLength(enemy.rng);
-            enemy.stuckFrames = 0;
-            enemy.debugMode = 'U';
-            hardUnstuckTriggered = true;
+            // Si las 4 direcciones probadas seguian bloqueadas, NO
+            // teletransporta (antes lo hacia igual, con bestDir==moveDir,
+            // la MISMA direccion bloqueada que lo tenia trabado: eso podia
+            // meterlo adentro de una pared sin volver a chequear). Deja
+            // stuckFrames como esta para reintentar el proximo frame.
+            if (foundFreeDirection) {
+                float ddx = 0.0f, ddy = 0.0f;
+                DirectionVector(bestDir, ddx, ddy);
+                enemy.tank.SetPosition(std::round(enemy.tank.X()) + ddx, std::round(enemy.tank.Y()) + ddy);
+                enemy.tank.SetFacing(bestDir);
+                enemy.moveDir = bestDir;
+                enemy.decisionCellX = static_cast<int>(std::round(enemy.tank.X()));
+                enemy.decisionCellY = static_cast<int>(std::round(enemy.tank.Y()));
+                enemy.deviationCellsRemaining = RandomRunLength(enemy.rng);
+                enemy.stuckFrames = 0;
+                enemy.debugMode = 'U';
+                hardUnstuckTriggered = true;
+            }
         }
 
         // --- Paso 3: reaccion al choque. Si la direccion actual esta
