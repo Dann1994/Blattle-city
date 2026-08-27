@@ -207,12 +207,15 @@ private:
     // Pantalla de seleccion de personaje (pedida explicitamente), entre
     // elegir Arcade > Local y que arranque el nivel: 4 recuadros en fila,
     // "JUGADOR 1".."JUGADOR 4" arriba de cada uno. El jugador 1 siempre esta
-    // presente (arranca en el primer color) y elige su color con
-    // izquierda/derecha; los jugadores 2-4 arrancan en "PULSE DISPARAR"
-    // parpadeando y se unen apretando Disparar (se les asigna el primer
-    // color libre, ver FirstAvailableColor) o se van apretando Especial.
-    // Cualquier jugador presente puede apretar Pausa/Start para confirmar y
-    // arrancar la partida (ver StartArcadeLocal), o Esc para volver al menu.
+    // presente (arranca en el primer color); los jugadores 2-4 arrancan en
+    // "PULSE DISPARAR" parpadeando y se unen apretando Disparar (se les
+    // asigna el primer color libre, ver FirstAvailableColor) o se van
+    // apretando Especial. Cualquier jugador YA UNIDO (el 1 siempre lo esta)
+    // puede cambiar su propio color con izquierda/derecha en cualquier
+    // momento, pedido explicitamente — nunca puede repetirse un color entre
+    // 2 jugadores presentes a la vez (ver CycleLobbyColor). Cualquier
+    // jugador presente puede apretar Pausa/Start para confirmar y arrancar
+    // la partida (ver StartArcadeLocal), o Esc para volver al menu.
     void EnterCharacterSelect();
     void ProcessCharacterSelectInput();
     void RenderCharacterSelect();

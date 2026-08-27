@@ -1230,7 +1230,9 @@ void Game::ProcessCharacterSelectInput() {
     }
 
     // Jugadores 2-4 (slots 1-3): se suman apretando Disparar (color libre
-    // asignado solo, ver FirstAvailableColor), se van apretando Especial.
+    // asignado solo, ver FirstAvailableColor), se van apretando Especial, y
+    // mientras esten unidos tambien pueden cambiar su propio color con
+    // izquierda/derecha (pedido explicitamente), igual que el jugador 1.
     bool* const activeFlags[4] = {&player1Active_, &player2Active_, &player3Active_, &player4Active_};
     for (int slot = 1; slot < 4; ++slot) {
         if (!*activeFlags[slot] && IsSlotShootPressed(slot)) {
@@ -1238,6 +1240,10 @@ void Game::ProcessCharacterSelectInput() {
             *activeFlags[slot] = true;
         } else if (*activeFlags[slot] && IsSlotSpecialPressed(slot)) {
             *activeFlags[slot] = false;
+        } else if (*activeFlags[slot] && IsSlotLeftPressed(slot)) {
+            CycleLobbyColor(slot, -1);
+        } else if (*activeFlags[slot] && IsSlotRightPressed(slot)) {
+            CycleLobbyColor(slot, 1);
         }
     }
 
@@ -1320,7 +1326,7 @@ void Game::RenderCharacterSelect() {
     const char* title = "SELECCION DE JUGADORES";
     DrawText(title, centerX - MeasureText(title, 26) / 2, static_cast<int>(boxY) - 90, 26, YELLOW);
 
-    const char* hint1 = "Jugador 1: Izquierda/Derecha elige color";
+    const char* hint1 = "Izquierda/Derecha: elegir color";
     const char* hint2 = "Disparar: unirse   Especial: salir   Pausa/Start: comenzar";
     DrawText(hint1, centerX - MeasureText(hint1, 16) / 2, windowHeight_ - 58, 16, GRAY);
     DrawText(hint2, centerX - MeasureText(hint2, 16) / 2, windowHeight_ - 34, 16, GRAY);
