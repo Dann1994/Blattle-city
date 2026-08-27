@@ -426,45 +426,41 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
         // sprite nada mas (pedido explicitamente).
         constexpr float kBulletHitHalfWidth = 0.09f;
         const bool centerBlocks = map.InBounds(cellX, cellY) && TileBlocksShots(map.At(cellX, cellY).type);
-        bool nudgedY = false;
-        bool nudgedX = false;
         if (!centerBlocks && dx != 0.0f) {
             const int cellYLow = static_cast<int>(std::floor(newY - kBulletHitHalfWidth));
             const int cellYHigh = static_cast<int>(std::floor(newY + kBulletHitHalfWidth));
             if (cellYLow != cellY && map.InBounds(cellX, cellYLow) && TileBlocksShots(map.At(cellX, cellYLow).type)) {
                 cellY = cellYLow;
-                nudgedY = true;
             } else if (cellYHigh != cellY && map.InBounds(cellX, cellYHigh) && TileBlocksShots(map.At(cellX, cellYHigh).type)) {
                 cellY = cellYHigh;
-                nudgedY = true;
             }
         } else if (!centerBlocks && dy != 0.0f) {
             const int cellXLow = static_cast<int>(std::floor(newX - kBulletHitHalfWidth));
             const int cellXHigh = static_cast<int>(std::floor(newX + kBulletHitHalfWidth));
             if (cellXLow != cellX && map.InBounds(cellXLow, cellY) && TileBlocksShots(map.At(cellXLow, cellY).type)) {
                 cellX = cellXLow;
-                nudgedX = true;
             } else if (cellXHigh != cellX && map.InBounds(cellXHigh, cellY) && TileBlocksShots(map.At(cellXHigh, cellY).type)) {
                 cellX = cellXHigh;
-                nudgedX = true;
             }
         }
 
-        // hitX/hitY son la posicion real de llegada de este sub-paso (para
-        // decidir la capa/unidad de ladrillo o hierro en la que penetro,
-        // ver HandleBrickHit/HandleSteelHit); newX/newY se siguen usando
-        // para todo lo demas. Cuando el chequeo de arriba redirigio a la
-        // celda vecina (nudgedX/nudgedY), la posicion real de la bala
-        // siempre queda pegada al borde MAS LEJANO de esa celda vecina (es
-        // la definicion misma del roce): usar esa posicion tal cual para
-        // decidir fila/columna en HandleBrickHit/HandleSteelHit la hacia
-        // caer SIEMPRE en la banda de esquina, destruyendo solo la mitad de
-        // esa capa en vez de la capa entera — pedido explicitamente,
-        // "disparar entre dos bloques" iba dejando un patron dentado en vez
-        // de tocarlos de lleno. Se fuerza al centro de la celda vecina en
-        // el eje perpendicular en su lugar, como si hubiera entrado derecho.
-        const float hitX = nudgedX ? (static_cast<float>(cellX) + 0.5f) : newX;
-        const float hitY = nudgedY ? (static_cast<float>(cellY) + 0.5f) : newY;
+        // hitX/hitY son la posicion real de llegada de este sub-paso, SIEMPRE
+        // la posicion real de la bala (newX/newY) sin forzar nada, incluso
+        // cuando el chequeo de arriba redirigio cellX/cellY a la celda
+        // vecina (un roce). Antes se forzaba al centro de la celda
+        // vecina en el eje perpendicular (pensado para el viejo sistema de
+        // destruir toda una fila/columna, evitaba un patron dentado), pero
+        // con el sistema actual (una unidad minima exacta por impacto, ver
+        // el rediseño del ladrillo) eso hacia que TODO roce contra una
+        // pared, sin importar donde pegara, apuntara siempre a la MISMA
+        // unidad fija — la primera vez la rompia, y como esa unidad ya
+        // quedaba muerta, cualquier roce siguiente no encontraba nada ahi y
+        // pasaba de largo en silencio (el bug reportado: "a veces rompe, a
+        // veces no"). Usando la posicion real, el clamp de abajo (fracX/
+        // fracY * grilla) ya cae solo en la unidad correcta pegada al borde
+        // por donde entro.
+        const float hitX = newX;
+        const float hitY = newY;
 
         if (!map.InBounds(cellX, cellY)) {
             // Borde del escenario: no hay tile ahi, pero igual es un impacto.
@@ -540,29 +536,28 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
             }
 
             if (hitType == TileType::Brick) {
-                if (HandleBrickHit(map, cellX, cellY, hitX, hitY, bullet.direction, kSpecialBulletPower)) {
-                    if (bullet.ownerId < kEnemyOwnerIdBase) {
-                        PlaySound(brickBreakSound); // pedido explicitamente: solo bala de jugador
+                // Ladrillo rediseñado desde cero (pedido explicitamente):
+                // cada unidad minima de la grilla 4x4 tiene salud 1 — la
+                // bala destruye la UNA unidad exacta donde pega (segun su
+                // posicion 2D dentro de la celda) y, siendo especial,
+                // explota ahi mismo (mismo criterio que al tocar hierro u
+                // otro obstaculo solido).
+                Cell& cell = map.At(cellX, cellY);
+                const float fracX = hitX - static_cast<float>(cellX);
+                const float fracY = hitY - static_cast<float>(cellY);
+                const int col = std::clamp(static_cast<int>(fracX * kBrickGridSize), 0, kBrickGridSize - 1);
+                const int row = std::clamp(static_cast<int>(fracY * kBrickGridSize), 0, kBrickGridSize - 1);
+                BrickUnit& unit = cell.brickUnits[row * kBrickGridSize + col];
+                if (unit.alive) {
+                    unit.alive = false;
+                    if (cell.BrickFullyDestroyed()) {
+                        cell.type = TileType::Empty;
                     }
-                    bullet.health -= 1; // ladrillo salud 1: siempre consume 1 punto
-                    if (bullet.health <= 0) {
-                        // hitX/hitY (no newX/newY): si esto se disparo por un
-                        // roce a la celda vecina (nudgedX/nudgedY), la
-                        // explosion tiene que verse ahi, no en la posicion
-                        // real (sin nudgear) de la bala — pedido
-                        // explicitamente, se veia "flotando" separada del
-                        // bloque que en realidad rompio.
-                        TriggerSpecialExplosion(map, hitX, hitY, bullet.ownerId, specialExplosions, explosionEvents, explosionSound);
-                        bullet.alive = false;
-                        break;
-                    }
-                    // Le sobra salud: sigue de largo, sin animacion de impacto
-                    // (pedido explicitamente: esa animacion es solo cuando la
-                    // bala se destruye de verdad, no en cada golpe que sobrevive).
-                    bullet.x = newX;
-                    bullet.y = newY;
-                    continue;
+                    TriggerSpecialExplosion(map, hitX, hitY, bullet.ownerId, specialExplosions, explosionEvents, explosionSound);
+                    bullet.alive = false;
+                    break;
                 }
+                // Esa unidad exacta ya estaba destruida: la bala sigue de largo.
                 bullet.x = newX;
                 bullet.y = newY;
                 continue;
@@ -601,31 +596,30 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
         }
 
         if (hitType == TileType::Brick) {
-            const int power = BulletPower(bullet);
-            if (HandleBrickHit(map, cellX, cellY, hitX, hitY, bullet.direction, power)) {
+            // Ladrillo rediseñado desde cero (pedido explicitamente): cada
+            // unidad minima de la grilla 4x4 tiene salud 1 — un impacto
+            // destruye la UNA unidad exacta donde pega (segun su posicion 2D
+            // dentro de la celda), suena el sonido ya definido (solo balas
+            // de jugador) y la bala se frena ahi.
+            Cell& cell = map.At(cellX, cellY);
+            const float fracX = hitX - static_cast<float>(cellX);
+            const float fracY = hitY - static_cast<float>(cellY);
+            const int col = std::clamp(static_cast<int>(fracX * kBrickGridSize), 0, kBrickGridSize - 1);
+            const int row = std::clamp(static_cast<int>(fracY * kBrickGridSize), 0, kBrickGridSize - 1);
+            BrickUnit& unit = cell.brickUnits[row * kBrickGridSize + col];
+            if (unit.alive) {
+                unit.alive = false;
+                if (cell.BrickFullyDestroyed()) {
+                    cell.type = TileType::Empty;
+                }
                 if (bullet.ownerId < kEnemyOwnerIdBase) {
                     PlaySound(brickBreakSound); // pedido explicitamente: solo bala de jugador
                 }
-                bullet.health -= 1; // ladrillo salud 1: siempre consume 1 punto de la bala
-                if (bullet.health <= 0) {
-                    // hitX/hitY (no newX/newY): si el golpe se disparo por un
-                    // roce a la celda vecina (nudgedX/nudgedY), el destello
-                    // tiene que verse ahi, no en la posicion real (sin
-                    // nudgear) de la bala — pedido explicitamente, se veia
-                    // "flotando" separado del bloque que en realidad rompio.
-                    impacts.Spawn(hitX, hitY, bullet.weaponLevel == 4);
-                    bullet.alive = false;
-                    break;
-                }
-                // Le sobra salud: sigue de largo (pedido explicitamente,
-                // "ciertas balas puedan atravesar objetos y tanques"), sin
-                // animacion de impacto (esa es solo cuando la bala se
-                // destruye de verdad, pedido explicitamente).
-                bullet.x = newX;
-                bullet.y = newY;
-                continue;
+                impacts.Spawn(hitX, hitY, bullet.weaponLevel == 4);
+                bullet.alive = false;
+                break;
             }
-            // La unidad exacta del impacto ya estaba destruida: la bala sigue de largo.
+            // Esa unidad exacta ya estaba destruida: la bala sigue de largo.
             bullet.x = newX;
             bullet.y = newY;
             continue;
