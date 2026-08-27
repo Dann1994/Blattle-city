@@ -946,6 +946,13 @@ private:
         int x = 0;
         int y = 0;
         TileType originalType = TileType::Empty;
+        // Snapshot completo (no solo el tipo) para poder restaurar exacto
+        // al vencer el efecto, incluso si la celda ya estaba parcialmente
+        // rota/recortada antes del gancho de hierro del item Pala (ver
+        // ApplyShovelFortification) — a diferencia de antes, que revivia
+        // TODAS las unidades de ladrillo sin importar como estaban.
+        std::array<BrickUnit, kBrickUnitCount> originalBrickUnits{};
+        std::array<SteelUnit, kSteelUnitCount> originalSteelUnits{};
     };
     int basePositionX_ = -1;
     int basePositionY_ = -1;

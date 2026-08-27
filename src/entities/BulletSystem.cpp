@@ -285,6 +285,128 @@ bool FindAliveBrickUnit(TileMap& map, float hitX, float hitY, Direction directio
     return false;
 }
 
+// Igual que TryGetAliveBrickUnitAt pero para hierro (grilla 2x2, ver
+// SteelUnit.h). Hierro rediseñado desde cero (pedido explicitamente,
+// "similar al comportamiento de los ladrillos"): ya no tiene resistencia
+// por potencia, 1 solo impacto rompe la unidad de una.
+bool TryGetAliveSteelUnitAt(TileMap& map, float x, float y, int& outCellX, int& outCellY, int& outRow, int& outCol) {
+    const int cx = static_cast<int>(std::floor(x));
+    const int cy = static_cast<int>(std::floor(y));
+    if (!map.InBounds(cx, cy)) {
+        return false;
+    }
+    Cell& cell = map.At(cx, cy);
+    if (cell.type != TileType::Steel) {
+        return false;
+    }
+    const float fracX = x - static_cast<float>(cx);
+    const float fracY = y - static_cast<float>(cy);
+    const int col = std::clamp(static_cast<int>(fracX * kSteelGridSize), 0, kSteelGridSize - 1);
+    const int row = std::clamp(static_cast<int>(fracY * kSteelGridSize), 0, kSteelGridSize - 1);
+    if (!cell.steelUnits[row * kSteelGridSize + col].alive) {
+        return false;
+    }
+    outCellX = cx;
+    outCellY = cy;
+    outRow = row;
+    outCol = col;
+    return true;
+}
+
+// Igual que FindAliveBrickUnit pero para hierro: mismo margen de roce por
+// ancho real del sprite si la unidad exacta del punto de impacto ya estaba
+// destruida.
+bool FindAliveSteelUnit(TileMap& map, float hitX, float hitY, Direction direction, int& outCellX, int& outCellY, int& outRow, int& outCol, float& outX, float& outY) {
+    if (TryGetAliveSteelUnitAt(map, hitX, hitY, outCellX, outCellY, outRow, outCol)) {
+        outX = hitX;
+        outY = hitY;
+        return true;
+    }
+
+    const bool travelVertical = (direction == Direction::Up || direction == Direction::Down);
+    const float lowX = travelVertical ? hitX - kBulletHitHalfWidth : hitX;
+    const float lowY = travelVertical ? hitY : hitY - kBulletHitHalfWidth;
+    const float highX = travelVertical ? hitX + kBulletHitHalfWidth : hitX;
+    const float highY = travelVertical ? hitY : hitY + kBulletHitHalfWidth;
+
+    if (TryGetAliveSteelUnitAt(map, lowX, lowY, outCellX, outCellY, outRow, outCol)) {
+        outX = lowX;
+        outY = lowY;
+        return true;
+    }
+    if (TryGetAliveSteelUnitAt(map, highX, highY, outCellX, outCellY, outRow, outCol)) {
+        outX = highX;
+        outY = highY;
+        return true;
+    }
+    return false;
+}
+
+// Le resta "damage" a la unidad de hierro (cellX,cellY,row,col) -asume que
+// quien llama ya confirmo que esta viva- (pedido explicitamente: resistencia
+// por nivel de arma, ver kSteelDamageByLevel en SteelUnit.h). outDestroyed
+// dice si ESTE impacto la termino de romper. Si la rompe, de paso destruye
+// tambien su vecina pegada al lado del impacto -de un solo golpe, sin
+// importar el hp que le quedara a ELLA- misma fila (columna vecina) si
+// chainHorizontal, misma columna (fila vecina) si no, hacia el indice menor
+// si towardNegative o el mayor si no (mismo criterio de eje/lado que
+// DestroyBrickUnitAndNeighbors, ver ahi). A diferencia del ladrillo, la
+// cadena para aca: solo esa 1 vecina, nunca la vecina de la vecina (pedido
+// explicitamente: "en este caso solo dos bloques de metal destruye"). No
+// hace nada con la vecina si no existe (borde del mapa) o no es hierro.
+void DamageSteelUnitAndMaybeNeighbor(TileMap& map, int cellX, int cellY, int row, int col, bool chainHorizontal, bool towardNegative, int damage, bool& outDestroyed) {
+    Cell& cell = map.At(cellX, cellY);
+    SteelUnit& unit = cell.steelUnits[row * kSteelGridSize + col];
+    unit.hp -= damage;
+    if (unit.hp > 0) {
+        outDestroyed = false;
+        return;
+    }
+    outDestroyed = true;
+    unit.hp = 0;
+    unit.alive = false;
+    if (cell.SteelFullyDestroyed()) {
+        cell.type = TileType::Empty;
+    }
+
+    int neighborCellX = cellX;
+    int neighborCellY = cellY;
+    int neighborRow = row;
+    int neighborCol = col;
+    const int step = towardNegative ? -1 : 1;
+    if (chainHorizontal) {
+        neighborCol += step;
+        if (neighborCol < 0) {
+            neighborCellX -= 1;
+            neighborCol = kSteelGridSize - 1;
+        } else if (neighborCol >= kSteelGridSize) {
+            neighborCellX += 1;
+            neighborCol = 0;
+        }
+    } else {
+        neighborRow += step;
+        if (neighborRow < 0) {
+            neighborCellY -= 1;
+            neighborRow = kSteelGridSize - 1;
+        } else if (neighborRow >= kSteelGridSize) {
+            neighborCellY += 1;
+            neighborRow = 0;
+        }
+    }
+
+    if (!map.InBounds(neighborCellX, neighborCellY)) {
+        return;
+    }
+    Cell& neighborCell = map.At(neighborCellX, neighborCellY);
+    if (neighborCell.type != TileType::Steel) {
+        return;
+    }
+    neighborCell.steelUnits[neighborRow * kSteelGridSize + neighborCol].alive = false;
+    if (neighborCell.SteelFullyDestroyed()) {
+        neighborCell.type = TileType::Empty;
+    }
+}
+
 // Bloques pegados uno al lado del otro: si el impacto cae en la franja
 // angosta pegada al borde compartido con la celda vecina (no toda la mitad
 // "esquina", solo bien cerca de la costura) y esa vecina tambien es
@@ -711,18 +833,29 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
             }
 
             if (hitType == TileType::Steel) {
-                int dealt = 0;
-                bool unitDestroyed = false;
-                if (HandleSteelHit(map, cellX, cellY, hitX, hitY, bullet.direction, kSpecialBulletPower, dealt, unitDestroyed)) {
-                    bullet.health -= dealt;
-                    if (bullet.health <= 0) {
-                        TriggerSpecialExplosion(map, hitX, hitY, bullet.ownerId, specialExplosions, explosionEvents, explosionSound);
-                        bullet.alive = false;
-                        break;
-                    }
-                    bullet.x = newX;
-                    bullet.y = newY;
-                    continue;
+                // Hierro con resistencia por nivel de arma (ver
+                // SteelUnit.h): la bala especial siempre lo rompe de un
+                // solo disparo (pedido explicitamente: "bala especial 1
+                // disparo y explosion tambien destruye, apenas impacta
+                // explota"), asi que le pasa el hp entero como dano. Al
+                // romper la unidad exacta, de paso rompe tambien su vecina
+                // pegada al lado del impacto (ver
+                // DamageSteelUnitAndMaybeNeighbor), y siendo especial,
+                // explota ahi mismo.
+                int unitCellX = 0, unitCellY = 0, unitRow = 0, unitCol = 0;
+                float unitX = 0.0f, unitY = 0.0f;
+                if (FindAliveSteelUnit(map, hitX, hitY, bullet.direction, unitCellX, unitCellY, unitRow, unitCol, unitX, unitY)) {
+                    const bool chainHorizontal = (bullet.direction == Direction::Up || bullet.direction == Direction::Down);
+                    const float unitFracX = unitX - static_cast<float>(unitCellX);
+                    const float unitFracY = unitY - static_cast<float>(unitCellY);
+                    const bool towardNegative = chainHorizontal
+                        ? (unitFracX * kSteelGridSize - static_cast<float>(unitCol)) < 0.5f
+                        : (unitFracY * kSteelGridSize - static_cast<float>(unitRow)) < 0.5f;
+                    bool destroyed = false;
+                    DamageSteelUnitAndMaybeNeighbor(map, unitCellX, unitCellY, unitRow, unitCol, chainHorizontal, towardNegative, kSteelUnitMaxHp, destroyed);
+                    TriggerSpecialExplosion(map, hitX, hitY, bullet.ownerId, specialExplosions, explosionEvents, explosionSound);
+                    bullet.alive = false;
+                    break;
                 }
                 bullet.x = newX;
                 bullet.y = newY;
@@ -777,25 +910,36 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
         }
 
         if (hitType == TileType::Steel) {
-            const int power = BulletPower(bullet);
-            int dealt = 0;
-            bool unitDestroyed = false;
-            if (HandleSteelHit(map, cellX, cellY, hitX, hitY, bullet.direction, power, dealt, unitDestroyed)) {
-                if (!unitDestroyed && bullet.ownerId < kEnemyOwnerIdBase) {
-                    // Pedido explicitamente: sonido de "pega y no lo rompe", solo bala de jugador.
-                    PlaySound(blockResistSound);
+            // Hierro con resistencia por nivel de arma (pedido
+            // explicitamente): "Nivel 1 requiere 30 disparos para romper,
+            // Nivel 2 35, Nivel 3 15, Nivel 4 1 disparo" (ver
+            // SteelDamageForLevel/kSteelDamageByLevel en SteelUnit.h). Cada
+            // impacto sobre la unidad exacta le resta el dano que
+            // corresponda; si no alcanza para romperla, suena el "resiste"
+            // (mismo criterio que antes) y la bala se frena igual (no
+            // atraviesa, ni con arma fuerte); si la rompe, de paso rompe
+            // tambien su vecina pegada al lado del impacto (ver
+            // DamageSteelUnitAndMaybeNeighbor) y suena el sonido de rotura
+            // del ladrillo (hierro no tiene uno propio).
+            int unitCellX = 0, unitCellY = 0, unitRow = 0, unitCol = 0;
+            float unitX = 0.0f, unitY = 0.0f;
+            if (FindAliveSteelUnit(map, hitX, hitY, bullet.direction, unitCellX, unitCellY, unitRow, unitCol, unitX, unitY)) {
+                const bool chainHorizontal = (bullet.direction == Direction::Up || bullet.direction == Direction::Down);
+                const float unitFracX = unitX - static_cast<float>(unitCellX);
+                const float unitFracY = unitY - static_cast<float>(unitCellY);
+                const bool towardNegative = chainHorizontal
+                    ? (unitFracX * kSteelGridSize - static_cast<float>(unitCol)) < 0.5f
+                    : (unitFracY * kSteelGridSize - static_cast<float>(unitRow)) < 0.5f;
+                bool destroyed = false;
+                DamageSteelUnitAndMaybeNeighbor(map, unitCellX, unitCellY, unitRow, unitCol, chainHorizontal, towardNegative, SteelDamageForLevel(bullet.weaponLevel), destroyed);
+                if (bullet.ownerId < kEnemyOwnerIdBase) {
+                    PlaySound(destroyed ? brickBreakSound : blockResistSound);
                 }
-                bullet.health -= dealt;
-                if (bullet.health <= 0) {
-                    impacts.Spawn(hitX, hitY, bullet.weaponLevel == 4);
-                    bullet.alive = false;
-                    break;
-                }
-                bullet.x = newX;
-                bullet.y = newY;
-                continue;
+                impacts.Spawn(hitX, hitY, bullet.weaponLevel == 4);
+                bullet.alive = false;
+                break;
             }
-            // La unidad exacta del impacto ya estaba destruida: la bala sigue de largo.
+            // No hay ninguna unidad viva ni en el punto exacto ni en el margen del sprite: la bala sigue de largo.
             bullet.x = newX;
             bullet.y = newY;
             continue;

@@ -771,25 +771,61 @@ void Game::ApplyShovelFortification() {
         return;
     }
     fortifiedCells_.clear();
-    for (int dy = -1; dy <= 1; ++dy) {
-        for (int dx = -1; dx <= 1; ++dx) {
-            if (dx == 0 && dy == 0) {
-                continue; // la base misma, no una celda a fortificar
-            }
-            const int x = basePositionX_ + dx;
-            const int y = basePositionY_ + dy;
-            if (!map_.InBounds(x, y)) {
-                continue;
-            }
-            Cell& cell = map_.At(x, y);
-            if (cell.type == TileType::Steel) {
-                continue; // ya es hierro, no hace falta tocarla ni recordarla
-            }
-            fortifiedCells_.push_back(FortifiedCell{x, y, cell.type});
-            cell.type = TileType::Steel;
-            for (SteelUnit& unit : cell.steelUnits) {
-                unit.alive = true;
-                unit.hp = kSteelUnitMaxHp;
+
+    // Rediseñado desde cero (pedido explicitamente, con referencia visual):
+    // ya no convierte las 8 celdas vecinas enteras a hierro. Ahora es un
+    // "gancho" pegado al aguila armado con unidades minimas de hierro
+    // (grilla 2x2, ver SteelUnit.h): una fila de 4 unidades arriba -que se
+    // extiende 1 unidad mas alla de cada lado del aguila- y una columna de
+    // 2 unidades pegada a cada costado -misma altura que el aguila-,
+    // conectadas en las esquinas superior-izquierda/derecha. Se logra con
+    // 5 celdas vecinas, cada una con solo la porcion de su propia grilla de
+    // hierro que corresponde (mismo BlockShape que ya usa el editor de
+    // niveles para piezas parciales, ver shared/TileTypes.h):
+    //   (baseX-1,baseY-1) esquina sup-izq: BottomRight (1 unidad, la mas cercana al aguila)
+    //   (baseX,  baseY-1) centro arriba:   Bottom (las 2 unidades de abajo, forman el resto de la fila de 4)
+    //   (baseX+1,baseY-1) esquina sup-der: BottomLeft (1 unidad, la mas cercana al aguila)
+    //   (baseX-1,baseY)   costado izq:     Right (las 2 unidades pegadas al aguila)
+    //   (baseX+1,baseY)   costado der:     Left (las 2 unidades pegadas al aguila)
+    struct ShapedNeighbor {
+        int dx, dy;
+        BlockShape shape;
+    };
+    constexpr ShapedNeighbor kPattern[5] = {
+        {-1, -1, BlockShape::BottomRight},
+        {0, -1, BlockShape::Bottom},
+        {1, -1, BlockShape::BottomLeft},
+        {-1, 0, BlockShape::Right},
+        {1, 0, BlockShape::Left},
+    };
+
+    for (const ShapedNeighbor& piece : kPattern) {
+        const int x = basePositionX_ + piece.dx;
+        const int y = basePositionY_ + piece.dy;
+        if (!map_.InBounds(x, y)) {
+            continue;
+        }
+        Cell& cell = map_.At(x, y);
+
+        FortifiedCell snapshot;
+        snapshot.x = x;
+        snapshot.y = y;
+        snapshot.originalType = cell.type;
+        snapshot.originalBrickUnits = cell.brickUnits;
+        snapshot.originalSteelUnits = cell.steelUnits;
+        fortifiedCells_.push_back(snapshot);
+
+        cell.type = TileType::Steel;
+        for (int r = 0; r < kSteelGridSize; ++r) {
+            for (int c = 0; c < kSteelGridSize; ++c) {
+                SteelUnit& unit = cell.steelUnits[r * kSteelGridSize + c];
+                if (IsUnitAliveForShape(piece.shape, r, c, kSteelGridSize)) {
+                    unit.alive = true;
+                    unit.hp = kSteelUnitMaxHp;
+                } else {
+                    unit.alive = false;
+                    unit.hp = 0;
+                }
             }
         }
     }
@@ -804,18 +840,17 @@ void Game::TickBaseFortification(double dt) {
     if (baseFortifyTimer_ > 0.0) {
         return;
     }
+    // Restauracion exacta desde el snapshot (ver FortifiedCell): a
+    // diferencia de antes (que revivia TODAS las unidades de ladrillo sin
+    // importar como estaban), esto deja la celda EXACTAMENTE como estaba
+    // antes de la Pala, incluso si ya estaba parcialmente recortada (ver el
+    // anillo de ladrillo fino alrededor del aguila, ThinBrickCellVertical/
+    // Horizontal en LoadCurrentLevelMap).
     for (const FortifiedCell& fc : fortifiedCells_) {
         Cell& cell = map_.At(fc.x, fc.y);
         cell.type = fc.originalType;
-        if (fc.originalType == TileType::Brick) {
-            for (int r = 0; r < kBrickGridSize; ++r) {
-                for (int c = 0; c < kBrickGridSize; ++c) {
-                    BrickUnit& unit = cell.brickUnits[r * kBrickGridSize + c];
-                    unit.alive = true;
-                    unit.frame = BrickUnit::FrameFor(r, c);
-                }
-            }
-        }
+        cell.brickUnits = fc.originalBrickUnits;
+        cell.steelUnits = fc.originalSteelUnits;
     }
     fortifiedCells_.clear();
 }
@@ -935,6 +970,25 @@ void Game::ProcessInput() {
     }
     if (IsKeyPressed(playerBindings_[3].keys[static_cast<int>(InputAction::Start)])) {
         SetPlayerActive(player4Active_, player4_, player4Spawn_, player4SpawnX_, player4SpawnY_, !player4Active_, 3);
+    }
+
+    // Pedido explicitamente: igual que en la pantalla de seleccion de
+    // personaje (ver ProcessCharacterSelectInput), un jugador inactivo
+    // tambien se puede sumar a mitad de partida apretando Disparar en su
+    // control -ademas del Inicio de siempre-, sin pasar por el teclado.
+    // Nunca lo saca (Disparar ya es la accion normal de un jugador activo,
+    // este chequeo solo corre mientras sigue inactivo).
+    if (!player1Active_ && IsSlotShootPressed(0)) {
+        SetPlayerActive(player1Active_, player1_, player1Spawn_, player1SpawnX_, player1SpawnY_, true, 0);
+    }
+    if (!player2Active_ && IsSlotShootPressed(1)) {
+        SetPlayerActive(player2Active_, player2_, player2Spawn_, player2SpawnX_, player2SpawnY_, true, 1);
+    }
+    if (!player3Active_ && IsSlotShootPressed(2)) {
+        SetPlayerActive(player3Active_, player3_, player3Spawn_, player3SpawnX_, player3SpawnY_, true, 2);
+    }
+    if (!player4Active_ && IsSlotShootPressed(3)) {
+        SetPlayerActive(player4Active_, player4_, player4Spawn_, player4SpawnX_, player4SpawnY_, true, 3);
     }
 
     // Boton de prueba: repite el respawn en el punto de spawn inicial, para
@@ -2424,6 +2478,31 @@ void Game::TickScoreTally(double dt) {
     // avanzar de nivel).
     const bool active[4] = {player1Active_, player2Active_, player3Active_, player4Active_};
     bool allRowsDone = (scoreTallySlot_ >= 4);
+
+    // Pedido explicitamente: si algun jugador activo aprieta Disparar
+    // mientras se cuenta el tipo de enemigo actual, saltea el conteo
+    // digito a digito de ESE tipo para todas las filas activas -las lleva
+    // directo a su numero final- y pasa al siguiente en el mismo tick (para
+    // el que no tenga paciencia de esperar el conteo completo). Solo
+    // adelanta el slot actual, no varios de un solo apreton.
+    if (scoreTallySlot_ < 4) {
+        bool skipRequested = false;
+        for (int i = 0; i < 4 && !skipRequested; ++i) {
+            if (active[i] && IsSlotShootPressed(i)) {
+                skipRequested = true;
+            }
+        }
+        if (skipRequested) {
+            for (int i = 0; i < 4; ++i) {
+                if (!active[i]) {
+                    continue;
+                }
+                scoreTallyAnim_[i].currentCount = playerLevelStats_[i].kills[scoreTallySlot_];
+                scoreTallyAnim_[i].timer = kScoreTallyRowPause;
+            }
+        }
+    }
+
     bool allActiveDoneWithSlot = true;
     for (int i = 0; i < 4; ++i) {
         if (!active[i]) {
@@ -3807,10 +3886,10 @@ void Game::Render(double /*interpolationAlpha*/) {
     const int p3Y = p4Y - rowH;
     const int p2Y = p3Y - rowH;
     const int p1Y = p2Y - rowH;
-    if (player1Active_) RenderPlayerHud(player1_, "P1", panelCenterX, p1Y, player1Score_, HudColorForColor(playerColorIndex_[0])); else DrawText("P1 - Pulse iniciar", panelCenterX - MeasureText("P1 - Pulse iniciar", 20) / 2, p1Y, 20, RED);
-    if (player2Active_) RenderPlayerHud(player2_, "P2", panelCenterX, p2Y, player2Score_, HudColorForColor(playerColorIndex_[1])); else DrawText("P2 - Pulse iniciar", panelCenterX - MeasureText("P2 - Pulse iniciar", 20) / 2, p2Y, 20, RED);
-    if (player3Active_) RenderPlayerHud(player3_, "P3", panelCenterX, p3Y, player3Score_, HudColorForColor(playerColorIndex_[2])); else DrawText("P3 - Pulse iniciar", panelCenterX - MeasureText("P3 - Pulse iniciar", 20) / 2, p3Y, 20, RED);
-    if (player4Active_) RenderPlayerHud(player4_, "P4", panelCenterX, p4Y, player4Score_, HudColorForColor(playerColorIndex_[3])); else DrawText("P4 - Pulse iniciar", panelCenterX - MeasureText("P4 - Pulse iniciar", 20) / 2, p4Y, 20, RED);
+    if (player1Active_) RenderPlayerHud(player1_, "P1", panelCenterX, p1Y, player1Score_, HudColorForColor(playerColorIndex_[0])); else DrawText("P1 - Pulse disparar", panelCenterX - MeasureText("P1 - Pulse disparar", 20) / 2, p1Y, 20, RED);
+    if (player2Active_) RenderPlayerHud(player2_, "P2", panelCenterX, p2Y, player2Score_, HudColorForColor(playerColorIndex_[1])); else DrawText("P2 - Pulse disparar", panelCenterX - MeasureText("P2 - Pulse disparar", 20) / 2, p2Y, 20, RED);
+    if (player3Active_) RenderPlayerHud(player3_, "P3", panelCenterX, p3Y, player3Score_, HudColorForColor(playerColorIndex_[2])); else DrawText("P3 - Pulse disparar", panelCenterX - MeasureText("P3 - Pulse disparar", 20) / 2, p3Y, 20, RED);
+    if (player4Active_) RenderPlayerHud(player4_, "P4", panelCenterX, p4Y, player4Score_, HudColorForColor(playerColorIndex_[3])); else DrawText("P4 - Pulse disparar", panelCenterX - MeasureText("P4 - Pulse disparar", 20) / 2, p4Y, 20, RED);
     // Debug: contador de FPS y numero de boton del mando (ver
     // ApplyGamepadInput / lastGamepadButtonPressed_).
     if (kDebugFeaturesEnabled) {
