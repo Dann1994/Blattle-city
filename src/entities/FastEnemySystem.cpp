@@ -253,7 +253,7 @@ void FastEnemySystem::SpawnAt(float x, float y) {
     enemies_.push_back(enemy);
 }
 
-void FastEnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, BulletImpactSystem& impacts, SpecialExplosionSystem& specialExplosions, const std::vector<Tank*>& playerTanks, const std::vector<Tank*>& otherEnemyTanks, float baseX, float baseY, std::vector<ScoreEvent>& outScoreEvents, Sound tankDeathSound) {
+void FastEnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, BulletImpactSystem& impacts, SpecialExplosionSystem& specialExplosions, const std::vector<Tank*>& playerTanks, const std::vector<Tank*>& otherEnemyTanks, float baseX, float baseY, std::vector<ScoreEvent>& outScoreEvents, Sound tankDeathSound, Sound hitNonLethalSound) {
     outScoreEvents.clear();
     const int baseCellX = static_cast<int>(std::round(baseX));
     const int baseCellY = static_cast<int>(std::round(baseY));
@@ -279,23 +279,42 @@ void FastEnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, Bul
 
         // Muere de un solo impacto de bala de JUGADOR, sin importar el
         // nivel (misma animacion chica de explosion que Game::DestroyTank
-        // usa para los jugadores). Las balas de otros enemigos (de
-        // cualquier tipo) la atraviesan sin hacerle nada: no se matan
-        // entre ellos.
+        // usa para los jugadores), salvo que tenga el escudo activo (item
+        // casco): ahi el impacto se lo absorbe el escudo en vez de matarla,
+        // igual que a los jugadores (pedido explicitamente). Las balas de
+        // otros enemigos (de cualquier tipo) la atraviesan sin hacerle
+        // nada: no se matan entre ellos.
         float eLeft = 0.0f, eRight = 0.0f, eTop = 0.0f, eBottom = 0.0f;
         enemy.tank.GetBounds(eLeft, eRight, eTop, eBottom);
         std::vector<int> hitOwnerIds;
         // Salud propia sin cambios (muere de 1 solo impacto, cualquier
-        // potencia): siempre consume 1 punto de la salud de la bala que
-        // pego (ver BulletSystem::TankHitResolver), para que una bala de
-        // nivel 4 (salud 2) pueda atravesar hasta 2 de estos en un tiro.
-        auto resolve = [](int /*weaponLevel*/, bool /*isSpecial*/, int /*shooterOwnerId*/) { return 1; };
+        // potencia, si no tiene escudo): siempre consume 1 punto de la
+        // salud de la bala que pego (ver BulletSystem::TankHitResolver),
+        // para que una bala de nivel 4 (salud 2) pueda atravesar hasta 2 de
+        // estos en un tiro. Con escudo activo, devuelve lo que el escudo
+        // absorbio de la potencia real del disparo (mismo criterio que
+        // Game::ResolveTankHit para los jugadores).
+        bool enemyDied = false;
+        int killerOwnerId = -1;
+        auto resolve = [&](int weaponLevel, bool isSpecial, int shooterOwnerId) {
+            if (enemy.tank.IsShielded()) {
+                const int power = isSpecial ? kSpecialBulletPower : BulletPowerForLevel(weaponLevel);
+                return enemy.tank.AbsorbShieldHit(power);
+            }
+            enemyDied = true;
+            killerOwnerId = shooterOwnerId;
+            return 1;
+        };
         if (bullets.KillPlayerBulletsHittingBox(eLeft, eRight, eTop, eBottom, impacts, hitOwnerIds, resolve)) {
-            specialExplosions.Spawn(enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, /*nativeScale=*/true);
-            enemy.alive = false;
-            PlaySound(tankDeathSound);
-            outScoreEvents.push_back(ScoreEvent{hitOwnerIds[0], enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, kScoreFastKill});
-            continue;
+            if (enemyDied) {
+                specialExplosions.Spawn(enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, /*nativeScale=*/true);
+                enemy.alive = false;
+                PlaySound(tankDeathSound);
+                outScoreEvents.push_back(ScoreEvent{killerOwnerId, enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, kScoreFastKill});
+                continue;
+            }
+            // El escudo absorbio el impacto: sigue en pie.
+            PlaySound(hitNonLethalSound);
         }
 
         if (enemy.spawn.IsActive()) {

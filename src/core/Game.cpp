@@ -2927,9 +2927,9 @@ void Game::Update(double fixedDt) {
     std::vector<ScoreEvent> fastScoreEvents;
     std::vector<ScoreEvent> armorScoreEvents;
     std::vector<ScoreEvent> powerScoreEvents;
-    enemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), otherThanBasic, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_), basicScoreEvents, tankDeathSound_);
-    fastEnemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), otherThanFast, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_), fastScoreEvents, tankDeathSound_);
-    armorEnemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), otherThanArmor, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_), armorScoreEvents, tankDeathSound_);
+    enemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), otherThanBasic, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_), basicScoreEvents, tankDeathSound_, hitNonLethalSound_);
+    fastEnemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), otherThanFast, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_), fastScoreEvents, tankDeathSound_, hitNonLethalSound_);
+    armorEnemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), otherThanArmor, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_), armorScoreEvents, tankDeathSound_, hitNonLethalSound_);
     powerEnemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), otherThanPower, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_), powerScoreEvents, tankDeathSound_, hitNonLethalSound_);
 
     // Balas normales matando enemigos (ver los 4 Update() de arriba): la

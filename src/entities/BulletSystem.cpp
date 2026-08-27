@@ -11,6 +11,12 @@ namespace bc {
 namespace {
 constexpr float kBulletHitRadius = 0.2f;     // celdas, para la anulacion bala-contra-bala (seccion 4.5)
 constexpr float kSpecialBulletSpeed = 24.0f; // el triple de la bala normal de nivel 1 (8.0)
+
+// Ancho real del sprite de la bala (bullet_*.png, ~3-4px en una celda de
+// 16px), para el margen de "roce" perpendicular a la direccion de viaje:
+// tanto a nivel de celda (ver el nudge en Update) como a nivel de unidad
+// minima de ladrillo (ver FindAliveBrickUnit).
+constexpr float kBulletHitHalfWidth = 0.09f;
 }
 
 bool BulletSystem::TryShoot(int ownerId, float muzzleX, float muzzleY, Direction direction, float speed, int weaponLevel, int maxPerOwner) {
@@ -211,6 +217,72 @@ void DestroyBrickUnitAndNeighbors(TileMap& map, int cellX, int cellY, int row, i
     const int colStep = chainHorizontal ? primaryStep : 0;
     DestroyBrickChain(map, cellX, cellY, row, col, rowStep, colStep, 2);
     DestroyBrickChain(map, cellX, cellY, row, col, -rowStep, -colStep, 1);
+}
+
+// Si (x,y) cae dentro de una celda de ladrillo (en el mapa) y la unidad
+// minima que le corresponde esta viva, la devuelve. false si esta afuera
+// del mapa, la celda no es ladrillo, o esa unidad exacta ya esta destruida.
+bool TryGetAliveBrickUnitAt(TileMap& map, float x, float y, int& outCellX, int& outCellY, int& outRow, int& outCol) {
+    const int cx = static_cast<int>(std::floor(x));
+    const int cy = static_cast<int>(std::floor(y));
+    if (!map.InBounds(cx, cy)) {
+        return false;
+    }
+    Cell& cell = map.At(cx, cy);
+    if (cell.type != TileType::Brick) {
+        return false;
+    }
+    const float fracX = x - static_cast<float>(cx);
+    const float fracY = y - static_cast<float>(cy);
+    const int col = std::clamp(static_cast<int>(fracX * kBrickGridSize), 0, kBrickGridSize - 1);
+    const int row = std::clamp(static_cast<int>(fracY * kBrickGridSize), 0, kBrickGridSize - 1);
+    if (!cell.brickUnits[row * kBrickGridSize + col].alive) {
+        return false;
+    }
+    outCellX = cx;
+    outCellY = cy;
+    outRow = row;
+    outCol = col;
+    return true;
+}
+
+// Ubica la unidad de ladrillo viva mas cercana al punto de impacto real
+// (hitX,hitY): primero prueba el punto exacto: si esa unidad especifica ya
+// estaba destruida (muy comun ahora que un impacto rompe una cadena de
+// varias, dejando unidades sueltas todavia vivas justo al lado de otras ya
+// muertas), prueba tambien el margen del ancho real del sprite de la bala
+// (kBulletHitHalfWidth) en el eje perpendicular a su direccion de viaje -el
+// eje a lo largo del viaje ya esta cubierto por los sub-pasos de Update,
+// mas angostos que una unidad minima- incluso si ese margen cae en la celda
+// vecina (pedido explicitamente: "asegurate que bala que toque, lo destruya
+// ya sea que un pixel solo toque el ladrillo"). outX/outY reciben el punto
+// exacto que encontro la unidad viva (para el criterio de que mitad de esa
+// unidad se toco). Devuelve false si no hay ninguna unidad viva en todo el
+// rango (recien ahi la bala sigue de largo en silencio, como antes).
+bool FindAliveBrickUnit(TileMap& map, float hitX, float hitY, Direction direction, int& outCellX, int& outCellY, int& outRow, int& outCol, float& outX, float& outY) {
+    if (TryGetAliveBrickUnitAt(map, hitX, hitY, outCellX, outCellY, outRow, outCol)) {
+        outX = hitX;
+        outY = hitY;
+        return true;
+    }
+
+    const bool travelVertical = (direction == Direction::Up || direction == Direction::Down);
+    const float lowX = travelVertical ? hitX - kBulletHitHalfWidth : hitX;
+    const float lowY = travelVertical ? hitY : hitY - kBulletHitHalfWidth;
+    const float highX = travelVertical ? hitX + kBulletHitHalfWidth : hitX;
+    const float highY = travelVertical ? hitY : hitY + kBulletHitHalfWidth;
+
+    if (TryGetAliveBrickUnitAt(map, lowX, lowY, outCellX, outCellY, outRow, outCol)) {
+        outX = lowX;
+        outY = lowY;
+        return true;
+    }
+    if (TryGetAliveBrickUnitAt(map, highX, highY, outCellX, outCellY, outRow, outCol)) {
+        outX = highX;
+        outY = highY;
+        return true;
+    }
+    return false;
 }
 
 // Bloques pegados uno al lado del otro: si el impacto cae en la franja
@@ -496,8 +568,8 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
         // momento para no dejar pasar rozes reales), pero se paso de largo:
         // el margen quedaba mas ancho que el sprite y rompia bloques que la
         // bala ni tocaba visualmente. Se achica de vuelta al ancho real del
-        // sprite nada mas (pedido explicitamente).
-        constexpr float kBulletHitHalfWidth = 0.09f;
+        // sprite nada mas (pedido explicitamente). kBulletHitHalfWidth vive
+        // ahora al principio del archivo: la reusa tambien FindAliveBrickUnit.
         const bool centerBlocks = map.InBounds(cellX, cellY) && TileBlocksShots(map.At(cellX, cellY).type);
         if (!centerBlocks && dx != 0.0f) {
             const int cellYLow = static_cast<int>(std::floor(newY - kBulletHitHalfWidth));
@@ -610,29 +682,29 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
 
             if (hitType == TileType::Brick) {
                 // Ladrillo rediseñado desde cero: cada unidad minima de la
-                // grilla 4x4 tiene salud 1 — la bala destruye la unidad
-                // exacta donde pega mas su vecina horizontal pegada, segun
-                // de que mitad de esa unidad cayo el impacto (pedido
-                // explicitamente, ver DestroyBrickUnitAndNeighbors), y siendo
-                // especial, explota ahi mismo (mismo criterio que al tocar
-                // hierro u otro obstaculo solido).
-                Cell& cell = map.At(cellX, cellY);
-                const float fracX = hitX - static_cast<float>(cellX);
-                const float fracY = hitY - static_cast<float>(cellY);
-                const int col = std::clamp(static_cast<int>(fracX * kBrickGridSize), 0, kBrickGridSize - 1);
-                const int row = std::clamp(static_cast<int>(fracY * kBrickGridSize), 0, kBrickGridSize - 1);
-                BrickUnit& unit = cell.brickUnits[row * kBrickGridSize + col];
-                if (unit.alive) {
+                // grilla 4x4 tiene salud 1 — la bala destruye la unidad viva
+                // mas cercana al punto de impacto (el punto exacto, o si esa
+                // unidad ya estaba muerta, el margen del ancho real del
+                // sprite -ver FindAliveBrickUnit, pedido explicitamente para
+                // que ningun roce real quede sin romper nada) mas su cadena
+                // de vecinas pegadas (ver DestroyBrickUnitAndNeighbors), y
+                // siendo especial, explota ahi mismo (mismo criterio que al
+                // tocar hierro u otro obstaculo solido).
+                int unitCellX = 0, unitCellY = 0, unitRow = 0, unitCol = 0;
+                float unitX = 0.0f, unitY = 0.0f;
+                if (FindAliveBrickUnit(map, hitX, hitY, bullet.direction, unitCellX, unitCellY, unitRow, unitCol, unitX, unitY)) {
                     const bool chainHorizontal = (bullet.direction == Direction::Up || bullet.direction == Direction::Down);
+                    const float unitFracX = unitX - static_cast<float>(unitCellX);
+                    const float unitFracY = unitY - static_cast<float>(unitCellY);
                     const bool towardNegative = chainHorizontal
-                        ? (fracX * kBrickGridSize - static_cast<float>(col)) < 0.5f
-                        : (fracY * kBrickGridSize - static_cast<float>(row)) < 0.5f;
-                    DestroyBrickUnitAndNeighbors(map, cellX, cellY, row, col, chainHorizontal, towardNegative);
+                        ? (unitFracX * kBrickGridSize - static_cast<float>(unitCol)) < 0.5f
+                        : (unitFracY * kBrickGridSize - static_cast<float>(unitRow)) < 0.5f;
+                    DestroyBrickUnitAndNeighbors(map, unitCellX, unitCellY, unitRow, unitCol, chainHorizontal, towardNegative);
                     TriggerSpecialExplosion(map, hitX, hitY, bullet.ownerId, specialExplosions, explosionEvents, explosionSound);
                     bullet.alive = false;
                     break;
                 }
-                // Esa unidad exacta ya estaba destruida: la bala sigue de largo.
+                // No hay ninguna unidad viva ni en el punto exacto ni en el margen del sprite: la bala sigue de largo.
                 bullet.x = newX;
                 bullet.y = newY;
                 continue;
@@ -672,24 +744,25 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
 
         if (hitType == TileType::Brick) {
             // Ladrillo rediseñado desde cero: cada unidad minima de la
-            // grilla 4x4 tiene salud 1 — un impacto destruye la unidad
-            // exacta donde pega mas su cadena de vecinas pegadas (pedido
-            // explicitamente: ver DestroyBrickUnitAndNeighbors; aplica igual
-            // a balas de jugador y enemigo, ver el chequeo de ownerId mas
+            // grilla 4x4 tiene salud 1 — un impacto destruye la unidad viva
+            // mas cercana al punto de impacto (el punto exacto, o si esa
+            // unidad ya estaba muerta, el margen del ancho real del sprite
+            // -ver FindAliveBrickUnit, pedido explicitamente para que ningun
+            // roce real quede sin romper nada) mas su cadena de vecinas
+            // pegadas (ver DestroyBrickUnitAndNeighbors; aplica igual a
+            // balas de jugador y enemigo, ver el chequeo de ownerId mas
             // abajo que solo afecta al sonido), suena el sonido ya definido
             // (solo balas de jugador) y la bala se frena ahi.
-            Cell& cell = map.At(cellX, cellY);
-            const float fracX = hitX - static_cast<float>(cellX);
-            const float fracY = hitY - static_cast<float>(cellY);
-            const int col = std::clamp(static_cast<int>(fracX * kBrickGridSize), 0, kBrickGridSize - 1);
-            const int row = std::clamp(static_cast<int>(fracY * kBrickGridSize), 0, kBrickGridSize - 1);
-            BrickUnit& unit = cell.brickUnits[row * kBrickGridSize + col];
-            if (unit.alive) {
+            int unitCellX = 0, unitCellY = 0, unitRow = 0, unitCol = 0;
+            float unitX = 0.0f, unitY = 0.0f;
+            if (FindAliveBrickUnit(map, hitX, hitY, bullet.direction, unitCellX, unitCellY, unitRow, unitCol, unitX, unitY)) {
                 const bool chainHorizontal = (bullet.direction == Direction::Up || bullet.direction == Direction::Down);
+                const float unitFracX = unitX - static_cast<float>(unitCellX);
+                const float unitFracY = unitY - static_cast<float>(unitCellY);
                 const bool towardNegative = chainHorizontal
-                    ? (fracX * kBrickGridSize - static_cast<float>(col)) < 0.5f
-                    : (fracY * kBrickGridSize - static_cast<float>(row)) < 0.5f;
-                DestroyBrickUnitAndNeighbors(map, cellX, cellY, row, col, chainHorizontal, towardNegative);
+                    ? (unitFracX * kBrickGridSize - static_cast<float>(unitCol)) < 0.5f
+                    : (unitFracY * kBrickGridSize - static_cast<float>(unitRow)) < 0.5f;
+                DestroyBrickUnitAndNeighbors(map, unitCellX, unitCellY, unitRow, unitCol, chainHorizontal, towardNegative);
                 if (bullet.ownerId < kEnemyOwnerIdBase) {
                     PlaySound(brickBreakSound); // pedido explicitamente: solo bala de jugador
                 }
@@ -697,7 +770,7 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
                 bullet.alive = false;
                 break;
             }
-            // Esa unidad exacta ya estaba destruida: la bala sigue de largo.
+            // No hay ninguna unidad viva ni en el punto exacto ni en el margen del sprite: la bala sigue de largo.
             bullet.x = newX;
             bullet.y = newY;
             continue;

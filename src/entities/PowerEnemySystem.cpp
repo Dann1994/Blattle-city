@@ -293,10 +293,13 @@ void PowerEnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, Bu
         // importar el nivel), este SI tiene resistencia (ver Enemy::hp):
         // cada impacto resta el dano que corresponda al nivel de arma de
         // quien disparo (kPowerEnemyDamageByLevel), calibrado para que
-        // haga falta 4 tiros nivel 1, 5 nivel 2, 2 nivel 3 o 1 nivel 4.
-        // Las balas de otros enemigos (de cualquier tipo) la atraviesan sin
-        // hacerle nada: no se matan entre ellos. Un disparo ESPECIAL la
-        // destruye directo y aparte (ver Game::Update).
+        // haga falta 4 tiros nivel 1, 5 nivel 2, 2 nivel 3 o 1 nivel 4. Con
+        // el escudo activo (item casco), en cambio, el impacto no toca
+        // Enemy::hp: lo absorbe el escudo, igual que a los jugadores
+        // (pedido explicitamente). Las balas de otros enemigos (de
+        // cualquier tipo) la atraviesan sin hacerle nada: no se matan entre
+        // ellos. Un disparo ESPECIAL la destruye directo y aparte (ver
+        // Game::Update).
         float eLeft = 0.0f, eRight = 0.0f, eTop = 0.0f, eBottom = 0.0f;
         enemy.tank.GetBounds(eLeft, eRight, eTop, eBottom);
         std::vector<int> hitOwnerIds;
@@ -306,9 +309,15 @@ void PowerEnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, Bu
         // los impactos de este mismo frame. Devuelve 1 fijo (no la salud
         // real que gasto, que es kPowerEnemyDamageByLevel/hp, un sistema
         // aparte sin cambios) para el sistema de resistencia de la bala que
-        // pego (ver BulletSystem::TankHitResolver).
+        // pego (ver BulletSystem::TankHitResolver), salvo con escudo
+        // activo, que devuelve lo que este absorbio de la potencia real del
+        // disparo (mismo criterio que Game::ResolveTankHit).
         int killerOwnerId = -1;
-        auto resolve = [&](int weaponLevel, bool /*isSpecial*/, int shooterOwnerId) {
+        auto resolve = [&](int weaponLevel, bool isSpecial, int shooterOwnerId) {
+            if (enemy.tank.IsShielded()) {
+                const int power = isSpecial ? kSpecialBulletPower : BulletPowerForLevel(weaponLevel);
+                return enemy.tank.AbsorbShieldHit(power);
+            }
             const int idx = std::clamp(weaponLevel, 1, 4) - 1;
             enemy.hp -= kPowerEnemyDamageByLevel[idx];
             if (enemy.hp <= 0 && killerOwnerId == -1) {
