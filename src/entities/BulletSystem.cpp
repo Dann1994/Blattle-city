@@ -140,6 +140,79 @@ void GrazeNeighborCorner(TileMap& map, int neighborX, int neighborY, float along
     }
 }
 
+// Camina "count" unidades en linea recta desde (cellX,cellY,row,col) sumando
+// (rowStep,colStep) en cada paso (uno de los dos siempre 0: la cadena es
+// siempre horizontal o siempre vertical, nunca diagonal), destruyendo cada
+// una; cruza a la celda de al lado (en X o en Y, la que corresponda) cuantas
+// veces haga falta si el camino se sale de la grilla 4x4 de la celda de
+// origen. Se corta antes si algun paso se sale del mapa o encuentra una
+// celda que no es ladrillo (nada que romper ahi, no hay como "saltarla" para
+// seguir del otro lado). Deja como Empty cualquier celda que haya quedado
+// sin unidades vivas.
+void DestroyBrickChain(TileMap& map, int cellX, int cellY, int row, int col, int rowStep, int colStep, int count) {
+    int curCellX = cellX;
+    int curCellY = cellY;
+    int curRow = row;
+    int curCol = col;
+    for (int i = 0; i < count; ++i) {
+        curRow += rowStep;
+        curCol += colStep;
+        if (curCol < 0) {
+            curCellX -= 1;
+            curCol = kBrickGridSize - 1;
+        } else if (curCol >= kBrickGridSize) {
+            curCellX += 1;
+            curCol = 0;
+        }
+        if (curRow < 0) {
+            curCellY -= 1;
+            curRow = kBrickGridSize - 1;
+        } else if (curRow >= kBrickGridSize) {
+            curCellY += 1;
+            curRow = 0;
+        }
+
+        if (!map.InBounds(curCellX, curCellY)) {
+            return; // borde del mapa: no hay mas nada que romper de este lado
+        }
+        Cell& curCell = map.At(curCellX, curCellY);
+        if (curCell.type != TileType::Brick) {
+            return; // no es ladrillo (vacia, hierro, etc.): se corta la cadena aca
+        }
+        curCell.brickUnits[curRow * kBrickGridSize + curCol].alive = false;
+        if (curCell.BrickFullyDestroyed()) {
+            curCell.type = TileType::Empty;
+        }
+    }
+}
+
+// Destruye la unidad de ladrillo (cellX,cellY,row,col) -asume que quien
+// llama ya confirmo que esta viva- mas 3 en cadena: 2 hacia el lado del
+// impacto y 1 mas hacia el lado contrario (pedido explicitamente: "rompe la
+// principal, dos de un lado y una del otro"). La cadena es horizontal
+// (misma fila, columna variable) si el disparo viaja vertical -Up/Down,
+// pega de frente en la cara de arriba/abajo, y ahi la posicion que varia de
+// forma util con el punto de impacto es la horizontal (izquierda/derecha)-,
+// o vertical (misma columna, fila variable) si el disparo viaja horizontal
+// -Left/Right, pega en la cara izq/der, y ahi es la posicion vertical
+// (arriba/abajo) la que varia de forma util- (pedido explicitamente: mismo
+// comportamiento tambien para disparos horizontales). towardNegative indica
+// si el lado del impacto fue el de indice menor (izquierda en columnas,
+// arriba en filas) o el de indice mayor.
+void DestroyBrickUnitAndNeighbors(TileMap& map, int cellX, int cellY, int row, int col, bool chainHorizontal, bool towardNegative) {
+    Cell& cell = map.At(cellX, cellY);
+    cell.brickUnits[row * kBrickGridSize + col].alive = false;
+    if (cell.BrickFullyDestroyed()) {
+        cell.type = TileType::Empty;
+    }
+
+    const int primaryStep = towardNegative ? -1 : 1;
+    const int rowStep = chainHorizontal ? 0 : primaryStep;
+    const int colStep = chainHorizontal ? primaryStep : 0;
+    DestroyBrickChain(map, cellX, cellY, row, col, rowStep, colStep, 2);
+    DestroyBrickChain(map, cellX, cellY, row, col, -rowStep, -colStep, 1);
+}
+
 // Bloques pegados uno al lado del otro: si el impacto cae en la franja
 // angosta pegada al borde compartido con la celda vecina (no toda la mitad
 // "esquina", solo bien cerca de la costura) y esa vecina tambien es
@@ -536,12 +609,13 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
             }
 
             if (hitType == TileType::Brick) {
-                // Ladrillo rediseñado desde cero (pedido explicitamente):
-                // cada unidad minima de la grilla 4x4 tiene salud 1 — la
-                // bala destruye la UNA unidad exacta donde pega (segun su
-                // posicion 2D dentro de la celda) y, siendo especial,
-                // explota ahi mismo (mismo criterio que al tocar hierro u
-                // otro obstaculo solido).
+                // Ladrillo rediseñado desde cero: cada unidad minima de la
+                // grilla 4x4 tiene salud 1 — la bala destruye la unidad
+                // exacta donde pega mas su vecina horizontal pegada, segun
+                // de que mitad de esa unidad cayo el impacto (pedido
+                // explicitamente, ver DestroyBrickUnitAndNeighbors), y siendo
+                // especial, explota ahi mismo (mismo criterio que al tocar
+                // hierro u otro obstaculo solido).
                 Cell& cell = map.At(cellX, cellY);
                 const float fracX = hitX - static_cast<float>(cellX);
                 const float fracY = hitY - static_cast<float>(cellY);
@@ -549,10 +623,11 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
                 const int row = std::clamp(static_cast<int>(fracY * kBrickGridSize), 0, kBrickGridSize - 1);
                 BrickUnit& unit = cell.brickUnits[row * kBrickGridSize + col];
                 if (unit.alive) {
-                    unit.alive = false;
-                    if (cell.BrickFullyDestroyed()) {
-                        cell.type = TileType::Empty;
-                    }
+                    const bool chainHorizontal = (bullet.direction == Direction::Up || bullet.direction == Direction::Down);
+                    const bool towardNegative = chainHorizontal
+                        ? (fracX * kBrickGridSize - static_cast<float>(col)) < 0.5f
+                        : (fracY * kBrickGridSize - static_cast<float>(row)) < 0.5f;
+                    DestroyBrickUnitAndNeighbors(map, cellX, cellY, row, col, chainHorizontal, towardNegative);
                     TriggerSpecialExplosion(map, hitX, hitY, bullet.ownerId, specialExplosions, explosionEvents, explosionSound);
                     bullet.alive = false;
                     break;
@@ -596,11 +671,13 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
         }
 
         if (hitType == TileType::Brick) {
-            // Ladrillo rediseñado desde cero (pedido explicitamente): cada
-            // unidad minima de la grilla 4x4 tiene salud 1 — un impacto
-            // destruye la UNA unidad exacta donde pega (segun su posicion 2D
-            // dentro de la celda), suena el sonido ya definido (solo balas
-            // de jugador) y la bala se frena ahi.
+            // Ladrillo rediseñado desde cero: cada unidad minima de la
+            // grilla 4x4 tiene salud 1 — un impacto destruye la unidad
+            // exacta donde pega mas su cadena de vecinas pegadas (pedido
+            // explicitamente: ver DestroyBrickUnitAndNeighbors; aplica igual
+            // a balas de jugador y enemigo, ver el chequeo de ownerId mas
+            // abajo que solo afecta al sonido), suena el sonido ya definido
+            // (solo balas de jugador) y la bala se frena ahi.
             Cell& cell = map.At(cellX, cellY);
             const float fracX = hitX - static_cast<float>(cellX);
             const float fracY = hitY - static_cast<float>(cellY);
@@ -608,10 +685,11 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
             const int row = std::clamp(static_cast<int>(fracY * kBrickGridSize), 0, kBrickGridSize - 1);
             BrickUnit& unit = cell.brickUnits[row * kBrickGridSize + col];
             if (unit.alive) {
-                unit.alive = false;
-                if (cell.BrickFullyDestroyed()) {
-                    cell.type = TileType::Empty;
-                }
+                const bool chainHorizontal = (bullet.direction == Direction::Up || bullet.direction == Direction::Down);
+                const bool towardNegative = chainHorizontal
+                    ? (fracX * kBrickGridSize - static_cast<float>(col)) < 0.5f
+                    : (fracY * kBrickGridSize - static_cast<float>(row)) < 0.5f;
+                DestroyBrickUnitAndNeighbors(map, cellX, cellY, row, col, chainHorizontal, towardNegative);
                 if (bullet.ownerId < kEnemyOwnerIdBase) {
                     PlaySound(brickBreakSound); // pedido explicitamente: solo bala de jugador
                 }
