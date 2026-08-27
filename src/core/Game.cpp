@@ -17,10 +17,15 @@ namespace {
 // Interruptor unico para todas las teclas/HUD de depuracion (spawns
 // manuales, forzar power-ups, subir/bajar agresividad, saltar de nivel,
 // grilla de referencia, contador de FPS, etc.): pedido explicitamente que
-// la interfaz del juego quede limpia. Se deja en false en vez de borrar ese
-// codigo, para poder reactivarlo de un solo cambio si hace falta seguir
-// probando algo puntual mas adelante.
+// la interfaz del juego principal quede limpia. BC_DEBUG_BUILD lo prende
+// solo en el target "battlecity_debug" (ver CMakeLists.txt), un ejecutable
+// aparte pensado para hacer pruebas de gameplay — "battlecity" (el juego de
+// verdad) siempre lo compila en false.
+#ifdef BC_DEBUG_BUILD
+constexpr bool kDebugFeaturesEnabled = true;
+#else
 constexpr bool kDebugFeaturesEnabled = false;
+#endif
 
 // Transicion de nivel (seccion custom, calcada del original): pantalla gris
 // solida con "NIVEL N" un tiempo fijo, despues esa misma pantalla partida al
@@ -38,13 +43,27 @@ constexpr double kLevelClearDelay = 5.0;
 // cada incremento de un contador, la pausa antes de revelar el siguiente
 // icono de esa fila, y la pausa final (Holding) con todo ya revelado antes
 // de pasar a la transicion del siguiente nivel.
-constexpr double kScoreTallyCountInterval = 0.2;
+constexpr double kScoreTallyCountInterval = 0.12; // pedido explicitamente: un poco mas rapido (antes 0.2)
 constexpr double kScoreTallyRowPause = 0.6;
 constexpr double kScoreTallyHoldDuration = 2.0;
+constexpr double kScoreTallyBonusRevealDelay = 1.0; // pedido explicitamente: el bono espera este tiempo (dentro de Holding) antes de aparecer
 
 // Bono de fin de nivel (pedido explicito) para quien mas puntos gano en el
 // nivel (ver TickScoreTally/scoreTallyBonusAwarded_).
 constexpr int kScoreTallyClearBonus = 1000;
+
+// Vida extra por puntaje (pedido explicitamente, investigado del juego
+// original NES de 1985: cada 20.000 puntos otorga una vida — ver
+// Game::CheckExtraLifeByScore/extraLifeMilestonesClaimed_).
+constexpr int kExtraLifeScoreThreshold = 20000;
+
+// Secuencia de fin de partida (ver GameOverPhase): cuanto tarda el sprite
+// "GAME OVER" en subir del todo hasta el centro, cuanto se queda ahi quieto
+// como maximo (se puede saltear antes, ver ProcessGameOverInput), y el largo
+// maximo del nombre que se puede tipear en NameEntry.
+constexpr double kGameOverRiseDuration = 2.5;
+constexpr double kGameOverHoldDuration = 5.0;
+constexpr int kGameOverNameMaxLen = 10;
 
 // Duraciones del escudo (seccion 6). No hay un numero exacto documentado del
 // juego original para la proteccion al aparecer; 10s para el item Casco esta
@@ -62,6 +81,12 @@ constexpr double kScreenShakeDuration = 2.0;
 constexpr float kScreenShakeMaxOffsetPx = 12.0f;
 constexpr float kSpecialShotRecoilDistance = 0.75f; // celdas que retrocede el tanque al disparar el especial
 
+// Explosion del disparo especial contra un "Power" (enemigo 4, ver
+// Enemy::hp): no lo mata de un saque (a diferencia de Basico/Rapido/
+// Blindado) salvo que ya estuviera en este mismo HP reducido — en ese caso
+// la explosion lo termina de rematar (ver ApplySpecialExplosionsToEnemies).
+constexpr int kSpecialExplosionPowerWeakenHp = 1;
+
 // Fuego amigo nivel 1: parpadeo + paralisis al ser tocado por una bala aliada.
 constexpr double kFriendlyFireParalyzeDuration = 5.0;
 constexpr double kFrozenBlinkInterval = 0.1; // segundos entre cada parpadeo mientras esta paralizado
@@ -73,15 +98,30 @@ constexpr double kClockFreezeDuration = 10.0;
 // Agua: alterna entre sus 2 frames para animar el oleaje.
 constexpr double kWaterFrameInterval = 0.5;
 
-// Mandos (seccion custom): boton de disparo/especial. GAMEPAD_BUTTON_LEFT_FACE_*
-// (1-4) ya los usa el D-pad, asi que disparo/especial usan los botones de
-// accion (RIGHT_FACE_*, 5-8). Valores de arranque, no confirmados en
-// hardware real todavia: si no coinciden con "boton 3"/"boton 1" del
-// jugador, ver lastGamepadButtonPressed_ (Render, al lado del FPS) para
-// leer el numero real que reporta el mando y ajustar aca.
-constexpr int kGamepadShootButton = GAMEPAD_BUTTON_RIGHT_FACE_DOWN;
-constexpr int kGamepadSpecialButton = GAMEPAD_BUTTON_RIGHT_FACE_LEFT;
+// Mandos (seccion custom): D-pad/analogico mueven siempre (fijo, no
+// configurable, ver ApplyGamepadInput); disparo/especial/inicio/pausa son
+// por jugador y configurables desde el menu (ver playerGamepadBindings_/
+// InitDefaultGamepadBindings/MenuScreen::ControlDeviceChoice).
 constexpr float kGamepadStickDeadzone = 0.4f;
+
+// Que acciones se pueden reasignar a un boton de mando (ver MenuScreen::
+// PlayerActions/CapturingKey con mappingGamepad_ en true): Up/Down/Left/
+// Right quedan afuera, el movimiento con mando es siempre D-pad +
+// analogico; Inicio tambien queda afuera (pedido explicitamente, es
+// innecesario reasignarlo: solo suma/saca al jugador de la partida, sigue
+// andando con el boton por defecto de InitDefaultGamepadBindings, nunca
+// aparece en este menu). El indice dentro de este array (0-2) es el que usa
+// playerActionIndex_ mientras se mapea el mando; kGamepadMappableActions[i]
+// da la InputAction real (y su posicion en playerGamepadBindings_.buttons).
+constexpr InputAction kGamepadMappableActions[] = {InputAction::Shoot, InputAction::Special, InputAction::Pause};
+constexpr int kGamepadMappableActionCount = 3;
+
+// Mismo criterio para teclado (ver mas arriba): Inicio queda afuera del
+// menu de reasignacion, sigue con la tecla por defecto de
+// InitDefaultKeyBindings. A diferencia del mando, el teclado SI permite
+// reasignar Up/Down/Left/Right (el movimiento con teclado no es fijo).
+constexpr InputAction kKeyMappableActions[] = {InputAction::Up, InputAction::Down, InputAction::Left, InputAction::Right, InputAction::Shoot, InputAction::Special, InputAction::Pause};
+constexpr int kKeyMappableActionCount = 7;
 
 // HUD: parpadeo de texto (calor al 100% / municion especial lista).
 constexpr double kHudTextBlinkInterval = 0.3;
@@ -99,6 +139,17 @@ constexpr float kHudPanelMargin = 10.0f;
 constexpr float kHudRowHeight = 100.0f;  // separacion entre 2 jugadores consecutivos
 constexpr Color kHudPanelColor = Color{45, 45, 48, 255};
 constexpr Color kHudPanelBorderColor = Color{90, 90, 96, 255};
+
+// Color de los datos de cada jugador en el HUD (pedido explicitamente),
+// tomado de la paleta real de su tanque (Tanques.png/tank_pN_*.png), en una
+// variante clara para que se lea bien sobre el panel oscuro. Solo tine el
+// texto "de datos" (etiqueta, vidas, nivel, calor, puntaje) — las alertas
+// (sobrecalentado, especial listo, paralizado) siguen en rojo/amarillo
+// siempre, para que resalten igual sin importar de que jugador sean.
+constexpr Color kPlayer1HudColor = Color{231, 178, 60, 255};  // amarillo/naranja
+constexpr Color kPlayer2HudColor = Color{70, 200, 100, 255};  // verde
+constexpr Color kPlayer3HudColor = Color{130, 210, 220, 255}; // gris/celeste
+constexpr Color kPlayer4HudColor = Color{90, 150, 230, 255};  // azul
 
 Color ColorForTile(TileType type) {
     switch (type) {
@@ -199,6 +250,33 @@ const char* KeyName(int key) {
         case KEY_U: return "U"; case KEY_V: return "V"; case KEY_W: return "W"; case KEY_X: return "X";
         case KEY_Y: return "Y"; case KEY_Z: return "Z";
         default: return TextFormat("TECLA %d", key);
+    }
+}
+
+// Nombre corto para mostrar en el mapeo de controles de mando (pedido
+// explicitamente, pensado para un control de Xbox: A/B/X/Y en vez de
+// "boton 7"/etc.). Un boton no cubierto cae en el numero crudo, igual que
+// KeyName con las teclas.
+const char* GamepadButtonName(int button) {
+    switch (button) {
+        case GAMEPAD_BUTTON_RIGHT_FACE_DOWN: return "A";
+        case GAMEPAD_BUTTON_RIGHT_FACE_RIGHT: return "B";
+        case GAMEPAD_BUTTON_RIGHT_FACE_LEFT: return "X";
+        case GAMEPAD_BUTTON_RIGHT_FACE_UP: return "Y";
+        case GAMEPAD_BUTTON_LEFT_FACE_UP: return "D-PAD ARRIBA";
+        case GAMEPAD_BUTTON_LEFT_FACE_DOWN: return "D-PAD ABAJO";
+        case GAMEPAD_BUTTON_LEFT_FACE_LEFT: return "D-PAD IZQ";
+        case GAMEPAD_BUTTON_LEFT_FACE_RIGHT: return "D-PAD DER";
+        case GAMEPAD_BUTTON_LEFT_TRIGGER_1: return "LB";
+        case GAMEPAD_BUTTON_LEFT_TRIGGER_2: return "LT";
+        case GAMEPAD_BUTTON_RIGHT_TRIGGER_1: return "RB";
+        case GAMEPAD_BUTTON_RIGHT_TRIGGER_2: return "RT";
+        case GAMEPAD_BUTTON_MIDDLE_LEFT: return "VIEW";
+        case GAMEPAD_BUTTON_MIDDLE: return "GUIDE";
+        case GAMEPAD_BUTTON_MIDDLE_RIGHT: return "MENU";
+        case GAMEPAD_BUTTON_LEFT_THUMB: return "STICK IZQ";
+        case GAMEPAD_BUTTON_RIGHT_THUMB: return "STICK DER";
+        default: return TextFormat("BOTON %d", button);
     }
 }
 
@@ -320,6 +398,24 @@ void Game::Init() {
     SetTargetFPS(60);
     SetExitKey(KEY_NULL); // ESC ya no cierra la ventana: la usamos para reiniciar (ver ProcessInput)
 
+    InitAudioDevice();
+    battleLoopMusic_ = LoadMusicStream((std::string(BC_ASSETS_DIR) + "sounds/battle_loop.wav").c_str());
+    movementLoopMusic_ = LoadMusicStream((std::string(BC_ASSETS_DIR) + "sounds/movement_loop.wav").c_str());
+    scoreTickSound_ = LoadSound((std::string(BC_ASSETS_DIR) + "sounds/score_tick.wav").c_str());
+    hitNonLethalSound_ = LoadSound((std::string(BC_ASSETS_DIR) + "sounds/hit_nonlethal.wav").c_str());
+    blockResistSound_ = LoadSound((std::string(BC_ASSETS_DIR) + "sounds/block_resist.wav").c_str());
+    brickBreakSound_ = LoadSound((std::string(BC_ASSETS_DIR) + "sounds/brick_break.wav").c_str());
+    playerShootSound_ = LoadSound((std::string(BC_ASSETS_DIR) + "sounds/player_shoot.wav").c_str());
+    tankDeathSound_ = LoadSound((std::string(BC_ASSETS_DIR) + "sounds/tank_death.wav").c_str());
+    scoreBonusSound_ = LoadSound((std::string(BC_ASSETS_DIR) + "sounds/score_bonus.wav").c_str());
+    bigExplosionSound_ = LoadSound((std::string(BC_ASSETS_DIR) + "sounds/big_explosion.wav").c_str());
+    itemAppearSound_ = LoadSound((std::string(BC_ASSETS_DIR) + "sounds/item_appear.wav").c_str());
+    pauseToggleSound_ = LoadSound((std::string(BC_ASSETS_DIR) + "sounds/pause_toggle.wav").c_str());
+    itemPickupSound_ = LoadSound((std::string(BC_ASSETS_DIR) + "sounds/item_pickup.wav").c_str());
+    extraLifeSound_ = LoadSound((std::string(BC_ASSETS_DIR) + "sounds/extra_life.wav").c_str());
+    stageStartSound_ = LoadSound((std::string(BC_ASSETS_DIR) + "sounds/stage_start.mp3").c_str());
+    specialShootSound_ = LoadSound((std::string(BC_ASSETS_DIR) + "sounds/special_shoot.wav").c_str());
+
     // Icono de la ventana: el mismo tanque P1 nivel 1 (mirando arriba) que
     // se uso para el icono del .exe (ver assets/icon/app.rc), a diferencia
     // del .exe esto se puede setear en runtime con una Image comun.
@@ -366,6 +462,8 @@ void Game::Init() {
     SetTextureFilter(iceTexture_, TEXTURE_FILTER_POINT);
     baseEagleTexture_ = LoadTexture((std::string(BC_ASSETS_DIR) + "sprites/base_eagle.png").c_str());
     SetTextureFilter(baseEagleTexture_, TEXTURE_FILTER_POINT);
+    baseEagleDestroyedTexture_ = LoadTexture((std::string(BC_ASSETS_DIR) + "sprites/base_eagle_destroyed.png").c_str());
+    SetTextureFilter(baseEagleDestroyedTexture_, TEXTURE_FILTER_POINT);
     hudLifeIconTexture_ = LoadTexture((std::string(BC_ASSETS_DIR) + "sprites/icon_life_hud.png").c_str());
     SetTextureFilter(hudLifeIconTexture_, TEXTURE_FILTER_POINT);
     stageFlagIconTexture_ = LoadTexture((std::string(BC_ASSETS_DIR) + "sprites/icon_stage_flag.png").c_str());
@@ -379,15 +477,19 @@ void Game::Init() {
     SetTextureFilter(titleLogoTexture_, TEXTURE_FILTER_POINT);
     menuSelectorTexture_ = LoadTexture((std::string(BC_ASSETS_DIR) + "sprites/menu_selector_tank.png").c_str());
     SetTextureFilter(menuSelectorTexture_, TEXTURE_FILTER_POINT);
+    gameOverTexture_ = LoadTexture((std::string(BC_ASSETS_DIR) + "sprites/game_over.png").c_str());
+    SetTextureFilter(gameOverTexture_, TEXTURE_FILTER_POINT);
     LoadHighScore();
     InitDefaultKeyBindings();
+    InitDefaultGamepadBindings();
+    LoadControls(); // pisa los valores por defecto de arriba si el jugador ya habia guardado una configuracion antes
 
     ResetState();
 }
 
 void Game::InitDefaultKeyBindings() {
     using A = InputAction;
-    auto set = [](PlayerKeyBindings& b, int up, int down, int left, int right, int shoot, int special, int start) {
+    auto set = [](PlayerKeyBindings& b, int up, int down, int left, int right, int shoot, int special, int start, int pause) {
         b.keys[static_cast<int>(A::Up)] = up;
         b.keys[static_cast<int>(A::Down)] = down;
         b.keys[static_cast<int>(A::Left)] = left;
@@ -395,11 +497,36 @@ void Game::InitDefaultKeyBindings() {
         b.keys[static_cast<int>(A::Shoot)] = shoot;
         b.keys[static_cast<int>(A::Special)] = special;
         b.keys[static_cast<int>(A::Start)] = start;
+        b.keys[static_cast<int>(A::Pause)] = pause;
     };
-    set(playerBindings_[0], KEY_W, KEY_S, KEY_A, KEY_D, KEY_LEFT_CONTROL, KEY_SPACE, KEY_ONE);
-    set(playerBindings_[1], KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_RIGHT_CONTROL, KEY_RIGHT_SHIFT, KEY_TWO);
-    set(playerBindings_[2], KEY_I, KEY_K, KEY_J, KEY_L, KEY_U, KEY_O, KEY_THREE);
-    set(playerBindings_[3], KEY_KP_8, KEY_KP_5, KEY_KP_4, KEY_KP_6, KEY_KP_0, KEY_KP_ENTER, KEY_FOUR);
+    // Pausa: Enter para los 4 por defecto (ya es, de paso, la tecla fija que
+    // siempre pausa sin importar el mapeo, ver ProcessInput); cada jugador
+    // la puede reasignar a otra por separado desde el menu si quiere.
+    set(playerBindings_[0], KEY_W, KEY_S, KEY_A, KEY_D, KEY_LEFT_CONTROL, KEY_SPACE, KEY_ONE, KEY_ENTER);
+    set(playerBindings_[1], KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_RIGHT_CONTROL, KEY_RIGHT_SHIFT, KEY_TWO, KEY_ENTER);
+    set(playerBindings_[2], KEY_I, KEY_K, KEY_J, KEY_L, KEY_U, KEY_O, KEY_THREE, KEY_ENTER);
+    set(playerBindings_[3], KEY_KP_8, KEY_KP_5, KEY_KP_4, KEY_KP_6, KEY_KP_0, KEY_KP_ENTER, KEY_FOUR, KEY_ENTER);
+}
+
+void Game::InitDefaultGamepadBindings() {
+    using A = InputAction;
+    // Movimiento (Up/Down/Left/Right) queda sin usar: con mando es siempre
+    // D-pad + analogico (ver ApplyGamepadInput), no una asignacion de un
+    // boton por direccion.
+    auto set = [](PlayerGamepadBindings& b, int shoot, int special, int start, int pause) {
+        b.buttons[static_cast<int>(A::Shoot)] = shoot;
+        b.buttons[static_cast<int>(A::Special)] = special;
+        b.buttons[static_cast<int>(A::Start)] = start;
+        b.buttons[static_cast<int>(A::Pause)] = pause;
+    };
+    // Pedido explicitamente, pensado para un control de Xbox: Disparar = A,
+    // Especial = B, Inicio y Pausa = el boton central derecho ("Menu"/Play).
+    // Los 4 jugadores arrancan con el mismo esquema (el mando que le toque a
+    // cada uno via ApplyGamepadInput usa estos mismos botones); cada uno se
+    // puede reasignar por separado desde el menu si hace falta.
+    for (PlayerGamepadBindings& bindings : playerGamepadBindings_) {
+        set(bindings, GAMEPAD_BUTTON_RIGHT_FACE_DOWN, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT, GAMEPAD_BUTTON_MIDDLE_RIGHT, GAMEPAD_BUTTON_MIDDLE_RIGHT);
+    }
 }
 
 // Vuelve a dejar la partida como recien arrancada: recarga el mapa (repone
@@ -466,9 +593,28 @@ void Game::LoadCurrentLevelMap() {
 }
 
 void Game::ResetState() {
+    // El entorno de pruebas (BC_DEBUG_BUILD, ver kDebugFeaturesEnabled y
+    // CMakeLists.txt) arranca siempre en el "escenario 0" pedido
+    // explicitamente: al no existir levels/level_00.json, LevelFilePath cae
+    // sola en el mapa de prueba de siempre (levels/test_map.json), asi las
+    // pruebas de gameplay no dependen de (ni tocan) los niveles 1-40 reales.
+#ifdef BC_DEBUG_BUILD
+    currentLevel_ = 0;
+#else
     currentLevel_ = 1;
+#endif
     LoadCurrentLevelMap();
     gameOver_ = false;
+    gameOverPhase_ = GameOverPhase::None;
+    gameOverTimer_ = 0.0;
+    gameOverWinnerOwnerId_ = -1;
+    gameOverWinnerScore_ = 0;
+    gameOverNameEntry_.clear();
+    // Foto del record ANTES de esta partida (ver matchStartHighScore_):
+    // highScore_ ya esta cargado por LoadHighScore (o pisado por la ultima
+    // partida jugada esta misma sesion), asi que esto es lo que hay que
+    // superar para que valga como record nuevo al terminar.
+    matchStartHighScore_ = highScore_;
 
     player1_ = Tank{};
     player2_ = Tank{};
@@ -501,23 +647,31 @@ void Game::ResetState() {
     player2Score_ = 0;
     player3Score_ = 0;
     player4Score_ = 0;
+    extraLifeMilestonesClaimed_ = {};
     playerLevelStats_ = {};
     highScoreHolderId_ = -1;
     scoreTallyPhase_ = ScoreTallyPhase::None;
     scoreTallyBonusAwarded_ = {};
+    paused_ = false;
+    pauseMenuIndex_ = 0;
+    pauseEndChoiceIndex_ = 0;
+    pauseConfirmIndex_ = 1;
     ApplyAggressivenessForCurrentLevel();
     BuildEnemyTypeSequenceForLevel();
     // El enjambre inicial NO se arma aca: recien lo hace SpawnInitialWaveForLevel
     // cuando termina la transicion de nivel (ver StartArcadeLocal/BeginLevelTransition).
 
-    // Al empezar solo esta presente el jugador 1; P2/P3/P4 se suman con su
-    // tecla de Inicio (ver ProcessInput/playerBindings_).
-    player1Active_ = true;
-    player2Active_ = false;
-    player3Active_ = false;
-    player4Active_ = false;
-
+    // A diferencia de antes, ResetState() YA NO decide quien esta activo:
+    // eso ahora lo elige la pantalla de seleccion de personaje
+    // (EnterCharacterSelect/ProcessCharacterSelectInput) antes de llamar
+    // aca (ver StartArcadeLocal), asi que player1Active_.._4 quedan tal
+    // cual estaban al entrar. Los otros 2 llamadores de ResetState() que no
+    // pasan por esa pantalla (Init() y el salto de nivel de depuracion,
+    // JumpToLevel) los fijan ellos mismos justo antes de llamar aca.
     RespawnPlayer1();
+    if (player2Active_) RespawnPlayer2();
+    if (player3Active_) RespawnPlayer3();
+    if (player4Active_) RespawnPlayer4();
 }
 
 void Game::RespawnPlayer1() {
@@ -560,11 +714,12 @@ void Game::RespawnByOwnerId(int ownerId) {
     }
 }
 
-void Game::SetPlayerActive(bool& activeFlag, Tank& tank, SpawnFlash& spawn, float spawnX, float spawnY, bool active) {
+void Game::SetPlayerActive(bool& activeFlag, Tank& tank, SpawnFlash& spawn, float spawnX, float spawnY, bool active, int slotIndex) {
     activeFlag = active;
     if (!active) {
         return; // Update()/Render() ya no lo van a tocar mientras este en false
     }
+    playerColorIndex_[slotIndex] = FirstAvailableColor(); // pedido explicitamente: nunca 2 jugadores con el mismo color en pantalla
     tank = Tank{};
     tank.SetFireMode(FireMode::SinglePress);
     tank.SetPosition(spawnX, spawnY);
@@ -665,7 +820,7 @@ void Game::TickBaseFortification(double dt) {
     fortifiedCells_.clear();
 }
 
-void Game::ApplyGamepadInput(PlayerInput& input, int gamepadId) const {
+void Game::ApplyGamepadInput(PlayerInput& input, int gamepadId, int playerIndex) const {
     if (gamepadId < 0 || !IsGamepadAvailable(gamepadId)) {
         return;
     }
@@ -675,13 +830,44 @@ void Game::ApplyGamepadInput(PlayerInput& input, int gamepadId) const {
     input.moveDown = input.moveDown || IsGamepadButtonDown(gamepadId, GAMEPAD_BUTTON_LEFT_FACE_DOWN) || axisY > kGamepadStickDeadzone;
     input.moveLeft = input.moveLeft || IsGamepadButtonDown(gamepadId, GAMEPAD_BUTTON_LEFT_FACE_LEFT) || axisX < -kGamepadStickDeadzone;
     input.moveRight = input.moveRight || IsGamepadButtonDown(gamepadId, GAMEPAD_BUTTON_LEFT_FACE_RIGHT) || axisX > kGamepadStickDeadzone;
-    input.shoot = input.shoot || IsGamepadButtonDown(gamepadId, kGamepadShootButton);
-    input.specialShoot = input.specialShoot || IsGamepadButtonDown(gamepadId, kGamepadSpecialButton);
+    const PlayerGamepadBindings& bindings = playerGamepadBindings_[playerIndex];
+    input.shoot = input.shoot || IsGamepadButtonDown(gamepadId, bindings.buttons[static_cast<int>(InputAction::Shoot)]);
+    input.specialShoot = input.specialShoot || IsGamepadButtonDown(gamepadId, bindings.buttons[static_cast<int>(InputAction::Special)]);
 }
 
 void Game::ProcessInput() {
+    if (appState_ == AppState::CharacterSelect) {
+        ProcessCharacterSelectInput();
+        return;
+    }
     if (appState_ != AppState::Playing) {
         ProcessMenuInput();
+        return;
+    }
+
+    // Menu de pausa ya abierto (ver paused_): se reusa ProcessMenuInput tal
+    // cual (menuScreen_ esta en PauseMain o algo que cuelga de ahi), en vez
+    // de tocar nada del input de gameplay de aca abajo. Excepcion pedida
+    // explicitamente: si se vuelve a apretar el MISMO boton de Pausa
+    // estando justo en la pantalla principal de pausa (no en un submenu
+    // como Opciones/Mapeo de controles/Terminar partida — "solo funcione
+    // durante un nivel"), se toma como "Continuar" y se cierra de una, sin
+    // pasar por ProcessMenuInput este cuadro.
+    if (paused_) {
+        if (menuScreen_ == MenuScreen::PauseMain && IsPauseButtonPressed()) {
+            paused_ = false;
+            PlaySound(pauseToggleSound_);
+            return;
+        }
+        ProcessMenuInput();
+        return;
+    }
+
+    // Secuencia de fin de partida ya en curso (ver GameOverPhase): su propio
+    // manejo de input (saltear la espera, tipear el nombre), nada del resto
+    // de esta funcion aplica (los jugadores estan congelados, ver Update).
+    if (gameOverPhase_ != GameOverPhase::None) {
+        ProcessGameOverInput();
         return;
     }
 
@@ -704,7 +890,10 @@ void Game::ProcessInput() {
     // Mandos (seccion custom): se suman al teclado de cada jugador (no lo
     // reemplazan, cualquiera de los dos mueve/dispara). El primer mando que
     // este conectado controla a P1, el segundo a P2, el tercero a P3 y el
-    // cuarto a P4 (ver ApplyGamepadInput).
+    // cuarto a P4 (ver ApplyGamepadInput) — se recalcula entero cada frame,
+    // asi que un mando enchufado despues de arrancar el juego (o
+    // desconectado y vuelto a enchufar) se detecta y asigna solo, sin
+    // reiniciar nada.
     int connectedGamepads[4] = {-1, -1, -1, -1};
     int connectedCount = 0;
     for (int i = 0; i < 4 && connectedCount < 4; ++i) {
@@ -713,15 +902,14 @@ void Game::ProcessInput() {
             ++connectedCount;
         }
     }
-    ApplyGamepadInput(input1_, connectedGamepads[0]);
-    ApplyGamepadInput(input2_, connectedGamepads[1]);
-    ApplyGamepadInput(input3_, connectedGamepads[2]);
-    ApplyGamepadInput(input4_, connectedGamepads[3]);
+    ApplyGamepadInput(input1_, connectedGamepads[0], 0);
+    ApplyGamepadInput(input2_, connectedGamepads[1], 1);
+    ApplyGamepadInput(input3_, connectedGamepads[2], 2);
+    ApplyGamepadInput(input4_, connectedGamepads[3], 3);
 
-    // Debug: que numero de boton reporta el mando al apretar cada cosa, para
-    // calibrar kGamepadShootButton/kGamepadSpecialButton en ApplyGamepadInput
-    // (se muestra en el HUD, ver Render). Se guarda el ultimo apretado en
-    // cualquier mando, no se pierde hasta el siguiente boton.
+    // Debug: que numero de boton reporta el mando al apretar cada cosa,
+    // para calibrar (se muestra en el HUD, ver Render). Se guarda el ultimo
+    // apretado en cualquier mando, no se pierde hasta el siguiente boton.
     if (kDebugFeaturesEnabled) {
         const int pressedButton = GetGamepadButtonPressed();
         if (pressedButton != -1) {
@@ -732,18 +920,21 @@ void Game::ProcessInput() {
     // Traen o hacen desaparecer a cada jugador (al arrancar solo esta
     // presente el jugador 1, ver ResetState); la tecla usada es la de
     // Inicio de cada uno (InputAction::Start), configurable desde el menu
-    // igual que el resto (antes fija en 1/2/3/4).
+    // igual que el resto (antes fija en 1/2/3/4). Solo por teclado (pedido
+    // explicitamente: se quito del mando porque comparte fisicamente el
+    // mismo boton "Play"/Menu con Pausa, y apretarlo terminaba disparando
+    // las dos cosas a la vez).
     if (IsKeyPressed(playerBindings_[0].keys[static_cast<int>(InputAction::Start)])) {
-        SetPlayerActive(player1Active_, player1_, player1Spawn_, player1SpawnX_, player1SpawnY_, !player1Active_);
+        SetPlayerActive(player1Active_, player1_, player1Spawn_, player1SpawnX_, player1SpawnY_, !player1Active_, 0);
     }
     if (IsKeyPressed(playerBindings_[1].keys[static_cast<int>(InputAction::Start)])) {
-        SetPlayerActive(player2Active_, player2_, player2Spawn_, player2SpawnX_, player2SpawnY_, !player2Active_);
+        SetPlayerActive(player2Active_, player2_, player2Spawn_, player2SpawnX_, player2SpawnY_, !player2Active_, 1);
     }
     if (IsKeyPressed(playerBindings_[2].keys[static_cast<int>(InputAction::Start)])) {
-        SetPlayerActive(player3Active_, player3_, player3Spawn_, player3SpawnX_, player3SpawnY_, !player3Active_);
+        SetPlayerActive(player3Active_, player3_, player3Spawn_, player3SpawnX_, player3SpawnY_, !player3Active_, 2);
     }
     if (IsKeyPressed(playerBindings_[3].keys[static_cast<int>(InputAction::Start)])) {
-        SetPlayerActive(player4Active_, player4_, player4Spawn_, player4SpawnX_, player4SpawnY_, !player4Active_);
+        SetPlayerActive(player4Active_, player4_, player4Spawn_, player4SpawnX_, player4SpawnY_, !player4Active_, 3);
     }
 
     // Boton de prueba: repite el respawn en el punto de spawn inicial, para
@@ -762,6 +953,18 @@ void Game::ProcessInput() {
     if (IsKeyPressed(KEY_ESCAPE)) {
         appState_ = AppState::Menu;
         menuScreen_ = MenuScreen::Main;
+    }
+
+    // Pausa (pedido explicitamente, ver IsPauseButtonPressed): abre el menu
+    // de pausa. Solo funciona durante un nivel en curso (pedido
+    // explicitamente) — no durante la transicion de nivel, la pantalla de
+    // puntuacion, ni con la partida ya terminada: esas pantallas ya
+    // congelan/toman el control por su cuenta.
+    if (IsPauseButtonPressed() && levelTransitionPhase_ == LevelTransitionPhase::None && scoreTallyPhase_ == ScoreTallyPhase::None && !gameOver_) {
+        paused_ = true;
+        menuScreen_ = MenuScreen::PauseMain;
+        pauseMenuIndex_ = 0;
+        PlaySound(pauseToggleSound_);
     }
 
     // Todo lo de aca abajo (F1-F12, +/-) son botones de prueba: forzar
@@ -859,7 +1062,36 @@ void Game::ProcessInput() {
         if (IsKeyPressed(KEY_F6)) {
             showGrid_ = !showGrid_;
         }
+
+        // Muestra/oculta un recuadro verde con la colision real de cada
+        // objeto vivo (tanques, balas, unidades minimas de ladrillo/acero,
+        // base, power-up), pedido explicitamente para depurar coliciones.
+        if (IsKeyPressed(KEY_H)) {
+            showHitboxes_ = !showHitboxes_;
+        }
     }
+}
+
+bool Game::IsPauseButtonPressed() const {
+    if (IsKeyPressed(KEY_ENTER)
+        || IsKeyPressed(playerBindings_[0].keys[static_cast<int>(InputAction::Pause)])
+        || IsKeyPressed(playerBindings_[1].keys[static_cast<int>(InputAction::Pause)])
+        || IsKeyPressed(playerBindings_[2].keys[static_cast<int>(InputAction::Pause)])
+        || IsKeyPressed(playerBindings_[3].keys[static_cast<int>(InputAction::Pause)])) {
+        return true;
+    }
+    // Mismo criterio de asignacion que ApplyGamepadInput: el mando g-esimo
+    // conectado (por orden de conexion) le corresponde al jugador g-esimo.
+    int slotIndex = 0;
+    for (int g = 0; g < 4 && slotIndex < 4; ++g) {
+        if (IsGamepadAvailable(g)) {
+            if (IsGamepadButtonPressed(g, playerGamepadBindings_[slotIndex].buttons[static_cast<int>(InputAction::Pause)])) {
+                return true;
+            }
+            ++slotIndex;
+        }
+    }
+    return false;
 }
 
 void Game::StartArcadeLocal() {
@@ -868,16 +1100,290 @@ void Game::StartArcadeLocal() {
     BeginLevelTransition();
 }
 
+void Game::EnterCharacterSelect() {
+    appState_ = AppState::CharacterSelect;
+    player1Active_ = true;
+    player2Active_ = false;
+    player3Active_ = false;
+    player4Active_ = false;
+    playerColorIndex_[0] = 0; // amarillo por defecto; se cicla con izquierda/derecha (ver ProcessCharacterSelectInput)
+}
+
+TankSpriteSet& Game::SpriteSetForColor(int colorIndex) {
+    switch (colorIndex) {
+        case 1: return player2Sprites_;
+        case 2: return player3Sprites_;
+        case 3: return player4Sprites_;
+        default: return player1Sprites_;
+    }
+}
+
+Color Game::HudColorForColor(int colorIndex) const {
+    switch (colorIndex) {
+        case 1: return kPlayer2HudColor;
+        case 2: return kPlayer3HudColor;
+        case 3: return kPlayer4HudColor;
+        default: return kPlayer1HudColor;
+    }
+}
+
+int Game::FirstAvailableColor() const {
+    bool used[4] = {false, false, false, false};
+    if (player1Active_) used[playerColorIndex_[0]] = true;
+    if (player2Active_) used[playerColorIndex_[1]] = true;
+    if (player3Active_) used[playerColorIndex_[2]] = true;
+    if (player4Active_) used[playerColorIndex_[3]] = true;
+    for (int c = 0; c < 4; ++c) {
+        if (!used[c]) {
+            return c;
+        }
+    }
+    return 0; // no deberia pasar: solo hay 4 slots para 4 colores
+}
+
+void Game::CycleLobbyColor(int slot, int direction) {
+    const bool active[4] = {player1Active_, player2Active_, player3Active_, player4Active_};
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        playerColorIndex_[slot] = (playerColorIndex_[slot] + direction + 4) % 4;
+        bool takenByOther = false;
+        for (int other = 0; other < 4; ++other) {
+            if (other == slot) {
+                continue;
+            }
+            if (active[other] && playerColorIndex_[other] == playerColorIndex_[slot]) {
+                takenByOther = true;
+                break;
+            }
+        }
+        if (!takenByOther) {
+            return;
+        }
+    }
+    // Si llega aca, los otros 3 slots activos ya usan los otros 3 colores:
+    // no queda ninguno libre para ciclar, se deja como quedo el ultimo intento.
+}
+
+int Game::GamepadIdForSlot(int slot) const {
+    int slotIndex = 0;
+    for (int g = 0; g < 4; ++g) {
+        if (IsGamepadAvailable(g)) {
+            if (slotIndex == slot) {
+                return g;
+            }
+            ++slotIndex;
+        }
+    }
+    return -1;
+}
+
+bool Game::IsSlotShootPressed(int slot) const {
+    if (IsKeyPressed(playerBindings_[slot].keys[static_cast<int>(InputAction::Shoot)])) {
+        return true;
+    }
+    const int gamepadId = GamepadIdForSlot(slot);
+    return gamepadId != -1 && IsGamepadButtonPressed(gamepadId, playerGamepadBindings_[slot].buttons[static_cast<int>(InputAction::Shoot)]);
+}
+
+bool Game::IsSlotSpecialPressed(int slot) const {
+    if (IsKeyPressed(playerBindings_[slot].keys[static_cast<int>(InputAction::Special)])) {
+        return true;
+    }
+    const int gamepadId = GamepadIdForSlot(slot);
+    return gamepadId != -1 && IsGamepadButtonPressed(gamepadId, playerGamepadBindings_[slot].buttons[static_cast<int>(InputAction::Special)]);
+}
+
+bool Game::IsSlotLeftPressed(int slot) const {
+    if (IsKeyPressed(playerBindings_[slot].keys[static_cast<int>(InputAction::Left)])) {
+        return true;
+    }
+    // El mando siempre mueve con D-pad/analogico, no es remapeable (ver
+    // ApplyGamepadInput) — el mismo criterio aplica aca.
+    const int gamepadId = GamepadIdForSlot(slot);
+    return gamepadId != -1 && IsGamepadButtonPressed(gamepadId, GAMEPAD_BUTTON_LEFT_FACE_LEFT);
+}
+
+bool Game::IsSlotRightPressed(int slot) const {
+    if (IsKeyPressed(playerBindings_[slot].keys[static_cast<int>(InputAction::Right)])) {
+        return true;
+    }
+    const int gamepadId = GamepadIdForSlot(slot);
+    return gamepadId != -1 && IsGamepadButtonPressed(gamepadId, GAMEPAD_BUTTON_LEFT_FACE_RIGHT);
+}
+
+void Game::ProcessCharacterSelectInput() {
+    if (IsKeyPressed(KEY_ESCAPE)) {
+        // Se cancela del todo, sin dejar jugadores 2-4 colgados a medio
+        // unir para la proxima vez que se entre a esta pantalla.
+        player2Active_ = false;
+        player3Active_ = false;
+        player4Active_ = false;
+        appState_ = AppState::Menu;
+        menuScreen_ = MenuScreen::Main;
+        return;
+    }
+
+    // Jugador 1 (slot 0): siempre presente, elige su color con izquierda/derecha.
+    if (IsSlotLeftPressed(0)) {
+        CycleLobbyColor(0, -1);
+    } else if (IsSlotRightPressed(0)) {
+        CycleLobbyColor(0, 1);
+    }
+
+    // Jugadores 2-4 (slots 1-3): se suman apretando Disparar (color libre
+    // asignado solo, ver FirstAvailableColor), se van apretando Especial.
+    bool* const activeFlags[4] = {&player1Active_, &player2Active_, &player3Active_, &player4Active_};
+    for (int slot = 1; slot < 4; ++slot) {
+        if (!*activeFlags[slot] && IsSlotShootPressed(slot)) {
+            playerColorIndex_[slot] = FirstAvailableColor();
+            *activeFlags[slot] = true;
+        } else if (*activeFlags[slot] && IsSlotSpecialPressed(slot)) {
+            *activeFlags[slot] = false;
+        }
+    }
+
+    // Cualquier jugador presente confirma y arranca la partida (mismo boton
+    // que abre/cierra la pausa durante el juego).
+    if (IsPauseButtonPressed()) {
+        StartArcadeLocal();
+    }
+}
+
+void Game::DrawBrickBorder(Rectangle box, float tileSize, int thickness) {
+    const Texture2D tex = brickUnitTextures_[0];
+    const Rectangle src{0.0f, 0.0f, static_cast<float>(tex.width), static_cast<float>(tex.height)};
+    const int cols = static_cast<int>((box.width + tileSize - 1.0f) / tileSize) + thickness * 2;
+    const int rows = static_cast<int>((box.height + tileSize - 1.0f) / tileSize) + thickness * 2;
+    const float originX = box.x - static_cast<float>(thickness) * tileSize;
+    const float originY = box.y - static_cast<float>(thickness) * tileSize;
+    for (int r = 0; r < rows; ++r) {
+        const bool inTopBorder = r < thickness;
+        const bool inBottomBorder = r >= rows - thickness;
+        for (int c = 0; c < cols; ++c) {
+            const bool inLeftBorder = c < thickness;
+            const bool inRightBorder = c >= cols - thickness;
+            if (!(inTopBorder || inBottomBorder || inLeftBorder || inRightBorder)) {
+                continue; // interior: lo pinta el rectangulo de fondo, no un ladrillo
+            }
+            const Rectangle dst{originX + static_cast<float>(c) * tileSize, originY + static_cast<float>(r) * tileSize, tileSize, tileSize};
+            DrawTexturePro(tex, src, dst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+        }
+    }
+}
+
+void Game::RenderCharacterSelect() {
+    BeginDrawing();
+    ClearBackground(BLACK);
+
+    const int centerX = windowWidth_ / 2;
+    constexpr float kBoxW = 150.0f;
+    constexpr float kBoxH = 200.0f;
+    constexpr float kGap = 28.0f;
+    constexpr float kBorderTile = 16.0f;
+    constexpr int kBorderThickness = 2;
+
+    const float totalWidth = 4.0f * kBoxW + 3.0f * kGap;
+    const float startX = static_cast<float>(centerX) - totalWidth * 0.5f;
+    const float boxY = static_cast<float>(windowHeight_) * 0.5f - kBoxH * 0.5f;
+
+    const bool active[4] = {player1Active_, player2Active_, player3Active_, player4Active_};
+    static const char* kLabels[4] = {"JUGADOR 1", "JUGADOR 2", "JUGADOR 3", "JUGADOR 4"};
+    const bool blinkOn = static_cast<int>(GetTime() / kHudTextBlinkInterval) % 2 == 0;
+
+    for (int slot = 0; slot < 4; ++slot) {
+        const float boxX = startX + static_cast<float>(slot) * (kBoxW + kGap);
+        const Rectangle box{boxX, boxY, kBoxW, kBoxH};
+        const float boxCenterX = boxX + kBoxW * 0.5f;
+
+        const char* label = kLabels[slot];
+        DrawText(label, static_cast<int>(boxCenterX) - MeasureText(label, 20) / 2, static_cast<int>(boxY) - 34, 20, RAYWHITE);
+
+        DrawRectangleRec(box, Color{18, 18, 22, 255});
+        DrawBrickBorder(box, kBorderTile, kBorderThickness);
+
+        if (active[slot]) {
+            const Texture2D tankTex = SpriteSetForColor(playerColorIndex_[slot]).Get(1, Direction::Down, 0);
+            constexpr float kTankScale = 6.0f; // sprite nativo de 16px -> 96px en pantalla
+            const float tankSize = 16.0f * kTankScale;
+            const Rectangle tankSrc{0.0f, 0.0f, static_cast<float>(tankTex.width), static_cast<float>(tankTex.height)};
+            const Rectangle tankDst{boxCenterX - tankSize * 0.5f, boxY + kBoxH * 0.5f - tankSize * 0.5f, tankSize, tankSize};
+            DrawTexturePro(tankTex, tankSrc, tankDst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+        } else if (blinkOn) {
+            const char* line1 = "PULSE";
+            const char* line2 = "DISPARAR";
+            constexpr int kFontSize = 22;
+            const float textY = boxY + kBoxH * 0.5f - static_cast<float>(kFontSize);
+            DrawText(line1, static_cast<int>(boxCenterX) - MeasureText(line1, kFontSize) / 2, static_cast<int>(textY), kFontSize, RED);
+            DrawText(line2, static_cast<int>(boxCenterX) - MeasureText(line2, kFontSize) / 2, static_cast<int>(textY) + kFontSize + 4, kFontSize, RED);
+        }
+    }
+
+    const char* title = "SELECCION DE JUGADORES";
+    DrawText(title, centerX - MeasureText(title, 26) / 2, static_cast<int>(boxY) - 90, 26, YELLOW);
+
+    const char* hint1 = "Jugador 1: Izquierda/Derecha elige color";
+    const char* hint2 = "Disparar: unirse   Especial: salir   Pausa/Start: comenzar";
+    DrawText(hint1, centerX - MeasureText(hint1, 16) / 2, windowHeight_ - 58, 16, GRAY);
+    DrawText(hint2, centerX - MeasureText(hint2, 16) / 2, windowHeight_ - 34, 16, GRAY);
+
+    EndDrawing();
+}
+
 void Game::ProcessMenuInput() {
-    const bool up = IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_W);
-    const bool down = IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_S);
-    const bool left = IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_A);
-    const bool right = IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_D);
-    const bool confirm = IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE);
-    const bool back = IsKeyPressed(KEY_ESCAPE);
+    // El mando tambien puede manejar el menu (pedido explicitamente): el
+    // primer mando conectado (se recalcula cada frame, asi que un mando
+    // enchufado despues de arrancar el juego se detecta solo), con D-pad +
+    // stick analogico izquierdo para moverse y A/B FIJOS (no el mapeo
+    // reasignable de ningun jugador, ver playerGamepadBindings_) para
+    // confirmar/volver — el menu se comporta siempre igual sin importar como
+    // cada jugador tenga configurado Disparar/Especial para la partida. El
+    // resto de los botones del mando no hacen nada aca.
+    int menuGamepadId = -1;
+    for (int g = 0; g < 4; ++g) {
+        if (IsGamepadAvailable(g)) {
+            menuGamepadId = g;
+            break;
+        }
+    }
+    const bool gamepadForMenu = menuGamepadId != -1;
+    constexpr int kMenuConfirmButton = GAMEPAD_BUTTON_RIGHT_FACE_DOWN; // A
+    constexpr int kMenuBackButton = GAMEPAD_BUTTON_RIGHT_FACE_RIGHT;   // B
+
+    // Stick analogico izquierdo: IsGamepadButtonPressed ya da deteccion de
+    // flanco gratis para el D-pad, pero un eje analogico no tiene eso — hay
+    // que armarla a mano comparando contra si ya estaba inclinado el cuadro
+    // anterior (menuStickXHeld_), para no repetir el movimiento sin control
+    // mientras se lo mantiene inclinado.
+    constexpr float kStickThreshold = 0.5f;
+    const float stickX = gamepadForMenu ? GetGamepadAxisMovement(menuGamepadId, GAMEPAD_AXIS_LEFT_X) : 0.0f;
+    const float stickY = gamepadForMenu ? GetGamepadAxisMovement(menuGamepadId, GAMEPAD_AXIS_LEFT_Y) : 0.0f;
+    const bool stickUpNow = gamepadForMenu && stickY < -kStickThreshold;
+    const bool stickDownNow = gamepadForMenu && stickY > kStickThreshold;
+    const bool stickLeftNow = gamepadForMenu && stickX < -kStickThreshold;
+    const bool stickRightNow = gamepadForMenu && stickX > kStickThreshold;
+    const bool stickUpPressed = stickUpNow && !menuStickUpHeld_;
+    const bool stickDownPressed = stickDownNow && !menuStickDownHeld_;
+    const bool stickLeftPressed = stickLeftNow && !menuStickLeftHeld_;
+    const bool stickRightPressed = stickRightNow && !menuStickRightHeld_;
+    menuStickUpHeld_ = stickUpNow;
+    menuStickDownHeld_ = stickDownNow;
+    menuStickLeftHeld_ = stickLeftNow;
+    menuStickRightHeld_ = stickRightNow;
+
+    const bool up = IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_W) || stickUpPressed
+        || (gamepadForMenu && IsGamepadButtonPressed(menuGamepadId, GAMEPAD_BUTTON_LEFT_FACE_UP));
+    const bool down = IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_S) || stickDownPressed
+        || (gamepadForMenu && IsGamepadButtonPressed(menuGamepadId, GAMEPAD_BUTTON_LEFT_FACE_DOWN));
+    const bool left = IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_A) || stickLeftPressed
+        || (gamepadForMenu && IsGamepadButtonPressed(menuGamepadId, GAMEPAD_BUTTON_LEFT_FACE_LEFT));
+    const bool right = IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_D) || stickRightPressed
+        || (gamepadForMenu && IsGamepadButtonPressed(menuGamepadId, GAMEPAD_BUTTON_LEFT_FACE_RIGHT));
+    const bool confirm = IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE)
+        || (gamepadForMenu && IsGamepadButtonPressed(menuGamepadId, kMenuConfirmButton));
+    const bool back = IsKeyPressed(KEY_ESCAPE)
+        || (gamepadForMenu && IsGamepadButtonPressed(menuGamepadId, kMenuBackButton));
 
     if (menuScreen_ == MenuScreen::Main) {
-        constexpr int kItemCount = 5; // Arcade/Supervivencia/Versus/Modo construccion/Opciones
+        constexpr int kItemCount = 6; // Arcade/Supervivencia/Versus/Modo construccion/Opciones/Salir
         if (up)   mainMenuIndex_ = (mainMenuIndex_ + kItemCount - 1) % kItemCount;
         if (down) mainMenuIndex_ = (mainMenuIndex_ + 1) % kItemCount;
         if (confirm) {
@@ -887,11 +1393,29 @@ void Game::ProcessMenuInput() {
                 menuScreen_ = MenuScreen::ModeSubmenu;
             } else if (mainMenuIndex_ == 4) {
                 optionsIndex_ = 0;
+                optionsBackTarget_ = MenuScreen::Main;
                 menuScreen_ = MenuScreen::Options;
+            } else if (mainMenuIndex_ == 5) { // Salir: pide confirmacion antes de cerrar (pedido explicitamente)
+                mainConfirmExitIndex_ = 1; // arranca en "No" cada vez, por seguridad
+                menuScreen_ = MenuScreen::MainConfirmExit;
             }
             // mainMenuIndex_ == 3 (Modo construccion): todavia no
             // seleccionable, Enter no hace nada (ver RenderMenu para el
             // aviso en pantalla).
+        }
+    } else if (menuScreen_ == MenuScreen::MainConfirmExit) {
+        constexpr int kItemCount = 2; // Si/No
+        if (up)   mainConfirmExitIndex_ = (mainConfirmExitIndex_ + kItemCount - 1) % kItemCount;
+        if (down) mainConfirmExitIndex_ = (mainConfirmExitIndex_ + 1) % kItemCount;
+        if (confirm) {
+            if (mainConfirmExitIndex_ == 0) { // Si: cerrar el juego (ver wantsExit_/Run())
+                wantsExit_ = true;
+            } else { // No
+                menuScreen_ = MenuScreen::Main;
+            }
+        }
+        if (back) {
+            menuScreen_ = MenuScreen::Main; // Esc = No
         }
     } else if (menuScreen_ == MenuScreen::ModeSubmenu) {
         constexpr int kItemCount = 2; // Local/Lan ("Opciones" solo esta en la pantalla principal)
@@ -900,8 +1424,10 @@ void Game::ProcessMenuInput() {
         if (confirm && modeSubmenuIndex_ == 0 && selectedMainModeIndex_ == 0) {
             // Arcade > Local: el unico modo con partida real por ahora.
             // Local en Supervivencia/Versus, y Lan en cualquier modo:
-            // todavia no implementados, Enter no hace nada.
-            StartArcadeLocal();
+            // todavia no implementados, Enter no hace nada. Pedido
+            // explicitamente: ya no arranca directo, primero pasa por la
+            // pantalla de seleccion de personaje (ver EnterCharacterSelect).
+            EnterCharacterSelect();
         }
         if (back) {
             menuScreen_ = MenuScreen::Main;
@@ -928,7 +1454,7 @@ void Game::ProcessMenuInput() {
             menuScreen_ = MenuScreen::ControlMapping;
         }
         if (back) {
-            menuScreen_ = MenuScreen::Main; // Opciones solo se entra desde la pantalla principal
+            menuScreen_ = optionsBackTarget_; // Main (titulo) o PauseMain (pausa), segun de donde se entro
         }
     } else if (menuScreen_ == MenuScreen::ControlMapping) {
         constexpr int kItemCount = 4; // Jugador 1-4
@@ -936,41 +1462,196 @@ void Game::ProcessMenuInput() {
         if (down) controlMappingIndex_ = (controlMappingIndex_ + 1) % kItemCount;
         if (confirm) {
             mappingPlayerIndex_ = controlMappingIndex_;
-            playerActionIndex_ = 0;
-            menuScreen_ = MenuScreen::PlayerActions;
+            controlDeviceIndex_ = 0;
+            menuScreen_ = MenuScreen::ControlDeviceChoice;
         }
         if (back) {
             menuScreen_ = MenuScreen::Options;
         }
+    } else if (menuScreen_ == MenuScreen::ControlDeviceChoice) {
+        constexpr int kItemCount = 2; // Teclado/Mando
+        if (up)   controlDeviceIndex_ = (controlDeviceIndex_ + kItemCount - 1) % kItemCount;
+        if (down) controlDeviceIndex_ = (controlDeviceIndex_ + 1) % kItemCount;
+        if (confirm) {
+            mappingGamepad_ = (controlDeviceIndex_ == 1);
+            playerActionIndex_ = 0;
+            menuScreen_ = MenuScreen::PlayerActions;
+        }
+        if (back) {
+            menuScreen_ = MenuScreen::ControlMapping;
+        }
     } else if (menuScreen_ == MenuScreen::PlayerActions) {
-        if (up)   playerActionIndex_ = (playerActionIndex_ + kInputActionCount - 1) % kInputActionCount;
-        if (down) playerActionIndex_ = (playerActionIndex_ + 1) % kInputActionCount;
+        // Teclado: las 7 acciones mapeables (ver kKeyMappableActions).
+        // Mando: solo las 3 mapeables a un boton (ver
+        // kGamepadMappableActions) — el movimiento con mando es siempre
+        // D-pad + analogico, no se remapea. Inicio queda afuera de los dos.
+        const int itemCount = mappingGamepad_ ? kGamepadMappableActionCount : kKeyMappableActionCount;
+        if (up)   playerActionIndex_ = (playerActionIndex_ + itemCount - 1) % itemCount;
+        if (down) playerActionIndex_ = (playerActionIndex_ + 1) % itemCount;
         if (confirm) {
             capturedKey_ = 0;
             menuScreen_ = MenuScreen::CapturingKey;
         }
         if (back) {
-            menuScreen_ = MenuScreen::ControlMapping;
+            menuScreen_ = MenuScreen::ControlDeviceChoice;
         }
-    } else { // MenuScreen::CapturingKey
-        // Cualquier tecla detectada (menos Enter/Esc, reservadas para
-        // guardar/cancelar) queda como candidata; se puede seguir probando
-        // otras antes de confirmar.
-        int pressed = GetKeyPressed();
-        while (pressed != 0) {
-            if (pressed != KEY_ENTER && pressed != KEY_ESCAPE) {
-                capturedKey_ = pressed;
+    } else if (menuScreen_ == MenuScreen::PauseMain) {
+        constexpr int kItemCount = 5; // Continuar/Guardar/Cargar/Opciones/Terminar partida
+        if (up)   pauseMenuIndex_ = (pauseMenuIndex_ + kItemCount - 1) % kItemCount;
+        if (down) pauseMenuIndex_ = (pauseMenuIndex_ + 1) % kItemCount;
+        if (confirm) {
+            if (pauseMenuIndex_ == 0) { // Continuar
+                paused_ = false;
+                PlaySound(pauseToggleSound_);
+            } else if (pauseMenuIndex_ == 3) { // Opciones: identico al de la pantalla de titulo
+                optionsIndex_ = 0;
+                optionsBackTarget_ = MenuScreen::PauseMain;
+                menuScreen_ = MenuScreen::Options;
+            } else if (pauseMenuIndex_ == 4) { // Terminar partida
+                pauseEndChoiceIndex_ = 0;
+                menuScreen_ = MenuScreen::PauseEndChoice;
             }
-            pressed = GetKeyPressed();
-        }
-        if (confirm && capturedKey_ != 0) {
-            playerBindings_[mappingPlayerIndex_].keys[playerActionIndex_] = capturedKey_;
-            menuScreen_ = MenuScreen::PlayerActions;
+            // Guardar/Cargar (1/2): todavia no disponibles (ver
+            // RenderPauseOverlay), Enter no hace nada.
         }
         if (back) {
+            paused_ = false; // Esc en el menu de pausa = Continuar
+            PlaySound(pauseToggleSound_);
+        }
+    } else if (menuScreen_ == MenuScreen::PauseEndChoice) {
+        constexpr int kItemCount = 2; // Menu principal/Cerrar el juego
+        if (up)   pauseEndChoiceIndex_ = (pauseEndChoiceIndex_ + kItemCount - 1) % kItemCount;
+        if (down) pauseEndChoiceIndex_ = (pauseEndChoiceIndex_ + 1) % kItemCount;
+        if (confirm) {
+            pauseConfirmIndex_ = 1; // arranca en "No" cada vez, por seguridad
+            menuScreen_ = MenuScreen::PauseConfirmEnd;
+        }
+        if (back) {
+            menuScreen_ = MenuScreen::PauseMain;
+        }
+    } else if (menuScreen_ == MenuScreen::PauseConfirmEnd) {
+        constexpr int kItemCount = 2; // Si/No
+        if (up)   pauseConfirmIndex_ = (pauseConfirmIndex_ + kItemCount - 1) % kItemCount;
+        if (down) pauseConfirmIndex_ = (pauseConfirmIndex_ + 1) % kItemCount;
+        if (confirm) {
+            if (pauseConfirmIndex_ == 0) { // Si
+                if (pauseEndChoiceIndex_ == 0) {
+                    // Menu principal: mismo criterio que Esc durante la
+                    // partida (ver ProcessInput), sin pasar por ResetState
+                    // aca: la proxima vez que se elija Arcade > Local se
+                    // arma todo de nuevo desde cero.
+                    paused_ = false;
+                    appState_ = AppState::Menu;
+                    menuScreen_ = MenuScreen::Main;
+                } else {
+                    // Cerrar el juego: no se puede cerrar la ventana en el
+                    // momento (ver wantsExit_/Run()).
+                    wantsExit_ = true;
+                }
+            } else { // No
+                menuScreen_ = MenuScreen::PauseEndChoice;
+            }
+        }
+        if (back) {
+            menuScreen_ = MenuScreen::PauseEndChoice; // Esc = No
+        }
+    } else { // MenuScreen::CapturingKey
+        // Guardar/cancelar siempre por teclado (Enter/Esc) aca, aunque se
+        // este mapeando un boton de mando: usar el confirm/back de arriba
+        // (que tambien escuchan al mando) haria que apretar el boton que se
+        // esta justo capturando lo guarde solo, sin poder reconsiderar.
+        const bool keyboardConfirm = IsKeyPressed(KEY_ENTER);
+        const bool keyboardBack = IsKeyPressed(KEY_ESCAPE);
+        if (mappingGamepad_) {
+            // Cualquier boton de mando detectado queda como candidato (se
+            // puede seguir probando otros antes de confirmar), igual que
+            // con el teclado.
+            const int pressed = GetGamepadButtonPressed();
+            if (pressed != -1) {
+                capturedKey_ = pressed;
+            }
+            if (keyboardConfirm && capturedKey_ != 0) {
+                const InputAction action = kGamepadMappableActions[playerActionIndex_];
+                playerGamepadBindings_[mappingPlayerIndex_].buttons[static_cast<int>(action)] = capturedKey_;
+                SaveControls();
+                menuScreen_ = MenuScreen::PlayerActions;
+            }
+        } else {
+            // Cualquier tecla detectada (menos Enter/Esc, reservadas para
+            // guardar/cancelar) queda como candidata; se puede seguir
+            // probando otras antes de confirmar.
+            int pressed = GetKeyPressed();
+            while (pressed != 0) {
+                if (pressed != KEY_ENTER && pressed != KEY_ESCAPE) {
+                    capturedKey_ = pressed;
+                }
+                pressed = GetKeyPressed();
+            }
+            if (keyboardConfirm && capturedKey_ != 0) {
+                const InputAction action = kKeyMappableActions[playerActionIndex_];
+                playerBindings_[mappingPlayerIndex_].keys[static_cast<int>(action)] = capturedKey_;
+                SaveControls();
+                menuScreen_ = MenuScreen::PlayerActions;
+            }
+        }
+        if (keyboardBack) {
             menuScreen_ = MenuScreen::PlayerActions;
         }
     }
+}
+
+void Game::ProcessGameOverInput() {
+    if (gameOverPhase_ == GameOverPhase::Holding) {
+        // Mismo gesto que abre el menu de pausa durante la partida (pedido
+        // explicitamente: "podemos tocar el boton de pausa"): el boton de
+        // Pausa de cualquier jugador, en su teclado o en su mando asignado,
+        // o Enter.
+        int connectedGamepads[4] = {-1, -1, -1, -1};
+        int connectedCount = 0;
+        for (int i = 0; i < 4 && connectedCount < 4; ++i) {
+            if (IsGamepadAvailable(i)) {
+                connectedGamepads[connectedCount] = i;
+                ++connectedCount;
+            }
+        }
+        auto gamepadPausePressed = [&](int slotIndex) {
+            const int gamepadId = connectedGamepads[slotIndex];
+            return gamepadId != -1 && IsGamepadButtonPressed(gamepadId, playerGamepadBindings_[slotIndex].buttons[static_cast<int>(InputAction::Pause)]);
+        };
+        const bool skip = IsKeyPressed(KEY_ENTER)
+            || IsKeyPressed(playerBindings_[0].keys[static_cast<int>(InputAction::Pause)])
+            || IsKeyPressed(playerBindings_[1].keys[static_cast<int>(InputAction::Pause)])
+            || IsKeyPressed(playerBindings_[2].keys[static_cast<int>(InputAction::Pause)])
+            || IsKeyPressed(playerBindings_[3].keys[static_cast<int>(InputAction::Pause)])
+            || gamepadPausePressed(0) || gamepadPausePressed(1) || gamepadPausePressed(2) || gamepadPausePressed(3);
+        if (skip) {
+            FinishGameOverHolding();
+        }
+        return;
+    }
+
+    if (gameOverPhase_ == GameOverPhase::NameEntry) {
+        // Cualquier caracter imprimible se agrega (hasta kGameOverNameMaxLen),
+        // Backspace borra el ultimo, Enter confirma (solo con algo tipeado).
+        int pressed = GetCharPressed();
+        while (pressed != 0) {
+            if (pressed >= 32 && pressed < 127 && gameOverNameEntry_.size() < static_cast<size_t>(kGameOverNameMaxLen)) {
+                gameOverNameEntry_.push_back(static_cast<char>(pressed));
+            }
+            pressed = GetCharPressed();
+        }
+        if (IsKeyPressed(KEY_BACKSPACE) && !gameOverNameEntry_.empty()) {
+            gameOverNameEntry_.pop_back();
+        }
+        if (IsKeyPressed(KEY_ENTER) && !gameOverNameEntry_.empty()) {
+            ConfirmGameOverNameEntry();
+        }
+        return;
+    }
+
+    // GameOverPhase::Rising: nada que hacer, la animacion corre sola (ver
+    // TickGameOverSequence). No se puede saltear a proposito: es la unica
+    // parte fija de la secuencia.
 }
 
 void Game::UpdatePlayer(Tank& tank, PlayerInput& input, SpawnFlash& spawn, int ownerId, const std::vector<Tank*>& others, double fixedDt) {
@@ -1008,9 +1689,11 @@ void Game::UpdatePlayer(Tank& tank, PlayerInput& input, SpawnFlash& spawn, int o
             tank.ConsumeSpecialShot();
             tank.RegisterSpecialShotHeat();
             tank.StartRecoil(kSpecialShotRecoilDistance);
+            PlaySound(specialShootSound_);
         } else if (normalTrigger) {
             if (bullets_.TryShoot(ownerId, muzzleX, muzzleY, tank.Facing(), tank.BulletSpeed(), tank.WeaponLevel(), tank.MaxBullets())) {
                 tank.RegisterNormalShotHeat();
+                PlaySound(playerShootSound_);
             }
         }
     }
@@ -1032,6 +1715,10 @@ void Game::UpdatePlayer(Tank& tank, PlayerInput& input, SpawnFlash& spawn, int o
         } else if (pickedType == PowerUpType::Clock) {
             FreezeAllEnemies(kClockFreezeDuration);
         }
+
+        // Pedido explicitamente: la vida extra tiene su propio sonido,
+        // separado del resto de los items.
+        PlaySound(pickedType == PowerUpType::Life ? extraLifeSound_ : itemPickupSound_);
 
         // Cualquier item agarrado suma lo mismo (investigado del juego
         // original: 500 parejo para los 7, no varia por tipo).
@@ -1123,6 +1810,7 @@ void Game::ApplyEnemyPowerUpPickups() {
         if (!powerUps_.TryPickup(enemy.tank.X(), enemy.tank.Y(), pickedType)) {
             continue;
         }
+        PlaySound(itemPickupSound_);
         const Direction facing = enemy.tank.Facing();
         if (pickedType == PowerUpType::Star) {
             fastEnemies_.SpawnAt(enemy.tank.X(), enemy.tank.Y());
@@ -1144,6 +1832,7 @@ void Game::ApplyEnemyPowerUpPickups() {
         if (!powerUps_.TryPickup(enemy.tank.X(), enemy.tank.Y(), pickedType)) {
             continue;
         }
+        PlaySound(itemPickupSound_);
         const Direction facing = enemy.tank.Facing();
         if (pickedType == PowerUpType::Star) {
             armorEnemies_.SpawnAt(enemy.tank.X(), enemy.tank.Y());
@@ -1165,6 +1854,7 @@ void Game::ApplyEnemyPowerUpPickups() {
         if (!powerUps_.TryPickup(enemy.tank.X(), enemy.tank.Y(), pickedType)) {
             continue;
         }
+        PlaySound(itemPickupSound_);
         if (pickedType == PowerUpType::Star || pickedType == PowerUpType::Gun) {
             const Direction facing = enemy.tank.Facing();
             powerEnemies_.SpawnAt(enemy.tank.X(), enemy.tank.Y());
@@ -1186,6 +1876,7 @@ void Game::ApplyEnemyPowerUpPickups() {
         if (!powerUps_.TryPickup(enemy.tank.X(), enemy.tank.Y(), pickedType)) {
             continue;
         }
+        PlaySound(itemPickupSound_);
         if (pickedType == PowerUpType::Helmet) {
             enemy.tank.ActivateShield(kHelmetShieldDuration);
         } else if (pickedType == PowerUpType::Star || pickedType == PowerUpType::Gun) {
@@ -1195,12 +1886,14 @@ void Game::ApplyEnemyPowerUpPickups() {
 }
 
 void Game::DestroyAllEnemies(int creditOwnerId) {
+    bool killedAny = false;
     for (Enemy& enemy : enemies_.Enemies()) {
         if (!enemy.alive) {
             continue;
         }
         specialExplosions_.Spawn(enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, /*nativeScale=*/true);
         enemy.alive = false;
+        killedAny = true;
         ++enemiesKilledThisLevel_;
         AwardScoreAt(creditOwnerId, enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, kScoreBasicKill);
     }
@@ -1210,6 +1903,7 @@ void Game::DestroyAllEnemies(int creditOwnerId) {
         }
         specialExplosions_.Spawn(enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, /*nativeScale=*/true);
         enemy.alive = false;
+        killedAny = true;
         ++enemiesKilledThisLevel_;
         AwardScoreAt(creditOwnerId, enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, kScoreFastKill);
     }
@@ -1219,6 +1913,7 @@ void Game::DestroyAllEnemies(int creditOwnerId) {
         }
         specialExplosions_.Spawn(enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, /*nativeScale=*/true);
         enemy.alive = false;
+        killedAny = true;
         ++enemiesKilledThisLevel_;
         AwardScoreAt(creditOwnerId, enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, kScoreArmorKill);
     }
@@ -1228,8 +1923,15 @@ void Game::DestroyAllEnemies(int creditOwnerId) {
         }
         specialExplosions_.Spawn(enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, /*nativeScale=*/true);
         enemy.alive = false;
+        killedAny = true;
         ++enemiesKilledThisLevel_;
         AwardScoreAt(creditOwnerId, enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, kScorePowerKill);
+    }
+    if (killedAny) {
+        // Un solo sonido para toda la granada (pedido explicitamente "un
+        // enemigo muere", pero varios a la vez sonando juntos era un caos):
+        // se dispara una sola vez para toda la tanda, no por cada uno.
+        PlaySound(tankDeathSound_);
     }
 }
 
@@ -1244,6 +1946,7 @@ void Game::AwardScoreAt(int ownerId, float x, float y, int points) {
     }
     *score += points;
     MaybeUpdateHighScore(*score, ownerId);
+    CheckExtraLifeByScore(ownerId, *score);
     scorePopups_.Spawn(x, y, points);
 
     // Estadisticas del nivel actual, solo para la pantalla de puntuacion de
@@ -1261,17 +1964,81 @@ void Game::AwardScoreAt(int ownerId, float x, float y, int points) {
     }
 }
 
+void Game::CheckExtraLifeByScore(int ownerId, int newScore) {
+    Tank* tank = nullptr;
+    switch (ownerId) {
+        case kPlayer1Id: tank = &player1_; break;
+        case kPlayer2Id: tank = &player2_; break;
+        case kPlayer3Id: tank = &player3_; break;
+        case kPlayer4Id: tank = &player4_; break;
+        default: return; // no era un jugador
+    }
+    if (tank->IsEliminated()) {
+        return; // sin vidas, fuera de la partida: no tiene sentido darle mas
+    }
+    const int milestonesReached = newScore / kExtraLifeScoreThreshold;
+    const int newMilestones = milestonesReached - extraLifeMilestonesClaimed_[ownerId];
+    if (newMilestones <= 0) {
+        return;
+    }
+    extraLifeMilestonesClaimed_[ownerId] = milestonesReached;
+    for (int i = 0; i < newMilestones; ++i) {
+        tank->AddLife();
+    }
+    PlaySound(extraLifeSound_);
+}
+
 void Game::LoadHighScore() {
     std::ifstream file(std::string(BC_ASSETS_DIR) + "highscore.txt");
     if (file.is_open()) {
         file >> highScore_;
+        file.ignore(); // salta el salto de linea que deja el >> antes de leer el nombre
+        std::getline(file, highScoreHolderName_); // archivos viejos (sin nombre) dejan esto vacio, sin romper nada
     }
 }
 
 void Game::SaveHighScore() {
     std::ofstream file(std::string(BC_ASSETS_DIR) + "highscore.txt");
     if (file.is_open()) {
-        file << highScore_;
+        file << highScore_ << "\n" << highScoreHolderName_;
+    }
+}
+
+void Game::LoadControls() {
+    std::ifstream file(std::string(BC_ASSETS_DIR) + "controls.txt");
+    if (!file.is_open()) {
+        return; // primera vez / archivo borrado: se queda con los valores por defecto ya cargados
+    }
+    for (PlayerKeyBindings& bindings : playerBindings_) {
+        for (int& key : bindings.keys) {
+            if (!(file >> key)) {
+                return; // archivo incompleto/corrupto: no pisar el resto con ceros
+            }
+        }
+    }
+    for (PlayerGamepadBindings& bindings : playerGamepadBindings_) {
+        for (int& button : bindings.buttons) {
+            if (!(file >> button)) {
+                return;
+            }
+        }
+    }
+}
+
+void Game::SaveControls() {
+    std::ofstream file(std::string(BC_ASSETS_DIR) + "controls.txt");
+    if (!file.is_open()) {
+        return;
+    }
+    for (const PlayerKeyBindings& bindings : playerBindings_) {
+        for (int key : bindings.keys) {
+            file << key << "\n";
+        }
+    }
+    for (const PlayerGamepadBindings& bindings : playerGamepadBindings_) {
+        for (int button : bindings.buttons) {
+            file << button << "\n";
+        }
     }
 }
 
@@ -1281,6 +2048,77 @@ void Game::MaybeUpdateHighScore(int candidateScore, int ownerId) {
         highScoreHolderId_ = ownerId;
         SaveHighScore();
     }
+}
+
+void Game::TriggerGameOver() {
+    if (gameOver_) {
+        return; // ya estaba en curso (por ejemplo, aguila destruida y ultima vida perdida el mismo frame)
+    }
+    gameOver_ = true;
+    gameOverPhase_ = GameOverPhase::Rising;
+    gameOverTimer_ = 0.0;
+}
+
+void Game::TickGameOverSequence(double dt) {
+    if (gameOverPhase_ == GameOverPhase::Rising) {
+        gameOverTimer_ += dt;
+        if (gameOverTimer_ >= kGameOverRiseDuration) {
+            gameOverPhase_ = GameOverPhase::Holding;
+            gameOverTimer_ = 0.0;
+        }
+        return;
+    }
+    if (gameOverPhase_ == GameOverPhase::Holding) {
+        gameOverTimer_ += dt;
+        if (gameOverTimer_ >= kGameOverHoldDuration) {
+            FinishGameOverHolding();
+        }
+        return;
+    }
+    // GameOverPhase::NameEntry: nada que tickear por tiempo, es por input
+    // (ver ProcessGameOverInput).
+}
+
+void Game::FinishGameOverHolding() {
+    int bestOwnerId = -1;
+    int bestScore = -1;
+    const int scores[4] = {player1Score_, player2Score_, player3Score_, player4Score_};
+    const bool active[4] = {player1Active_, player2Active_, player3Active_, player4Active_};
+    for (int i = 0; i < 4; ++i) {
+        if (active[i] && scores[i] > bestScore) {
+            bestScore = scores[i];
+            bestOwnerId = i;
+        }
+    }
+
+    // Record nuevo = el mejor puntaje de ESTA partida supera lo que habia
+    // ANTES de que arrancara (ver matchStartHighScore_), no highScore_ (que
+    // ya puede estar al dia con este mismo numero desde hace rato, ver
+    // MaybeUpdateHighScore/AwardScoreAt) — asi solo se pide nombre una vez,
+    // al final, sin importar cuando exactamente se supero el record.
+    if (bestOwnerId != -1 && bestScore > matchStartHighScore_) {
+        gameOverWinnerOwnerId_ = bestOwnerId;
+        gameOverWinnerScore_ = bestScore;
+        gameOverNameEntry_.clear();
+        gameOverPhase_ = GameOverPhase::NameEntry;
+    } else {
+        FinishGameOverSequence();
+    }
+}
+
+void Game::ConfirmGameOverNameEntry() {
+    // highScore_ ya esta al dia (MaybeUpdateHighScore lo actualizo en
+    // caliente durante la partida apenas alguien lo supero); lo unico que
+    // falta persistir es el nombre.
+    highScoreHolderName_ = gameOverNameEntry_;
+    SaveHighScore();
+    FinishGameOverSequence();
+}
+
+void Game::FinishGameOverSequence() {
+    gameOverPhase_ = GameOverPhase::None;
+    appState_ = AppState::Menu;
+    menuScreen_ = MenuScreen::Main;
 }
 
 void Game::FreezeAllEnemies(double duration) {
@@ -1430,6 +2268,7 @@ void Game::SpawnInitialWaveForLevel() {
 void Game::BeginLevelTransition() {
     levelTransitionPhase_ = LevelTransitionPhase::ShowingText;
     levelTransitionTimer_ = kLevelTransitionTextDuration;
+    PlaySound(stageStartSound_);
 }
 
 void Game::TickEnemySpawning(double dt) {
@@ -1530,11 +2369,37 @@ void Game::BeginScoreTally() {
     scoreTallyLevelShown_ = currentLevel_;
     scoreTallyAnim_ = {};
     scoreTallyBonusAwarded_ = {};
+    scoreTallyBonusRevealTimer_ = 0.0;
+    scoreTallyBonusRevealed_ = false;
+    scoreTallySlot_ = 0;
 }
 
 void Game::TickScoreTally(double dt) {
     if (scoreTallyPhase_ == ScoreTallyPhase::Holding) {
         scoreTallyTimer_ -= dt;
+        // Pedido explicitamente: el bono (si hay alguno pendiente, ver
+        // allRowsDone mas abajo) recien se suma al puntaje real y se
+        // muestra en pantalla despues de este segundo extra de espera
+        // DENTRO de Holding, no apenas termina el conteo.
+        if (!scoreTallyBonusRevealed_ && scoreTallyBonusRevealTimer_ > 0.0) {
+            scoreTallyBonusRevealTimer_ -= dt;
+            if (scoreTallyBonusRevealTimer_ <= 0.0) {
+                scoreTallyBonusRevealed_ = true;
+                int* scores[4] = {&player1Score_, &player2Score_, &player3Score_, &player4Score_};
+                bool awardedAny = false;
+                for (int i = 0; i < 4; ++i) {
+                    if (scoreTallyBonusAwarded_[i]) {
+                        *scores[i] += kScoreTallyClearBonus;
+                        MaybeUpdateHighScore(*scores[i], i);
+                        CheckExtraLifeByScore(i, *scores[i]);
+                        awardedAny = true;
+                    }
+                }
+                if (awardedAny) {
+                    PlaySound(scoreBonusSound_);
+                }
+            }
+        }
         if (scoreTallyTimer_ <= 0.0) {
             scoreTallyPhase_ = ScoreTallyPhase::None;
             AdvanceToNextLevel();
@@ -1542,56 +2407,80 @@ void Game::TickScoreTally(double dt) {
         return;
     }
 
-    // Counting: cada jugador activo cuenta su propia fila en paralelo (ver
-    // ScoreTallyRowAnim) — un slot de tipo de enemigo a la vez, revelando el
-    // icono y contando de 0 hasta lo que mato de ese tipo, con una pausa
-    // antes de pasar al siguiente; al llegar al slot 4 esa fila ya termino
-    // (se ve TOTAL). Cuando todas las filas activas llegaron ahi, pasa a
-    // Holding (pausa final antes de avanzar de nivel).
+    // Counting: TODOS los jugadores activos cuentan el MISMO slot de tipo de
+    // enemigo a la vez (pedido explicitamente, ver scoreTallySlot_) — cada
+    // uno a su propio ritmo segun cuanto mato de ese tipo, pero el que
+    // termina antes (mato menos de ese tipo) simplemente espera: recien
+    // cuando TODOS los activos terminaron de contar este slot (incluida la
+    // pausa de kScoreTallyRowPause) se avanza al siguiente, para todos
+    // juntos. Al llegar al slot 4 ya se ve TOTAL en cada fila; cuando
+    // scoreTallySlot_ llega ahi, pasa a Holding (pausa final antes de
+    // avanzar de nivel).
     const bool active[4] = {player1Active_, player2Active_, player3Active_, player4Active_};
-    bool allRowsDone = true;
+    bool allRowsDone = (scoreTallySlot_ >= 4);
+    bool allActiveDoneWithSlot = true;
     for (int i = 0; i < 4; ++i) {
         if (!active[i]) {
             continue;
         }
         ScoreTallyRowAnim& anim = scoreTallyAnim_[i];
-        if (anim.currentSlot >= 4) {
-            continue;
+        anim.currentSlot = scoreTallySlot_; // reflejado nada mas, ver ScoreTallyRowAnim
+        if (scoreTallySlot_ >= 4) {
+            continue; // esta fila ya esta en TOTAL, no hay nada que tickear
         }
-        allRowsDone = false;
-        const int target = playerLevelStats_[i].kills[anim.currentSlot];
+        const int target = playerLevelStats_[i].kills[scoreTallySlot_];
         anim.timer += dt;
         if (anim.currentCount < target) {
+            allActiveDoneWithSlot = false;
             if (anim.timer >= kScoreTallyCountInterval) {
                 anim.timer -= kScoreTallyCountInterval;
                 ++anim.currentCount;
+                PlaySound(scoreTickSound_);
             }
-        } else if (anim.timer >= kScoreTallyRowPause) {
-            anim.timer = 0.0;
-            anim.currentCount = 0;
-            ++anim.currentSlot;
+        } else if (anim.timer < kScoreTallyRowPause) {
+            allActiveDoneWithSlot = false; // ya llego a su numero, pero todavia le falta la pausa
         }
+    }
+
+    if (scoreTallySlot_ < 4 && allActiveDoneWithSlot) {
+        ++scoreTallySlot_;
+        for (int i = 0; i < 4; ++i) {
+            scoreTallyAnim_[i].currentCount = 0;
+            scoreTallyAnim_[i].timer = 0.0;
+            // Bug corregido: sin esto, currentSlot se quedaba pisado con el
+            // valor VIEJO hasta la vuelta de bucle siguiente — pero si este
+            // era el ultimo slot, la fase pasaba a Holding en este mismo
+            // llamado y esa vuelta siguiente nunca llegaba, dejando
+            // currentSlot trabado en 3 para siempre (nunca >= 4): ni TOTAL
+            // ni el bono llegaban a dibujarse, y el numero del ultimo tipo
+            // se veia resetear a 0 sin explicacion (currentCount ya en 0,
+            // pero currentSlot todavia en el slot viejo).
+            scoreTallyAnim_[i].currentSlot = scoreTallySlot_;
+        }
+        allRowsDone = (scoreTallySlot_ >= 4);
     }
 
     if (allRowsDone) {
         // Bono de fin de nivel (pedido explicito): el/los jugador(es) con
-        // mayor scoreGained este nivel (empate incluido) reciben el bono,
-        // sumado ya a su puntaje real; el TOTAL ya contado en pantalla
-        // (playerLevelStats_.scoreGained) no se toca, el bono se dibuja
-        // aparte (ver RenderScoreTally).
-        int* scores[4] = {&player1Score_, &player2Score_, &player3Score_, &player4Score_};
-        int maxGained = -1;
-        for (int i = 0; i < 4; ++i) {
-            if (active[i]) {
-                maxGained = std::max(maxGained, playerLevelStats_[i].scoreGained);
+        // mayor scoreGained este nivel (empate incluido) reciben el bono.
+        // Pedido explicitamente: solo tiene sentido con MAS de un jugador
+        // activo (con uno solo siempre "ganaria" el mismo, sin gracia); con
+        // uno solo queda todo en false y nunca se suma ni se muestra nada.
+        // El puntaje real y el sonido (ver scoreBonusSound_) recien se
+        // aplican 1s despues, al revelarse (ver el tick de Holding arriba);
+        // aca solo se decide QUIEN lo va a recibir.
+        const int activeCount = (active[0] ? 1 : 0) + (active[1] ? 1 : 0) + (active[2] ? 1 : 0) + (active[3] ? 1 : 0);
+        if (activeCount > 1) {
+            int maxGained = -1;
+            for (int i = 0; i < 4; ++i) {
+                if (active[i]) {
+                    maxGained = std::max(maxGained, playerLevelStats_[i].scoreGained);
+                }
             }
-        }
-        for (int i = 0; i < 4; ++i) {
-            scoreTallyBonusAwarded_[i] = active[i] && maxGained >= 0 && playerLevelStats_[i].scoreGained == maxGained;
-            if (scoreTallyBonusAwarded_[i]) {
-                *scores[i] += kScoreTallyClearBonus;
-                MaybeUpdateHighScore(*scores[i], i);
+            for (int i = 0; i < 4; ++i) {
+                scoreTallyBonusAwarded_[i] = active[i] && maxGained >= 0 && playerLevelStats_[i].scoreGained == maxGained;
             }
+            scoreTallyBonusRevealTimer_ = kScoreTallyBonusRevealDelay;
         }
 
         scoreTallyPhase_ = ScoreTallyPhase::Holding;
@@ -1731,6 +2620,7 @@ void Game::DestroyTank(Tank& tank) {
     // carga el disparo especial, a escala nativa (mas chica).
     specialExplosions_.Spawn(tank.X() + 0.5f, tank.Y() + 0.5f, /*nativeScale=*/true);
     tank.ResetWeaponLevel();
+    PlaySound(tankDeathSound_);
 }
 
 bool Game::ApplyExplosionSelfDamage(Tank& tank, int ownerId) {
@@ -1754,32 +2644,95 @@ bool Game::ApplyExplosionSelfDamage(Tank& tank, int ownerId) {
         // directHit == true ya esta garantizado dentro del radio: es el
         // punto exacto donde el especial choco contra este tanque.
 
-        const bool wasShielded = tank.IsShielded();
-        if (wasShielded) {
-            // El escudo absorbe la explosion: se pierde el escudo, baja 1
-            // nivel (2 sin escudo, salvo el choque directo en nivel 4 de
-            // abajo) y queda paralizado 5s.
-            tank.ActivateShield(0.0);
-            tank.Freeze(kFriendlyFireParalyzeDuration);
-        }
-
-        if (directHit && !wasShielded && tank.WeaponLevel() == 4) {
-            // Choque directo del especial contra un nivel 4 sin escudo:
-            // -3 niveles y paralizado 5s (mas fuerte que el dano generico
-            // por radio).
-            tank.ApplyWeaponLevelPenalty(3);
-            tank.Freeze(kFriendlyFireParalyzeDuration);
-            continue;
-        }
-
-        if (tank.WeaponLevel() <= 1) {
-            tank.ResetWeaponLevel();
-            destroyed = true;
+        // Mismo sistema de potencia/salud que el resto (ver ResolveTankHit),
+        // con la potencia de explosion del especial (kSpecialExplosionPower):
+        // el escudo la absorbe entera si le alcanza la salud; si no hay
+        // escudo, se le resta directo al nivel actual. No se llama a
+        // ResolveTankHit/DestroyTank aca para no duplicar la animacion de
+        // explosion (ya esta la grande del especial en este mismo punto).
+        if (tank.IsShielded()) {
+            tank.AbsorbShieldHit(kSpecialExplosionPower);
         } else {
-            tank.ApplyWeaponLevelPenalty(wasShielded ? 1 : 2);
+            const int currentHealth = tank.WeaponLevel();
+            const int dealt = std::min(kSpecialExplosionPower, currentHealth);
+            if (dealt >= currentHealth) {
+                tank.ResetWeaponLevel();
+                destroyed = true;
+                PlaySound(tankDeathSound_);
+            } else {
+                tank.ApplyWeaponLevelPenalty(dealt);
+                PlaySound(hitNonLethalSound_);
+            }
         }
+        tank.Freeze(kFriendlyFireParalyzeDuration);
     }
     return destroyed;
+}
+
+// Un enemigo Basico/Rapido/Blindado sin escudo muere directo si la bala lo
+// toca (ver SpecialDirectKillEvent mas abajo, en Update): la bala sigue de
+// largo, no explota. Esta funcion es para cuando SI explota en otro lado (un
+// bloque, una pared, el Power, o un tanque/enemigo con escudo, ver la
+// construccion de "tanks" en Update): esos mismos 3 tipos tambien mueren si
+// quedan dentro del radio de esa explosion. Power resiste un impacto
+// directo (weaponLevel=4 en la lista de "tanks" lo hace explotar siempre),
+// pero tiene HP real (ver Enemy::hp): la explosion no lo mata de un saque
+// salvo que ya estuviera en kSpecialExplosionPowerWeakenHp.
+void Game::ApplySpecialExplosionsToEnemies() {
+    for (const SpecialExplosionEvent& event : specialExplosionEvents_) {
+        auto withinBlast = [&](const Tank& tank, int ownerId) {
+            if (event.directHitOwnerId == ownerId) {
+                return true; // el punto exacto donde exploto: ya esta garantizado adentro
+            }
+            const float dx = (tank.X() + 0.5f) - event.x;
+            const float dy = (tank.Y() + 0.5f) - event.y;
+            const float hitRadius = event.radius + 0.5f; // + medio tanque de margen, mismo criterio que ApplyExplosionSelfDamage
+            return dx * dx + dy * dy <= hitRadius * hitRadius;
+        };
+
+        for (Enemy& enemy : enemies_.Enemies()) {
+            if (enemy.alive && withinBlast(enemy.tank, enemy.ownerId)) {
+                specialExplosions_.Spawn(enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, /*nativeScale=*/true);
+                enemy.alive = false;
+                PlaySound(tankDeathSound_);
+                ++enemiesKilledThisLevel_;
+                AwardScoreAt(event.ownerId, enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, kScoreBasicKill);
+            }
+        }
+        for (Enemy& enemy : fastEnemies_.Enemies()) {
+            if (enemy.alive && withinBlast(enemy.tank, enemy.ownerId)) {
+                specialExplosions_.Spawn(enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, /*nativeScale=*/true);
+                enemy.alive = false;
+                PlaySound(tankDeathSound_);
+                ++enemiesKilledThisLevel_;
+                AwardScoreAt(event.ownerId, enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, kScoreFastKill);
+            }
+        }
+        for (Enemy& enemy : armorEnemies_.Enemies()) {
+            if (enemy.alive && withinBlast(enemy.tank, enemy.ownerId)) {
+                specialExplosions_.Spawn(enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, /*nativeScale=*/true);
+                enemy.alive = false;
+                PlaySound(tankDeathSound_);
+                ++enemiesKilledThisLevel_;
+                AwardScoreAt(event.ownerId, enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, kScoreArmorKill);
+            }
+        }
+        for (Enemy& enemy : powerEnemies_.Enemies()) {
+            if (!enemy.alive || !withinBlast(enemy.tank, enemy.ownerId)) {
+                continue;
+            }
+            if (enemy.hp <= kSpecialExplosionPowerWeakenHp) {
+                specialExplosions_.Spawn(enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, /*nativeScale=*/true);
+                enemy.alive = false;
+                PlaySound(tankDeathSound_);
+                ++enemiesKilledThisLevel_;
+                AwardScoreAt(event.ownerId, enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, kScorePowerKill);
+            } else {
+                enemy.hp = kSpecialExplosionPowerWeakenHp;
+                PlaySound(hitNonLethalSound_);
+            }
+        }
+    }
 }
 
 bool Game::ApplyFriendlyFire(Tank& tank, int ownerId) {
@@ -1792,76 +2745,68 @@ bool Game::ApplyFriendlyFire(Tank& tank, int ownerId) {
 
     float left = 0.0f, right = 0.0f, top = 0.0f, bottom = 0.0f;
     tank.GetBounds(left, right, top, bottom);
-    std::vector<int> shooterLevels;
-    if (!bullets_.KillBulletsHittingBox(ownerId, left, right, top, bottom, bulletImpacts_, shooterLevels)) {
-        return false;
-    }
 
     if (friendlyFireMode_ == FriendlyFireMode::Paralyze) {
-        // El escudo bloquea el golpe por completo: no paraliza y no se pierde.
-        if (!tank.IsShielded()) {
-            tank.Freeze(kFriendlyFireParalyzeDuration);
-        }
+        // No es un modo de dano de verdad (no hay potencia/salud de por
+        // medio): cualquier bala que toque se destruye entera ahi mismo
+        // (nunca atraviesa) y, si no hay escudo, paraliza; el escudo bloquea
+        // el golpe por completo, no se pierde.
+        auto resolve = [&](int /*weaponLevel*/, bool /*isSpecial*/) {
+            if (!tank.IsShielded()) {
+                tank.Freeze(kFriendlyFireParalyzeDuration);
+            }
+            return 999; // mas que la salud maxima posible de cualquier bala: siempre la destruye entera, nunca atraviesa
+        };
+        bullets_.KillBulletsHittingBox(ownerId, left, right, top, bottom, bulletImpacts_, resolve);
         return false;
     }
 
-    // Damage (nivel 2): cada bala que impacto este frame se procesa en
-    // orden; si alguna destruye al tanque, no tiene sentido seguir.
-    for (int shooterLevel : shooterLevels) {
-        if (ProcessFriendlyFireDamageHit(tank, shooterLevel)) {
-            return true;
+    // Damage: cada bala que efectivamente toque se resuelve contra el
+    // tanque de verdad (ver ResolveTankHit); si alguna lo destruye, no
+    // hace falta seguir (aunque en la practica solo puede tocar una vez
+    // por cuadro salvo que se solapen 2 balas exactamente).
+    bool destroyed = false;
+    auto resolve = [&](int weaponLevel, bool isSpecial) {
+        bool diedNow = false;
+        const int power = isSpecial ? kSpecialBulletPower : BulletPowerForLevel(weaponLevel);
+        const int dealt = ResolveTankHit(tank, power, diedNow);
+        if (diedNow) {
+            destroyed = true;
         }
-    }
-    return false;
+        return dealt;
+    };
+    bullets_.KillBulletsHittingBox(ownerId, left, right, top, bottom, bulletImpacts_, resolve);
+    return destroyed;
 }
 
-bool Game::ProcessFriendlyFireDamageHit(Tank& tank, int shooterWeaponLevel) {
-    if (shooterWeaponLevel == 4) {
-        // Nivel 4: atraviesa el escudo (se lo lleva puesto, sin dano extra
-        // ese golpe); sin escudo, pega directo y saca 2 niveles.
-        if (tank.IsShielded()) {
-            tank.ActivateShield(0.0);
-            return false;
-        }
-        if (tank.WeaponLevel() <= 2) {
-            DestroyTank(tank);
-            return true;
-        }
-        tank.ApplyWeaponLevelPenalty(2);
-        return false;
-    }
-
-    // Niveles 1-3: el escudo bloquea el golpe por completo.
+int Game::ResolveTankHit(Tank& tank, int power, bool& outDestroyed) {
+    outDestroyed = false;
     if (tank.IsShielded()) {
-        return false;
+        return tank.AbsorbShieldHit(power);
     }
-
-    if (tank.WeaponLevel() <= 1) {
-        // Ya esta en el nivel minimo: cualquier impacto sin escudo lo destruye.
+    const int currentHealth = tank.WeaponLevel();
+    const int dealt = std::min(power, currentHealth);
+    if (dealt >= currentHealth) {
         DestroyTank(tank);
-        return true;
+        outDestroyed = true;
+    } else {
+        tank.ApplyWeaponLevelPenalty(dealt);
+        PlaySound(hitNonLethalSound_);
     }
-
-    switch (shooterWeaponLevel) {
-        case 1:
-            tank.ApplyWeaponLevelPenalty(1);
-            break;
-        case 2:
-            tank.RegisterChipHit(); // -1 nivel recien al segundo golpe de este tipo
-            break;
-        case 3:
-            tank.ApplyWeaponLevelPenalty(1);
-            tank.Freeze(kFriendlyFireParalyzeDuration);
-            break;
-        default:
-            break;
-    }
-    return false;
+    return dealt;
 }
 
 void Game::Update(double fixedDt) {
     if (appState_ != AppState::Playing) {
         return; // en el menu no hay simulacion a paso fijo, solo se dibuja (ver RenderMenu)
+    }
+
+    // Menu de pausa (ver paused_): todo el juego queda congelado del todo
+    // mientras este abierto, ni siquiera se tickean animaciones/timers (a
+    // diferencia de la transicion de nivel o la pantalla de puntuacion, que
+    // tienen su propio temporizador corriendo).
+    if (paused_) {
+        return;
     }
 
     // Transicion de nivel ("NIVEL N" + telon, ver BeginLevelTransition):
@@ -1892,8 +2837,19 @@ void Game::Update(double fixedDt) {
         return;
     }
 
-    if (gameOver_) {
-        return; // el aguila fue destruida: se congela todo hasta reiniciar (ESC)
+    // Secuencia de fin de partida (ver GameOverPhase/TriggerGameOver): a
+    // diferencia de la transicion/pantalla de puntuacion de arriba, esto NO
+    // congela el juego entero — solo avanza su propia animacion. El freeze
+    // real es mas abajo (gameOver_ salta las 4 UpdatePlayer y todo lo que
+    // pueda matarlas/respawnearlas), asi enemigos/balas/spawns siguen
+    // andando detras del "GAME OVER" (pedido explicitamente). Una vez en
+    // NameEntry ya no hay "espectaculo" que mostrar: recien ahi se congela
+    // todo de verdad.
+    if (gameOverPhase_ != GameOverPhase::None) {
+        TickGameOverSequence(fixedDt);
+        if (gameOverPhase_ == GameOverPhase::NameEntry) {
+            return;
+        }
     }
 
     if (screenShakeTimer_ > 0.0) {
@@ -1901,10 +2857,14 @@ void Game::Update(double fixedDt) {
     }
     TickBaseFortification(fixedDt);
 
-    if (player1Active_) UpdatePlayer(player1_, input1_, player1Spawn_, kPlayer1Id, ActiveOthers(kPlayer1Id), fixedDt);
-    if (player2Active_) UpdatePlayer(player2_, input2_, player2Spawn_, kPlayer2Id, ActiveOthers(kPlayer2Id), fixedDt);
-    if (player3Active_) UpdatePlayer(player3_, input3_, player3Spawn_, kPlayer3Id, ActiveOthers(kPlayer3Id), fixedDt);
-    if (player4Active_) UpdatePlayer(player4_, input4_, player4Spawn_, kPlayer4Id, ActiveOthers(kPlayer4Id), fixedDt);
+    // Jugadores congelados durante la secuencia de fin de partida (ver
+    // gameOver_ arriba): no se mueven, no disparan, no agarran power-ups.
+    if (!gameOver_) {
+        if (player1Active_) UpdatePlayer(player1_, input1_, player1Spawn_, kPlayer1Id, ActiveOthers(kPlayer1Id), fixedDt);
+        if (player2Active_) UpdatePlayer(player2_, input2_, player2Spawn_, kPlayer2Id, ActiveOthers(kPlayer2Id), fixedDt);
+        if (player3Active_) UpdatePlayer(player3_, input3_, player3Spawn_, kPlayer3Id, ActiveOthers(kPlayer3Id), fixedDt);
+        if (player4Active_) UpdatePlayer(player4_, input4_, player4Spawn_, kPlayer4Id, ActiveOthers(kPlayer4Id), fixedDt);
+    }
 
     TickEnemySpawning(fixedDt);
     const int basicAliveBeforeCombat = CountAliveInList(enemies_.Enemies());
@@ -1961,10 +2921,10 @@ void Game::Update(double fixedDt) {
     std::vector<ScoreEvent> fastScoreEvents;
     std::vector<ScoreEvent> armorScoreEvents;
     std::vector<ScoreEvent> powerScoreEvents;
-    enemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), otherThanBasic, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_), basicScoreEvents);
-    fastEnemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), otherThanFast, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_), fastScoreEvents);
-    armorEnemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), otherThanArmor, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_), armorScoreEvents);
-    powerEnemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), otherThanPower, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_), powerScoreEvents);
+    enemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), otherThanBasic, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_), basicScoreEvents, tankDeathSound_);
+    fastEnemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), otherThanFast, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_), fastScoreEvents, tankDeathSound_);
+    armorEnemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), otherThanArmor, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_), armorScoreEvents, tankDeathSound_);
+    powerEnemies_.Update(fixedDt, map_, bullets_, bulletImpacts_, specialExplosions_, ActivePlayerTanks(), otherThanPower, static_cast<float>(basePositionX_), static_cast<float>(basePositionY_), powerScoreEvents, tankDeathSound_, hitNonLethalSound_);
 
     // Balas normales matando enemigos (ver los 4 Update() de arriba): la
     // diferencia de vivos antes/despues de la combinacion la cuenta como
@@ -2008,12 +2968,10 @@ void Game::Update(double fixedDt) {
         state.weaponLevel = ref.tank->WeaponLevel();
         tanks.push_back(state);
     }
-    // El "Power" (enemigo 4) es el unico enemigo que entra a esta lista: el
-    // resto no es un blanco valido del especial (la bala los atraviesa
-    // sin hacerles nada, ver BulletSystem::Update). weaponLevel=4 fuerza la
-    // rama de "explota" en vez de "atraviesa" (esa rama solo pasa de largo
-    // si weaponLevel != 4), asi el especial revienta contra el en vez de
-    // seguir de largo como con los demas.
+    // El "Power" (enemigo 4) siempre entra a esta lista: weaponLevel=4
+    // fuerza la rama de "explota" en vez de "atraviesa" (esa rama solo
+    // pasa de largo si weaponLevel != 4), asi el especial revienta contra
+    // el en vez de seguir de largo como con los demas.
     for (Enemy& enemy : powerEnemies_.Enemies()) {
         if (!enemy.alive) {
             continue;
@@ -2026,76 +2984,151 @@ void Game::Update(double fixedDt) {
         tanks.push_back(state);
     }
 
-    bullets_.Update(fixedDt, map_, bulletImpacts_, specialExplosions_, specialExplosionEvents_, tanks, specialDirectKillEvents_);
-
-    // Choque directo del especial contra el "Power": lo destruye (a
-    // diferencia de un jugador, sin niveles/escudo que resolver, muere
-    // directo).
-    for (Enemy& enemy : powerEnemies_.Enemies()) {
-        if (!enemy.alive) {
-            continue;
+    // Basico/Rapido/Blindado (enemigo 1/2/3), todos los vivos: sin escudo,
+    // el impacto directo del especial los destruye y la bala sigue de largo
+    // sin explotar (mismo criterio que un jugador nivel 1-3 sin escudo, ver
+    // SpecialDirectKillEvent/BulletSystem::Update); con escudo, en cambio,
+    // frenan/explotan la bala como cualquier otro blanco solido. weaponLevel
+    // se deja en 1 (nunca 4) para que la rama de choque directo pueda
+    // aplicar cuando corresponda; el escudo real decide cual de las 2 ramas
+    // toma (ver BulletSystem::Update).
+    for (Enemy& enemy : enemies_.Enemies()) {
+        if (enemy.alive) {
+            TankCombatState state;
+            state.ownerId = enemy.ownerId;
+            enemy.tank.GetBounds(state.left, state.right, state.top, state.bottom);
+            state.shielded = enemy.tank.IsShielded();
+            state.weaponLevel = 1;
+            tanks.push_back(state);
         }
-        for (const SpecialExplosionEvent& event : specialExplosionEvents_) {
-            if (event.directHitOwnerId == enemy.ownerId) {
-                specialExplosions_.Spawn(enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, /*nativeScale=*/true);
-                enemy.alive = false;
-                ++enemiesKilledThisLevel_;
-                AwardScoreAt(event.ownerId, enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, kScorePowerKill);
-                break;
-            }
+    }
+    for (Enemy& enemy : fastEnemies_.Enemies()) {
+        if (enemy.alive) {
+            TankCombatState state;
+            state.ownerId = enemy.ownerId;
+            enemy.tank.GetBounds(state.left, state.right, state.top, state.bottom);
+            state.shielded = enemy.tank.IsShielded();
+            state.weaponLevel = 1;
+            tanks.push_back(state);
+        }
+    }
+    for (Enemy& enemy : armorEnemies_.Enemies()) {
+        if (enemy.alive) {
+            TankCombatState state;
+            state.ownerId = enemy.ownerId;
+            enemy.tank.GetBounds(state.left, state.right, state.top, state.bottom);
+            state.shielded = enemy.tank.IsShielded();
+            state.weaponLevel = 1;
+            tanks.push_back(state);
         }
     }
 
+    bullets_.Update(fixedDt, map_, bulletImpacts_, specialExplosions_, specialExplosionEvents_, tanks, specialDirectKillEvents_, brickBreakSound_, blockResistSound_, bigExplosionSound_);
+
+    // Choque directo del especial contra un enemigo Basico/Rapido/Blindado
+    // sin escudo (pedido explicitamente): se destruye ahi mismo y la bala
+    // seguia de largo (ver SpecialDirectKillEvent/BulletSystem::Update), asi
+    // que no paso por ninguna explosion. No depende de gameOver_: los
+    // enemigos siguen reaccionando normalmente aunque los jugadores esten
+    // congelados (ver el freeze de arriba).
+    for (const SpecialDirectKillEvent& kill : specialDirectKillEvents_) {
+        auto killEnemyIfMatch = [&](Enemy& enemy, int scorePoints) {
+            if (enemy.alive && enemy.ownerId == kill.targetOwnerId) {
+                specialExplosions_.Spawn(enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, /*nativeScale=*/true);
+                enemy.alive = false;
+                PlaySound(tankDeathSound_);
+                ++enemiesKilledThisLevel_;
+                AwardScoreAt(kill.shooterOwnerId, enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, scorePoints);
+                return true;
+            }
+            return false;
+        };
+        for (Enemy& enemy : enemies_.Enemies()) {
+            if (killEnemyIfMatch(enemy, kScoreBasicKill)) break;
+        }
+        for (Enemy& enemy : fastEnemies_.Enemies()) {
+            if (killEnemyIfMatch(enemy, kScoreFastKill)) break;
+        }
+        for (Enemy& enemy : armorEnemies_.Enemies()) {
+            if (killEnemyIfMatch(enemy, kScoreArmorKill)) break;
+        }
+    }
+
+    // Efecto de la explosion del disparo especial sobre los 4 tipos de
+    // enemigo (ver ApplySpecialExplosionsToEnemies): Basico/Rapido/Blindado
+    // mueren de un saque si la alcanza, Power resiste (lo deja a un
+    // impacto de morir, o lo remata si ya estaba asi).
+    ApplySpecialExplosionsToEnemies();
+
     // El aguila (TileType::Base) se destruye de un impacto (ver BulletSystem
     // y TriggerSpecialExplosion): si la celda dejo de ser Base, se acabo la
-    // partida.
-    if (basePositionX_ >= 0 && map_.InBounds(basePositionX_, basePositionY_) &&
+    // partida (ver TriggerGameOver/GameOverPhase).
+    if (!gameOver_ && basePositionX_ >= 0 && map_.InBounds(basePositionX_, basePositionY_) &&
         map_.At(basePositionX_, basePositionY_).type != TileType::Base) {
-        gameOver_ = true;
+        TriggerGameOver();
     }
 
     bulletImpacts_.Update(fixedDt);
     scorePopups_.Update(fixedDt);
     specialExplosions_.Update(fixedDt);
-    powerUps_.Update(fixedDt, map_, ActiveTankBounds());
-
-    for (const ActivePlayerRef& ref : activePlayers) {
-        if (!ref.active) {
-            continue;
-        }
-        if (ApplyFriendlyFire(*ref.tank, ref.ownerId)) {
-            HandlePlayerDeath(*ref.tank, ref.ownerId);
-        }
+    if (powerUps_.Update(fixedDt, map_, ActiveTankBounds())) {
+        PlaySound(itemAppearSound_);
     }
 
-    // Balas enemigas contra jugadores: siempre hacen dano (no depende del
-    // modo de fuego amigo, que es solo entre jugadores). Mismo efecto que
-    // recibir un disparo nivel 1 de otro jugador (ver ProcessFriendlyFireDamageHit).
-    for (const ActivePlayerRef& ref : activePlayers) {
-        if (!ref.active || ref.tank->IsEliminated()) {
-            continue;
-        }
-        float left = 0.0f, right = 0.0f, top = 0.0f, bottom = 0.0f;
-        ref.tank->GetBounds(left, right, top, bottom);
-        if (bullets_.KillEnemyBulletsHittingBox(left, right, top, bottom, bulletImpacts_)) {
-            if (ProcessFriendlyFireDamageHit(*ref.tank, 1)) {
-                HandlePlayerDeath(*ref.tank, ref.ownerId);
-            }
-        }
-    }
-
-    // Choque directo del especial contra un tanque nivel 1-3 sin escudo: se
-    // destruye y la bala seguia de largo (ver BulletSystem::Update), asi que
-    // no paso por ninguna explosion.
-    for (const SpecialDirectKillEvent& kill : specialDirectKillEvents_) {
+    // Todo lo que sigue puede matar/respawnear a un jugador: se salta
+    // entero durante la secuencia de fin de partida (ver gameOver_), para
+    // que los jugadores queden realmente congelados (pedido explicitamente)
+    // mientras enemigos/balas/power-ups de arriba y abajo siguen andando.
+    if (!gameOver_) {
         for (const ActivePlayerRef& ref : activePlayers) {
-            if (ref.active && kill.targetOwnerId == ref.ownerId) {
-                DestroyTank(*ref.tank);
+            if (!ref.active) {
+                continue;
+            }
+            if (ApplyFriendlyFire(*ref.tank, ref.ownerId)) {
                 HandlePlayerDeath(*ref.tank, ref.ownerId);
-                break;
             }
         }
-    }
+
+        // Balas enemigas contra jugadores: siempre hacen dano (no depende
+        // del modo de fuego amigo, que es solo entre jugadores), con la
+        // potencia real del tipo de enemigo que disparo (ver ResolveTankHit
+        // y kBulletPowerByLevel — antes se procesaba siempre como si fuera
+        // potencia 1 sin importar el tipo, ya corregido).
+        for (const ActivePlayerRef& ref : activePlayers) {
+            if (!ref.active || ref.tank->IsEliminated()) {
+                continue;
+            }
+            float left = 0.0f, right = 0.0f, top = 0.0f, bottom = 0.0f;
+            ref.tank->GetBounds(left, right, top, bottom);
+            bool destroyed = false;
+            auto resolve = [&](int weaponLevel, bool isSpecial) {
+                bool diedNow = false;
+                const int power = isSpecial ? kSpecialBulletPower : BulletPowerForLevel(weaponLevel);
+                const int dealt = ResolveTankHit(*ref.tank, power, diedNow);
+                if (diedNow) {
+                    destroyed = true;
+                }
+                return dealt;
+            };
+            bullets_.KillEnemyBulletsHittingBox(left, right, top, bottom, bulletImpacts_, resolve);
+            if (destroyed) {
+                HandlePlayerDeath(*ref.tank, ref.ownerId);
+            }
+        }
+
+        // Choque directo del especial contra un tanque nivel 1-3 sin
+        // escudo: se destruye y la bala seguia de largo (ver
+        // BulletSystem::Update), asi que no paso por ninguna explosion.
+        for (const SpecialDirectKillEvent& kill : specialDirectKillEvents_) {
+            for (const ActivePlayerRef& ref : activePlayers) {
+                if (ref.active && kill.targetOwnerId == ref.ownerId) {
+                    DestroyTank(*ref.tank);
+                    HandlePlayerDeath(*ref.tank, ref.ownerId);
+                    break;
+                }
+            }
+        }
+    } // !gameOver_
 
     if (!specialExplosionEvents_.empty()) {
         // Efecto global, no depende de la distancia (a diferencia del dano):
@@ -2117,12 +3150,27 @@ void Game::Update(double fixedDt) {
     // La explosion especial daña a quien alcance, incluido el propio tanque
     // que la disparo (seccion pedida explicitamente: "amigo-enemigo" a
     // proposito, es el riesgo de usar el disparo especial).
-    for (const ActivePlayerRef& ref : activePlayers) {
-        if (!ref.active) {
-            continue;
+    if (!gameOver_) {
+        for (const ActivePlayerRef& ref : activePlayers) {
+            if (!ref.active) {
+                continue;
+            }
+            if (ApplyExplosionSelfDamage(*ref.tank, ref.ownerId)) {
+                HandlePlayerDeath(*ref.tank, ref.ownerId);
+            }
         }
-        if (ApplyExplosionSelfDamage(*ref.tank, ref.ownerId)) {
-            HandlePlayerDeath(*ref.tank, ref.ownerId);
+
+        // "Todos los jugadores sin vidas" (pedido explicitamente): si CADA
+        // jugador activo quedo eliminado (sin vidas) tras lo de arriba, se
+        // acabo la partida igual que con el aguila destruida.
+        const bool anyActive = player1Active_ || player2Active_ || player3Active_ || player4Active_;
+        const bool allEliminated =
+            (!player1Active_ || player1_.IsEliminated()) &&
+            (!player2Active_ || player2_.IsEliminated()) &&
+            (!player3Active_ || player3_.IsEliminated()) &&
+            (!player4Active_ || player4_.IsEliminated());
+        if (anyActive && allEliminated) {
+            TriggerGameOver();
         }
     }
 
@@ -2130,7 +3178,9 @@ void Game::Update(double fixedDt) {
     // cualquier solape de hitboxes que haya quedado (ver ResolveTankOverlaps).
     ResolveTankOverlaps();
 
-    CheckLevelCompletion(fixedDt);
+    if (!gameOver_) {
+        CheckLevelCompletion(fixedDt);
+    }
 }
 
 void Game::RenderTank(const Tank& tank, const SpawnFlash& spawn, const TankSpriteSet& sprites, const MapViewport& viewport) {
@@ -2262,7 +3312,7 @@ void Game::RenderEnemy(const Enemy& enemy, const EnemySprites& sprites, const Ma
     }
 }
 
-void Game::RenderPlayerHud(const Tank& tank, const char* label, int centerX, int y, int score) {
+void Game::RenderPlayerHud(const Tank& tank, const char* label, int centerX, int y, int score, Color playerColor) {
     // Parpadeo de texto (calor al 100% / municion especial lista): mismo
     // criterio de "visible la mitad del tiempo" que ya se usa para el tanque
     // paralizado (ver kFrozenBlinkInterval), pero un poco mas lento porque es
@@ -2289,13 +3339,13 @@ void Game::RenderPlayerHud(const Tank& tank, const char* label, int centerX, int
     const int headerWidth = labelWidth + lifeIconDisplayWidth + numberWidth;
     const int headerX = centerX - headerWidth / 2;
 
-    DrawText(labelText, headerX, y, 20, RAYWHITE);
+    DrawText(labelText, headerX, y, 20, playerColor);
     const int lifeIconX = headerX + labelWidth;
     const int lifeIconY = y + (20 - kLifeIconDisplayHeight) / 2;
     const Rectangle lifeIconSrc{0.0f, 0.0f, static_cast<float>(hudLifeIconTexture_.width), static_cast<float>(hudLifeIconTexture_.height)};
     const Rectangle lifeIconDst{static_cast<float>(lifeIconX), static_cast<float>(lifeIconY), static_cast<float>(lifeIconDisplayWidth), static_cast<float>(kLifeIconDisplayHeight)};
     DrawTexturePro(hudLifeIconTexture_, lifeIconSrc, lifeIconDst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
-    DrawText(numberText, lifeIconX + lifeIconDisplayWidth, y, 20, RAYWHITE);
+    DrawText(numberText, lifeIconX + lifeIconDisplayWidth, y, 20, playerColor);
 
     constexpr int kHeatBarWidth = 160;
     constexpr int kHeatBarHeight = 14;
@@ -2314,7 +3364,7 @@ void Game::RenderPlayerHud(const Tank& tank, const char* label, int centerX, int
 
     // Porcentaje a la derecha de la barra; al llegar a sobrecalentamiento
     // (100%) se pone en rojo.
-    DrawText(percentText, barX + kHeatBarWidth + kBarTextGap, heatBarY - 2, 18, overheated ? RED : RAYWHITE);
+    DrawText(percentText, barX + kHeatBarWidth + kBarTextGap, heatBarY - 2, 18, overheated ? RED : playerColor);
 
     int nextY = heatBarY + kHeatBarHeight + 4;
 
@@ -2322,7 +3372,7 @@ void Game::RenderPlayerHud(const Tank& tank, const char* label, int centerX, int
     // (pedido explicitamente), en letra chica para no competir con el resto.
     constexpr int kScoreFontSize = 14;
     const char* scoreText = TextFormat("Puntaje: %d", score);
-    DrawText(scoreText, centerX - MeasureText(scoreText, kScoreFontSize) / 2, nextY, kScoreFontSize, RAYWHITE);
+    DrawText(scoreText, centerX - MeasureText(scoreText, kScoreFontSize) / 2, nextY, kScoreFontSize, playerColor);
     nextY += kLinePitch;
 
     if (overheated && textBlinkOn) {
@@ -2351,6 +3401,10 @@ void Game::Render(double /*interpolationAlpha*/) {
     windowWidth_ = GetScreenWidth();
     windowHeight_ = GetScreenHeight();
 
+    if (appState_ == AppState::CharacterSelect) {
+        RenderCharacterSelect();
+        return;
+    }
     if (appState_ != AppState::Playing) {
         RenderMenu();
         return;
@@ -2480,6 +3534,12 @@ void Game::Render(double /*interpolationAlpha*/) {
                 const Rectangle eagleSrc{0.0f, 0.0f, static_cast<float>(baseEagleTexture_.width), static_cast<float>(baseEagleTexture_.height)};
                 const Rectangle eagleDst{screenX, screenY, viewport.tileScreenSize, viewport.tileScreenSize};
                 DrawTexturePro(baseEagleTexture_, eagleSrc, eagleDst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+            } else if (cell.type == TileType::BaseDestroyed) {
+                // Aguila ya destruida (pedido explicitamente): se queda en
+                // este frame (Tanques.png) en vez de desaparecer.
+                const Rectangle eagleSrc{0.0f, 0.0f, static_cast<float>(baseEagleDestroyedTexture_.width), static_cast<float>(baseEagleDestroyedTexture_.height)};
+                const Rectangle eagleDst{screenX, screenY, viewport.tileScreenSize, viewport.tileScreenSize};
+                DrawTexturePro(baseEagleDestroyedTexture_, eagleSrc, eagleDst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
             } else if (cell.type != TileType::Trees) {
                 // El arbusto no se dibuja aca: es un bloque entero (no por
                 // unidad) que se pinta mas abajo, encima de tanques y balas,
@@ -2490,10 +3550,10 @@ void Game::Render(double /*interpolationAlpha*/) {
         }
     }
 
-    if (player1Active_) RenderTank(player1_, player1Spawn_, player1Sprites_, viewport);
-    if (player2Active_) RenderTank(player2_, player2Spawn_, player2Sprites_, viewport);
-    if (player3Active_) RenderTank(player3_, player3Spawn_, player3Sprites_, viewport);
-    if (player4Active_) RenderTank(player4_, player4Spawn_, player4Sprites_, viewport);
+    if (player1Active_) RenderTank(player1_, player1Spawn_, SpriteSetForColor(playerColorIndex_[0]), viewport);
+    if (player2Active_) RenderTank(player2_, player2Spawn_, SpriteSetForColor(playerColorIndex_[1]), viewport);
+    if (player3Active_) RenderTank(player3_, player3Spawn_, SpriteSetForColor(playerColorIndex_[2]), viewport);
+    if (player4Active_) RenderTank(player4_, player4Spawn_, SpriteSetForColor(playerColorIndex_[3]), viewport);
 
     for (const Enemy& enemy : enemies_.Enemies()) {
         RenderEnemy(enemy, enemySprites_, viewport);
@@ -2608,6 +3668,94 @@ void Game::Render(double /*interpolationAlpha*/) {
         }
     }
 
+    // Recuadros verdes de colision (boton de prueba H): un rectangulo por
+    // cada objeto vivo, usando exactamente el area que el juego considera
+    // colisionable (no el sprite), para depurar bugs de colision a simple
+    // vista.
+    if (showHitboxes_) {
+        auto DrawHitbox = [&](float left, float top, float right, float bottom) {
+            const int px = static_cast<int>(viewport.TileToScreenX(left));
+            const int py = static_cast<int>(viewport.TileToScreenY(top));
+            const int pw = static_cast<int>((right - left) * viewport.tileScreenSize);
+            const int ph = static_cast<int>((bottom - top) * viewport.tileScreenSize);
+            DrawRectangleLines(px, py, pw, ph, GREEN);
+        };
+
+        // Tanques de jugador: mismas dos condiciones de guarda que
+        // RenderTank (eliminado o todavia en el destello de spawn = sin
+        // colision real).
+        auto DrawTankHitbox = [&](const Tank& tank, const SpawnFlash& spawn) {
+            if (tank.IsEliminated() || spawn.IsActive()) return;
+            float l, r, t, b;
+            tank.GetBounds(l, r, t, b);
+            DrawHitbox(l, t, r, b);
+        };
+        if (player1Active_) DrawTankHitbox(player1_, player1Spawn_);
+        if (player2Active_) DrawTankHitbox(player2_, player2Spawn_);
+        if (player3Active_) DrawTankHitbox(player3_, player3Spawn_);
+        if (player4Active_) DrawTankHitbox(player4_, player4Spawn_);
+
+        // Tanques enemigos, en los 4 sistemas de IA.
+        auto DrawEnemyHitboxes = [&](const auto& system) {
+            for (const Enemy& enemy : system.Enemies()) {
+                if (!enemy.alive || enemy.spawn.IsActive()) continue;
+                float l, r, t, b;
+                enemy.tank.GetBounds(l, r, t, b);
+                DrawHitbox(l, t, r, b);
+            }
+        };
+        DrawEnemyHitboxes(enemies_);
+        DrawEnemyHitboxes(fastEnemies_);
+        DrawEnemyHitboxes(armorEnemies_);
+        DrawEnemyHitboxes(powerEnemies_);
+
+        // Balas: cuadrado de kBulletHitRadius alrededor del centro (mismo
+        // radio que usa BulletSystem para la anulacion bala-contra-bala).
+        constexpr float kDebugBulletHitRadius = 0.2f;
+        for (const Bullet& bullet : bullets_.Bullets()) {
+            DrawHitbox(bullet.x - kDebugBulletHitRadius, bullet.y - kDebugBulletHitRadius,
+                       bullet.x + kDebugBulletHitRadius, bullet.y + kDebugBulletHitRadius);
+        }
+
+        // Unidades minimas de ladrillo/acero vivas, y la base, recorriendo
+        // el mapa igual que el renderizado normal de terreno.
+        constexpr float kBrickUnitSize = 1.0f / kBrickGridSize;
+        constexpr float kSteelUnitSize = 1.0f / kSteelGridSize;
+        for (int y = 0; y < map_.Height(); ++y) {
+            for (int x = 0; x < map_.Width(); ++x) {
+                const Cell& cell = map_.At(x, y);
+                if (cell.type == TileType::Brick) {
+                    for (int row = 0; row < kBrickGridSize; ++row) {
+                        for (int col = 0; col < kBrickGridSize; ++col) {
+                            if (!cell.brickUnits[row * kBrickGridSize + col].alive) continue;
+                            const float ux = static_cast<float>(x) + col * kBrickUnitSize;
+                            const float uy = static_cast<float>(y) + row * kBrickUnitSize;
+                            DrawHitbox(ux, uy, ux + kBrickUnitSize, uy + kBrickUnitSize);
+                        }
+                    }
+                } else if (cell.type == TileType::Steel) {
+                    for (int row = 0; row < kSteelGridSize; ++row) {
+                        for (int col = 0; col < kSteelGridSize; ++col) {
+                            if (!cell.steelUnits[row * kSteelGridSize + col].alive) continue;
+                            const float ux = static_cast<float>(x) + col * kSteelUnitSize;
+                            const float uy = static_cast<float>(y) + row * kSteelUnitSize;
+                            DrawHitbox(ux, uy, ux + kSteelUnitSize, uy + kSteelUnitSize);
+                        }
+                    }
+                } else if (cell.type == TileType::Base) {
+                    DrawHitbox(static_cast<float>(x), static_cast<float>(y), static_cast<float>(x) + 1.0f, static_cast<float>(y) + 1.0f);
+                }
+            }
+        }
+
+        // Power-up activo (una celda completa).
+        if (powerUps_.Active().alive) {
+            const float px = powerUps_.Active().x;
+            const float py = powerUps_.Active().y;
+            DrawHitbox(px, py, px + 1.0f, py + 1.0f);
+        }
+    }
+
     EndMode2D();
 
     // Texto de UI (barra vertical + aviso de fuego amigo): dibujado fuera de
@@ -2653,10 +3801,10 @@ void Game::Render(double /*interpolationAlpha*/) {
     const int p3Y = p4Y - rowH;
     const int p2Y = p3Y - rowH;
     const int p1Y = p2Y - rowH;
-    if (player1Active_) RenderPlayerHud(player1_, "P1", panelCenterX, p1Y, player1Score_); else DrawText("P1 - Pulse iniciar", panelCenterX - MeasureText("P1 - Pulse iniciar", 20) / 2, p1Y, 20, RED);
-    if (player2Active_) RenderPlayerHud(player2_, "P2", panelCenterX, p2Y, player2Score_); else DrawText("P2 - Pulse iniciar", panelCenterX - MeasureText("P2 - Pulse iniciar", 20) / 2, p2Y, 20, RED);
-    if (player3Active_) RenderPlayerHud(player3_, "P3", panelCenterX, p3Y, player3Score_); else DrawText("P3 - Pulse iniciar", panelCenterX - MeasureText("P3 - Pulse iniciar", 20) / 2, p3Y, 20, RED);
-    if (player4Active_) RenderPlayerHud(player4_, "P4", panelCenterX, p4Y, player4Score_); else DrawText("P4 - Pulse iniciar", panelCenterX - MeasureText("P4 - Pulse iniciar", 20) / 2, p4Y, 20, RED);
+    if (player1Active_) RenderPlayerHud(player1_, "P1", panelCenterX, p1Y, player1Score_, HudColorForColor(playerColorIndex_[0])); else DrawText("P1 - Pulse iniciar", panelCenterX - MeasureText("P1 - Pulse iniciar", 20) / 2, p1Y, 20, RED);
+    if (player2Active_) RenderPlayerHud(player2_, "P2", panelCenterX, p2Y, player2Score_, HudColorForColor(playerColorIndex_[1])); else DrawText("P2 - Pulse iniciar", panelCenterX - MeasureText("P2 - Pulse iniciar", 20) / 2, p2Y, 20, RED);
+    if (player3Active_) RenderPlayerHud(player3_, "P3", panelCenterX, p3Y, player3Score_, HudColorForColor(playerColorIndex_[2])); else DrawText("P3 - Pulse iniciar", panelCenterX - MeasureText("P3 - Pulse iniciar", 20) / 2, p3Y, 20, RED);
+    if (player4Active_) RenderPlayerHud(player4_, "P4", panelCenterX, p4Y, player4Score_, HudColorForColor(playerColorIndex_[3])); else DrawText("P4 - Pulse iniciar", panelCenterX - MeasureText("P4 - Pulse iniciar", 20) / 2, p4Y, 20, RED);
     // Debug: contador de FPS y numero de boton del mando (ver
     // ApplyGamepadInput / lastGamepadButtonPressed_).
     if (kDebugFeaturesEnabled) {
@@ -2678,18 +3826,16 @@ void Game::Render(double /*interpolationAlpha*/) {
     const int friendlyFireTextX = leftBarW + (static_cast<int>(playAreaWidth) - MeasureText(friendlyFireText, 20)) / 2;
     DrawText(friendlyFireText, friendlyFireTextX, 10, 20, RAYWHITE);
 
-    // El aguila fue destruida: partida terminada (ver Update), congelado
-    // hasta reiniciar con ESC.
-    if (gameOver_) {
-        const char* gameOverText = "FIN DE LA PARTIDA - Presiona ESC para volver al menu";
-        const int gameOverFontSize = 28;
-        const int gameOverTextX = leftBarW + (static_cast<int>(playAreaWidth) - MeasureText(gameOverText, gameOverFontSize)) / 2;
-        const int gameOverTextY = windowHeight_ / 2 - gameOverFontSize / 2;
-        DrawRectangle(gameOverTextX - 12, gameOverTextY - 10, MeasureText(gameOverText, gameOverFontSize) + 24, gameOverFontSize + 20, Color{0, 0, 0, 200});
-        DrawText(gameOverText, gameOverTextX, gameOverTextY, gameOverFontSize, RED);
-    }
+    // Secuencia de fin de partida (ver GameOverPhase/RenderGameOverOverlay).
+    RenderGameOverOverlay();
 
     RenderLevelTransition();
+
+    // Menu de pausa (ver paused_): encima de todo lo de arriba, en el mismo
+    // frame (el juego frenado atras se sigue viendo, atenuado).
+    if (paused_) {
+        RenderPauseOverlay();
+    }
 
     EndDrawing();
 }
@@ -2813,9 +3959,10 @@ void Game::RenderScoreTally() {
             DrawText(totalText, static_cast<int>(x), static_cast<int>(rowY) + 4, 22, YELLOW);
 
             // Bono de fin de nivel (ver scoreTallyBonusAwarded_/TickScoreTally):
-            // recien aparece cuando terminan de contar TODAS las filas, no
-            // apenas termina esta.
-            if (scoreTallyBonusAwarded_[i]) {
+            // recien aparece 1s despues de terminar de contar TODAS las
+            // filas (scoreTallyBonusRevealed_, pedido explicitamente), y
+            // solo existe con mas de un jugador activo.
+            if (scoreTallyBonusAwarded_[i] && scoreTallyBonusRevealed_) {
                 x += static_cast<float>(MeasureText(totalText, 22)) + 12.0f;
                 const char* bonusText = TextFormat("+%d", kScoreTallyClearBonus);
                 DrawText(bonusText, static_cast<int>(x), static_cast<int>(rowY) + 4, 22, RED);
@@ -2851,7 +3998,6 @@ void Game::RenderMenu() {
     ClearBackground(BLACK);
 
     const int centerX = windowWidth_ / 2;
-    constexpr float kLineHeight = 40.0f;
 
     // Posiciones fijas (pedido explicitamente: el puntaje pegado arriba de
     // todo, el titulo centrado verticalmente en la ventana, y la lista mas
@@ -2861,8 +4007,11 @@ void Game::RenderMenu() {
     constexpr float kHiScoreY = 16.0f;
     constexpr float kGapLogoList = 70.0f;
 
-    // Puntaje maximo historico, pegado arriba de todo.
-    const char* hiScoreText = TextFormat("HI-SCORE  %06d", highScore_);
+    // Puntaje maximo historico, pegado arriba de todo, con el nombre de su
+    // dueno si ya se cargo uno (ver highScoreHolderName_/GameOverPhase::NameEntry).
+    const char* hiScoreText = highScoreHolderName_.empty()
+        ? TextFormat("HI-SCORE  %06d", highScore_)
+        : TextFormat("HI-SCORE  %06d  %s", highScore_, highScoreHolderName_.c_str());
     DrawText(hiScoreText, centerX - MeasureText(hiScoreText, 24) / 2, static_cast<int>(kHiScoreY), 24, RAYWHITE);
 
     // Logo "BATTLE CITY" (Documentaciones/Titulo.png, extraido en ladrillos):
@@ -2881,11 +4030,23 @@ void Game::RenderMenu() {
     const float listTop = logoY + logoH + kGapLogoList;
 
     std::string hintText; // texto de ayuda/explicacion, se llena segun la pantalla y se dibuja abajo del todo
+    RenderMenuScreenBody(listTop, hintText);
+    RenderMenuFooter(hintText);
 
-    if (menuScreen_ == MenuScreen::Main) {
-        static const char* kItems[] = {"ARCADE", "SUPERVIVENCIA", "VERSUS", "MODO CONSTRUCCION", "OPCIONES"};
-        static const bool kEnabled[] = {true, true, true, false, true};
-        for (int i = 0; i < 5; ++i) {
+    EndDrawing();
+}
+
+void Game::RenderMenuScreenBody(float listTop, std::string& hintText) {
+    const int centerX = windowWidth_ / 2;
+    constexpr float kLineHeight = 40.0f;
+
+    if (menuScreen_ == MenuScreen::Main || menuScreen_ == MenuScreen::MainConfirmExit) {
+        // MainConfirmExit dibuja este mismo listado de fondo (con "SALIR" ya
+        // seleccionado) y el cuadro de confirmacion encima, en RenderMenuFooter
+        // (mismo criterio que CapturingKey sobre PlayerActions).
+        static const char* kItems[] = {"ARCADE", "SUPERVIVENCIA", "VERSUS", "MODO CONSTRUCCION", "OPCIONES", "SALIR"};
+        static const bool kEnabled[] = {true, true, true, false, true, true};
+        for (int i = 0; i < 6; ++i) {
             DrawMenuLine(kItems[i], listTop + static_cast<float>(i) * kLineHeight, i == mainMenuIndex_, kEnabled[i]);
         }
         if (!kEnabled[mainMenuIndex_]) {
@@ -2927,47 +4088,81 @@ void Game::RenderMenu() {
             DrawMenuLine(kItems[i], listTop + static_cast<float>(i) * kLineHeight, i == controlMappingIndex_, true);
         }
         hintText = "Enter: elegir el jugador al que reasignarle los controles.";
-    } else { // MenuScreen::PlayerActions o MenuScreen::CapturingKey (el fondo es el mismo)
+    } else if (menuScreen_ == MenuScreen::ControlDeviceChoice) {
         const char* playerTitle = TextFormat("JUGADOR %d", mappingPlayerIndex_ + 1);
         DrawText(playerTitle, centerX - MeasureText(playerTitle, 24) / 2, static_cast<int>(listTop), 24, SKYBLUE);
 
-        static const char* kActionLabels[kInputActionCount] = {nullptr, nullptr, nullptr, nullptr, "DISPARAR", "ESPECIAL", "INICIO"};
-        const PlayerKeyBindings& bindings = playerBindings_[mappingPlayerIndex_];
+        static const char* kItems[] = {"TECLADO", "MANDO"};
+        for (int i = 0; i < 2; ++i) {
+            DrawMenuLine(kItems[i], listTop + kLineHeight + static_cast<float>(i) * kLineHeight, i == controlDeviceIndex_, true);
+        }
+        hintText = "Enter: elegir que dispositivo configurarle a este jugador.";
+    } else { // MenuScreen::PlayerActions o MenuScreen::CapturingKey (el fondo es el mismo)
+        const char* playerTitle = TextFormat("JUGADOR %d - %s", mappingPlayerIndex_ + 1, mappingGamepad_ ? "MANDO" : "TECLADO");
+        DrawText(playerTitle, centerX - MeasureText(playerTitle, 24) / 2, static_cast<int>(listTop), 24, SKYBLUE);
+
         const float rowLabelX = static_cast<float>(centerX) - 150.0f;
         const float rowKeyX = static_cast<float>(centerX) + 40.0f;
         const float selectorX = rowLabelX - 40.0f;
-        for (int i = 0; i < kInputActionCount; ++i) {
-            const float y = listTop + kLineHeight + static_cast<float>(i) * kLineHeight;
-            const bool selected = (i == playerActionIndex_);
-            const Color rowColor = selected ? YELLOW : RAYWHITE;
-            if (selected) {
-                constexpr float kSelSize = 26.0f;
-                const Rectangle selSrc{0.0f, 0.0f, static_cast<float>(menuSelectorTexture_.width), static_cast<float>(menuSelectorTexture_.height)};
-                DrawTexturePro(menuSelectorTexture_, selSrc, Rectangle{selectorX, y - 1.0f, kSelSize, kSelSize}, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
-            }
-            if (i < 4) {
-                // Flecha en vez de texto para las 4 direcciones, pedido explicitamente.
-                float dx = 0.0f, dy = 0.0f;
-                switch (static_cast<InputAction>(i)) {
-                    case InputAction::Up:    dy = -1.0f; break;
-                    case InputAction::Down:  dy = 1.0f;  break;
-                    case InputAction::Left:  dx = -1.0f; break;
-                    default:                 dx = 1.0f;  break; // Right
+
+        if (mappingGamepad_) {
+            static const char* kGamepadActionLabels[kGamepadMappableActionCount] = {"DISPARAR", "ESPECIAL", "PAUSA"};
+            const PlayerGamepadBindings& bindings = playerGamepadBindings_[mappingPlayerIndex_];
+            for (int i = 0; i < kGamepadMappableActionCount; ++i) {
+                const float y = listTop + kLineHeight + static_cast<float>(i) * kLineHeight;
+                const bool selected = (i == playerActionIndex_);
+                const Color rowColor = selected ? YELLOW : RAYWHITE;
+                if (selected) {
+                    constexpr float kSelSize = 26.0f;
+                    const Rectangle selSrc{0.0f, 0.0f, static_cast<float>(menuSelectorTexture_.width), static_cast<float>(menuSelectorTexture_.height)};
+                    DrawTexturePro(menuSelectorTexture_, selSrc, Rectangle{selectorX, y - 1.0f, kSelSize, kSelSize}, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
                 }
-                DrawArrowGlyph(rowLabelX + 12.0f, y + 12.0f, 12.0f, dx, dy, rowColor);
-            } else {
-                DrawText(kActionLabels[i], static_cast<int>(rowLabelX), static_cast<int>(y), 22, rowColor);
+                DrawText(kGamepadActionLabels[i], static_cast<int>(rowLabelX), static_cast<int>(y), 22, rowColor);
+                const int action = static_cast<int>(kGamepadMappableActions[i]);
+                DrawText(GamepadButtonName(bindings.buttons[action]), static_cast<int>(rowKeyX), static_cast<int>(y), 22, rowColor);
             }
-            DrawText(KeyName(bindings.keys[i]), static_cast<int>(rowKeyX), static_cast<int>(y), 22, rowColor);
+            hintText = "Enter: reasignar este boton.";
+        } else {
+            static const char* kActionLabels[kInputActionCount] = {nullptr, nullptr, nullptr, nullptr, "DISPARAR", "ESPECIAL", "INICIO", "PAUSA"};
+            const PlayerKeyBindings& bindings = playerBindings_[mappingPlayerIndex_];
+            for (int i = 0; i < kKeyMappableActionCount; ++i) {
+                const InputAction action = kKeyMappableActions[i];
+                const float y = listTop + kLineHeight + static_cast<float>(i) * kLineHeight;
+                const bool selected = (i == playerActionIndex_);
+                const Color rowColor = selected ? YELLOW : RAYWHITE;
+                if (selected) {
+                    constexpr float kSelSize = 26.0f;
+                    const Rectangle selSrc{0.0f, 0.0f, static_cast<float>(menuSelectorTexture_.width), static_cast<float>(menuSelectorTexture_.height)};
+                    DrawTexturePro(menuSelectorTexture_, selSrc, Rectangle{selectorX, y - 1.0f, kSelSize, kSelSize}, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+                }
+                if (action == InputAction::Up || action == InputAction::Down || action == InputAction::Left || action == InputAction::Right) {
+                    // Flecha en vez de texto para las 4 direcciones, pedido explicitamente.
+                    float dx = 0.0f, dy = 0.0f;
+                    switch (action) {
+                        case InputAction::Up:    dy = -1.0f; break;
+                        case InputAction::Down:  dy = 1.0f;  break;
+                        case InputAction::Left:  dx = -1.0f; break;
+                        default:                 dx = 1.0f;  break; // Right
+                    }
+                    DrawArrowGlyph(rowLabelX + 12.0f, y + 12.0f, 12.0f, dx, dy, rowColor);
+                } else {
+                    DrawText(kActionLabels[static_cast<int>(action)], static_cast<int>(rowLabelX), static_cast<int>(y), 22, rowColor);
+                }
+                DrawText(KeyName(bindings.keys[static_cast<int>(action)]), static_cast<int>(rowKeyX), static_cast<int>(y), 22, rowColor);
+            }
+            hintText = "Enter: reasignar esta tecla.";
         }
-        hintText = "Enter: reasignar esta tecla.";
     }
+}
+
+void Game::RenderMenuFooter(const std::string& hintText) {
+    const int centerX = windowWidth_ / 2;
 
     // Pie de pagina (ayuda/explicacion + controles), siempre pegado abajo de
     // la ventana, fuera del bloque centrado de arriba. En CapturingKey el
     // cuadro de "Presione una tecla" (mas abajo) ya trae su propia leyenda,
     // asi que no se repite aca.
-    if (menuScreen_ != MenuScreen::CapturingKey) {
+    if (menuScreen_ != MenuScreen::CapturingKey && menuScreen_ != MenuScreen::MainConfirmExit) {
         if (!hintText.empty()) {
             DrawText(hintText.c_str(), centerX - MeasureText(hintText.c_str(), 18) / 2, windowHeight_ - 62, 18, GRAY);
         }
@@ -2986,20 +4181,198 @@ void Game::RenderMenu() {
         DrawRectangle(0, 0, windowWidth_, windowHeight_, Color{0, 0, 0, 150});
         DrawRectangle(boxX, boxY, kBoxW, kBoxH, Color{0x24, 0x24, 0x28, 0xFF});
         DrawRectangleLines(boxX, boxY, kBoxW, kBoxH, YELLOW);
-        const char* prompt = "Presione una tecla";
+        const char* prompt = mappingGamepad_ ? "Presione un boton del mando" : "Presione una tecla";
         DrawText(prompt, centerX - MeasureText(prompt, 22) / 2, boxY + 20, 22, RAYWHITE);
-        const char* capturedText = (capturedKey_ != 0) ? KeyName(capturedKey_) : "...";
+        const char* capturedText = "...";
+        if (capturedKey_ != 0) {
+            capturedText = mappingGamepad_ ? GamepadButtonName(capturedKey_) : KeyName(capturedKey_);
+        }
         DrawText(capturedText, centerX - MeasureText(capturedText, 28) / 2, boxY + 62, 28, YELLOW);
         const char* boxFooter = "Enter: guardar   Esc: cancelar";
         DrawText(boxFooter, centerX - MeasureText(boxFooter, 16) / 2, boxY + 108, 16, GRAY);
     }
 
-    EndDrawing();
+    // Cuadro de confirmacion antes de cerrar el juego (mismo estilo que
+    // MenuScreen::PauseConfirmEnd), encima del listado principal ya
+    // dibujado con "SALIR" resaltado (ver RenderMenuScreenBody).
+    if (menuScreen_ == MenuScreen::MainConfirmExit) {
+        constexpr int kBoxW = 420, kBoxH = 170;
+        const int boxX = centerX - kBoxW / 2;
+        const int boxY = windowHeight_ / 2 - kBoxH / 2;
+        DrawRectangle(0, 0, windowWidth_, windowHeight_, Color{0, 0, 0, 150});
+        DrawRectangle(boxX, boxY, kBoxW, kBoxH, Color{0x24, 0x24, 0x28, 0xFF});
+        DrawRectangleLines(boxX, boxY, kBoxW, kBoxH, YELLOW);
+        const char* question = "Cerrar el juego?";
+        DrawText(question, centerX - MeasureText(question, 20) / 2, boxY + 24, 20, RAYWHITE);
+
+        static const char* kItems[] = {"SI", "NO"};
+        for (int i = 0; i < 2; ++i) {
+            DrawMenuLine(kItems[i], static_cast<float>(boxY + 70) + static_cast<float>(i) * 38.0f, i == mainConfirmExitIndex_, true);
+        }
+        const char* boxFooter2 = "Enter: elegir   Esc: no";
+        DrawText(boxFooter2, centerX - MeasureText(boxFooter2, 16) / 2, boxY + kBoxH - 26, 16, GRAY);
+    }
+}
+
+void Game::RenderPauseOverlay() {
+    // Se dibuja encima de la escena de juego ya congelada (paused_), en el
+    // mismo BeginDrawing/EndDrawing de Render() — a diferencia de RenderMenu,
+    // no arranca el suyo propio ni limpia la pantalla: un rectangulo oscuro
+    // semitransparente atenua el juego de fondo, y encima va la lista que
+    // corresponda a menuScreen_.
+    const int centerX = windowWidth_ / 2;
+    DrawRectangle(0, 0, windowWidth_, windowHeight_, Color{0, 0, 0, 180});
+
+    constexpr float kLineHeight = 40.0f;
+    constexpr float kListTop = 220.0f; // sin logo/hi-score (no pinta en medio de una partida): arranca mas arriba que en RenderMenu; solo la usa el submenu de Opciones reusado (ver mas abajo)
+
+    if (menuScreen_ == MenuScreen::PauseMain) {
+        // Bloque (titulo + lista) centrado vertical Y horizontalmente en la
+        // ventana, pedido explicitamente — a diferencia del resto del menu
+        // (titulo/Opciones), que usa posiciones fijas.
+        constexpr int kItemCount = 5;
+        constexpr float kTitleFontSize = 32.0f;
+        constexpr float kTitleGap = 30.0f;
+        const float totalHeight = kTitleFontSize + kTitleGap + kItemCount * kLineHeight;
+        const float titleY = (static_cast<float>(windowHeight_) - totalHeight) * 0.5f;
+        const float listTop = titleY + kTitleFontSize + kTitleGap;
+
+        // "PAUSA" en rojo (pedido explicitamente), el resto del menu de
+        // pausa sigue la paleta de siempre (blanco/amarillo si esta
+        // resaltado, gris si esta deshabilitado, ver DrawMenuLine).
+        const char* title = "PAUSA";
+        DrawText(title, centerX - MeasureText(title, static_cast<int>(kTitleFontSize)) / 2, static_cast<int>(titleY), static_cast<int>(kTitleFontSize), RED);
+
+        static const char* kItems[] = {"CONTINUAR", "GUARDAR", "CARGAR", "OPCIONES", "TERMINAR PARTIDA"};
+        static const bool kEnabled[] = {true, false, false, true, true}; // Guardar/Cargar: el sistema de guardado todavia no existe
+        for (int i = 0; i < kItemCount; ++i) {
+            DrawMenuLine(kItems[i], listTop + static_cast<float>(i) * kLineHeight, i == pauseMenuIndex_, kEnabled[i]);
+        }
+        std::string hintText;
+        if (!kEnabled[pauseMenuIndex_]) {
+            hintText = "Todavia no disponible.";
+        }
+        RenderMenuFooter(hintText);
+        return;
+    }
+
+    if (menuScreen_ == MenuScreen::PauseEndChoice) {
+        // Mismo criterio de centrado que PauseMain arriba.
+        constexpr int kItemCount = 2;
+        constexpr float kTitleFontSize = 28.0f;
+        constexpr float kTitleGap = 30.0f;
+        const float totalHeight = kTitleFontSize + kTitleGap + kItemCount * kLineHeight;
+        const float titleY = (static_cast<float>(windowHeight_) - totalHeight) * 0.5f;
+        const float listTop = titleY + kTitleFontSize + kTitleGap;
+
+        const char* title = "TERMINAR PARTIDA";
+        DrawText(title, centerX - MeasureText(title, static_cast<int>(kTitleFontSize)) / 2, static_cast<int>(titleY), static_cast<int>(kTitleFontSize), RAYWHITE);
+
+        static const char* kItems[] = {"MENU PRINCIPAL", "CERRAR EL JUEGO"};
+        for (int i = 0; i < kItemCount; ++i) {
+            DrawMenuLine(kItems[i], listTop + static_cast<float>(i) * kLineHeight, i == pauseEndChoiceIndex_, true);
+        }
+        RenderMenuFooter(std::string());
+        return;
+    }
+
+    if (menuScreen_ == MenuScreen::PauseConfirmEnd) {
+        constexpr int kBoxW = 420, kBoxH = 170;
+        const int boxX = centerX - kBoxW / 2;
+        const int boxY = windowHeight_ / 2 - kBoxH / 2;
+        DrawRectangle(boxX, boxY, kBoxW, kBoxH, Color{0x24, 0x24, 0x28, 0xFF});
+        DrawRectangleLines(boxX, boxY, kBoxW, kBoxH, YELLOW);
+        const char* question = (pauseEndChoiceIndex_ == 0) ? "Volver al menu principal?" : "Cerrar el juego?";
+        DrawText(question, centerX - MeasureText(question, 20) / 2, boxY + 24, 20, RAYWHITE);
+
+        static const char* kItems[] = {"SI", "NO"};
+        for (int i = 0; i < 2; ++i) {
+            DrawMenuLine(kItems[i], static_cast<float>(boxY + 70) + static_cast<float>(i) * 38.0f, i == pauseConfirmIndex_, true);
+        }
+        const char* boxFooter = "Enter: elegir   Esc: no";
+        DrawText(boxFooter, centerX - MeasureText(boxFooter, 16) / 2, boxY + kBoxH - 26, 16, GRAY);
+        return;
+    }
+
+    // Options/ControlMapping/PlayerActions/CapturingKey: identico al de la
+    // pantalla de titulo (ver RenderMenuScreenBody/RenderMenuFooter), solo
+    // que arranca mas arriba (sin logo) y sobre el fondo atenuado en vez de
+    // negro puro.
+    std::string hintText;
+    RenderMenuScreenBody(kListTop, hintText);
+    RenderMenuFooter(hintText);
+}
+
+void Game::RenderGameOverOverlay() {
+    if (gameOverPhase_ == GameOverPhase::None) {
+        return;
+    }
+
+    const int centerX = windowWidth_ / 2;
+
+    if (gameOverPhase_ == GameOverPhase::NameEntry) {
+        // El sprite "GAME OVER" ya cumplio su parte en Rising/Holding: esto
+        // es su propio dialogo, centrado como el resto de los cuadros de
+        // confirmacion del juego (ver RenderPauseOverlay).
+        constexpr int kBoxW = 460, kBoxH = 190;
+        const int boxX = centerX - kBoxW / 2;
+        const int boxY = windowHeight_ / 2 - kBoxH / 2;
+        DrawRectangle(0, 0, windowWidth_, windowHeight_, Color{0, 0, 0, 150});
+        DrawRectangle(boxX, boxY, kBoxW, kBoxH, Color{0x24, 0x24, 0x28, 0xFF});
+        DrawRectangleLines(boxX, boxY, kBoxW, kBoxH, YELLOW);
+
+        const char* title = "NUEVO RECORD!";
+        DrawText(title, centerX - MeasureText(title, 26) / 2, boxY + 20, 26, YELLOW);
+
+        static const char* kOwnerLabels[] = {"P1", "P2", "P3", "P4"};
+        const char* ownerLabel = (gameOverWinnerOwnerId_ >= 0 && gameOverWinnerOwnerId_ < 4) ? kOwnerLabels[gameOverWinnerOwnerId_] : "?";
+        const char* subtitle = TextFormat("%s - %d puntos", ownerLabel, gameOverWinnerScore_);
+        DrawText(subtitle, centerX - MeasureText(subtitle, 18) / 2, boxY + 58, 18, RAYWHITE);
+
+        // Cursor parpadeante al final de lo tipeado (mismo criterio de
+        // parpadeo que el resto del HUD, ver kHudTextBlinkInterval).
+        const bool cursorOn = static_cast<int>(GetTime() / kHudTextBlinkInterval) % 2 == 0;
+        const std::string nameDisplay = gameOverNameEntry_ + (cursorOn ? "_" : "");
+        DrawText(nameDisplay.c_str(), centerX - MeasureText(nameDisplay.c_str(), 28) / 2, boxY + 96, 28, YELLOW);
+
+        const char* boxFooter = "Enter: confirmar   Backspace: borrar";
+        DrawText(boxFooter, centerX - MeasureText(boxFooter, 16) / 2, boxY + kBoxH - 26, 16, GRAY);
+        return;
+    }
+
+    // Rising/Holding: el sprite "GAME OVER" (Tanques.png) sube desde abajo
+    // de la pantalla hasta el centro y se queda ahi quieto (ver
+    // TickGameOverSequence/GameOverPhase), sin atenuar el fondo — el resto
+    // del juego sigue bien visible detras (pedido explicitamente).
+    constexpr float kScale = 8.0f;
+    const float dispW = static_cast<float>(gameOverTexture_.width) * kScale;
+    const float dispH = static_cast<float>(gameOverTexture_.height) * kScale;
+    const float centerY = (static_cast<float>(windowHeight_) - dispH) * 0.5f;
+
+    float y = centerY;
+    if (gameOverPhase_ == GameOverPhase::Rising) {
+        const float progress = std::clamp(static_cast<float>(gameOverTimer_ / kGameOverRiseDuration), 0.0f, 1.0f);
+        const float startY = static_cast<float>(windowHeight_); // arranca justo debajo del borde inferior
+        y = startY + (centerY - startY) * progress;
+    }
+
+    const float x = static_cast<float>(centerX) - dispW * 0.5f;
+    const Rectangle src{0.0f, 0.0f, static_cast<float>(gameOverTexture_.width), static_cast<float>(gameOverTexture_.height)};
+    DrawTexturePro(gameOverTexture_, src, Rectangle{x, y, dispW, dispH}, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+
+    if (gameOverPhase_ == GameOverPhase::Holding) {
+        const bool blinkOn = static_cast<int>(GetTime() / kHudTextBlinkInterval) % 2 == 0;
+        if (blinkOn) {
+            const char* hint = "Pulse Pausa o Enter para continuar";
+            DrawText(hint, centerX - MeasureText(hint, 20) / 2, static_cast<int>(y + dispH) + 20, 20, RAYWHITE);
+        }
+    }
 }
 
 void Game::Shutdown() {
     UnloadTexture(titleLogoTexture_);
     UnloadTexture(menuSelectorTexture_);
+    UnloadTexture(gameOverTexture_);
     specialExplosionSprites_.Unload();
     scorePopupSprites_.Unload();
     bulletImpactSprites_.Unload();
@@ -3020,6 +4393,7 @@ void Game::Shutdown() {
     UnloadTexture(waterTextures_[1]);
     UnloadTexture(iceTexture_);
     UnloadTexture(baseEagleTexture_);
+    UnloadTexture(baseEagleDestroyedTexture_);
     UnloadTexture(hudLifeIconTexture_);
     UnloadTexture(stageFlagIconTexture_);
     bulletSprites_.Unload();
@@ -3031,7 +4405,64 @@ void Game::Shutdown() {
     fastEnemySprites_.Unload();
     armorEnemySprites_.Unload();
     powerEnemySprites_.Unload();
+    UnloadMusicStream(battleLoopMusic_);
+    UnloadMusicStream(movementLoopMusic_);
+    UnloadSound(scoreTickSound_);
+    UnloadSound(hitNonLethalSound_);
+    UnloadSound(blockResistSound_);
+    UnloadSound(brickBreakSound_);
+    UnloadSound(playerShootSound_);
+    UnloadSound(tankDeathSound_);
+    UnloadSound(scoreBonusSound_);
+    UnloadSound(bigExplosionSound_);
+    UnloadSound(itemAppearSound_);
+    UnloadSound(pauseToggleSound_);
+    UnloadSound(itemPickupSound_);
+    UnloadSound(extraLifeSound_);
+    UnloadSound(stageStartSound_);
+    UnloadSound(specialShootSound_);
+    CloseAudioDevice();
     CloseWindow();
+}
+
+void Game::TickAudio() {
+    UpdateMusicStream(battleLoopMusic_);
+    UpdateMusicStream(movementLoopMusic_);
+
+    // Pedido explicitamente: mientras suene el jingle de inicio de nivel, no
+    // suenan los 2 bucles — la transicion visual (NIVEL N + telon) dura un
+    // tiempo fijo, pero el jingle puede seguir sonando mas alla de eso, asi
+    // que no alcanza con mirar solo levelTransitionPhase_.
+    const bool stageStartPlaying = IsSoundPlaying(stageStartSound_);
+
+    const bool inLevel = appState_ == AppState::Playing
+        && !paused_
+        && levelTransitionPhase_ == LevelTransitionPhase::None
+        && scoreTallyPhase_ == ScoreTallyPhase::None
+        && !gameOver_
+        && !stageStartPlaying;
+
+    const bool shouldPlayBattleLoop = inLevel && EnemiesRemainingThisLevel() > 0;
+    if (shouldPlayBattleLoop && !IsMusicStreamPlaying(battleLoopMusic_)) {
+        PlayMusicStream(battleLoopMusic_);
+    } else if (!shouldPlayBattleLoop && IsMusicStreamPlaying(battleLoopMusic_)) {
+        StopMusicStream(battleLoopMusic_);
+    }
+
+    bool anyPlayerMoving = false;
+    if (inLevel) {
+        for (Tank* tank : ActivePlayerTanks()) {
+            if (tank->IsMoving()) {
+                anyPlayerMoving = true;
+                break;
+            }
+        }
+    }
+    if (anyPlayerMoving && !IsMusicStreamPlaying(movementLoopMusic_)) {
+        PlayMusicStream(movementLoopMusic_);
+    } else if (!anyPlayerMoving && IsMusicStreamPlaying(movementLoopMusic_)) {
+        StopMusicStream(movementLoopMusic_);
+    }
 }
 
 void Game::Run() {
@@ -3046,7 +4477,7 @@ void Game::Run() {
     constexpr double kMaxFrameTime = 0.25;
 
     double accumulator = 0.0;
-    while (!WindowShouldClose()) {
+    while (!WindowShouldClose() && !wantsExit_) {
         double frameTime = GetFrameTime();
         if (frameTime > kMaxFrameTime) {
             frameTime = kMaxFrameTime;
@@ -3059,6 +4490,7 @@ void Game::Run() {
             accumulator -= kFixedTimestep;
         }
 
+        TickAudio(); // una vez por frame REAL (no por paso fijo): el stream de musica necesita alimentarse a ritmo de reloj de pared, no de simulacion
         Render(accumulator / kFixedTimestep);
     }
 

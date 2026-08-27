@@ -64,6 +64,53 @@ if (WIN32)
     target_compile_definitions(battlecity PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 
+# Enlace estatico del runtime de MinGW: sin esto, el .exe depende en tiempo de
+# ejecucion de libgcc_s_seh-1.dll/libstdc++-6.dll/libwinpthread-1.dll, que
+# solo estan en el PATH dentro del entorno de MSYS2 (por eso compilaba y
+# corria bien desde ahi) pero no en un doble clic normal en Windows, donde
+# tira "no se encontro libgcc_s_seh-1.dll". Con esto el .exe queda
+# autocontenido.
+if (MINGW)
+    target_link_options(battlecity PRIVATE -static-libgcc -static-libstdc++ -static)
+endif()
+
+# Entorno de pruebas de gameplay (pedido explicitamente): mismo codigo fuente
+# que "battlecity", ejecutable APARTE para que el juego principal quede
+# limpio (kDebugFeaturesEnabled en false ahi, ver Game.cpp). Este define
+# BC_DEBUG_BUILD, que prende kDebugFeaturesEnabled (botones/indicadores de
+# prueba F1-F12, +/-, etc.) y hace arrancar la partida en el "escenario 0"
+# (ResetState arranca currentLevel_ en 0 en vez de 1: al no existir
+# level_00.json, LevelFilePath cae sola en el mapa de prueba de siempre,
+# levels/test_map.json).
+add_executable(battlecity_debug ${BC_SOURCES})
+
+target_include_directories(battlecity_debug PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/core
+    ${CMAKE_SOURCE_DIR}/src/world
+    ${CMAKE_SOURCE_DIR}/src/entities
+    ${CMAKE_SOURCE_DIR}/src/ai
+    ${CMAKE_SOURCE_DIR}/src/modes
+    ${CMAKE_SOURCE_DIR}/src/net
+    ${CMAKE_SOURCE_DIR}/src/render
+    ${CMAKE_SOURCE_DIR}/shared
+)
+
+target_link_libraries(battlecity_debug PRIVATE raylib nlohmann_json::nlohmann_json)
+
+target_compile_definitions(battlecity_debug PRIVATE
+    BC_ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets/"
+    BC_DEBUG_BUILD
+)
+
+if (WIN32)
+    target_compile_definitions(battlecity_debug PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
+
+if (MINGW)
+    target_link_options(battlecity_debug PRIVATE -static-libgcc -static-libstdc++ -static)
+endif()
+
 # Editor de niveles (Fase 6, seccion 12.7 del documento de diseno): herramienta
 # interna de desarrollo, ejecutable APARTE de "battlecity" (no se empaqueta con
 # el juego). Solo usa /shared (formato de nivel) y los structs header-only de
@@ -87,4 +134,11 @@ target_compile_definitions(level_editor PRIVATE
 
 if (WIN32)
     target_compile_definitions(level_editor PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
+
+# Ver el comentario junto al mismo flag en el target "battlecity": sin esto
+# tambien le faltarian las DLL del runtime de MinGW al ejecutarlo con doble
+# clic fuera de MSYS2.
+if (MINGW)
+    target_link_options(level_editor PRIVATE -static-libgcc -static-libstdc++ -static)
 endif()

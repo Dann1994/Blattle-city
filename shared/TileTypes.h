@@ -12,6 +12,7 @@ enum class TileType : uint8_t {
     Trees,
     Ice,
     Base,
+    BaseDestroyed, // pedido explicitamente: el aguila destruida se queda dibujada con su propio frame (Tanques.png) en vez de desaparecer del todo. Nunca se carga desde un nivel (TileTypeFromChar no la produce): solo la asigna el juego en tiempo de ejecucion cuando el aguila se destruye (ver BulletSystem.cpp). No bloquea movimiento ni disparos (decorativa nada mas): a esa altura la partida ya termino.
 };
 
 inline TileType TileTypeFromChar(char c) {

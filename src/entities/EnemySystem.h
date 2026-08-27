@@ -3,6 +3,8 @@
 #include <random>
 #include <vector>
 
+#include <raylib.h>
+
 #include "BaseDistanceField.h"
 #include "Bullet.h"
 #include "Enemy.h"
@@ -40,7 +42,7 @@ public:
     // jugadores) cuando un enemigo es destruido. outScoreEvents se limpia y
     // se llena aca: un ScoreEvent por cada enemigo que una bala de jugador
     // mato este frame, para que Game le acredite el puntaje al que disparo.
-    void Update(double dt, TileMap& map, BulletSystem& bullets, BulletImpactSystem& impacts, SpecialExplosionSystem& specialExplosions, const std::vector<Tank*>& playerTanks, const std::vector<Tank*>& otherEnemyTanks, float baseX, float baseY, std::vector<ScoreEvent>& outScoreEvents);
+    void Update(double dt, TileMap& map, BulletSystem& bullets, BulletImpactSystem& impacts, SpecialExplosionSystem& specialExplosions, const std::vector<Tank*>& playerTanks, const std::vector<Tank*>& otherEnemyTanks, float baseX, float baseY, std::vector<ScoreEvent>& outScoreEvents, Sound tankDeathSound);
 
     std::vector<Enemy>& Enemies() { return enemies_; }
     const std::vector<Enemy>& Enemies() const { return enemies_; }

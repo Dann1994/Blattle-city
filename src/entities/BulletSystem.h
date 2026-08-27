@@ -1,6 +1,9 @@
 #pragma once
 
+#include <functional>
 #include <vector>
+
+#include <raylib.h>
 
 #include "Bullet.h"
 #include "TileMap.h"
@@ -26,10 +29,13 @@ struct SpecialExplosionEvent {
 };
 
 // Un tanque fue destruido de un choque directo del disparo especial (nivel
-// 1-3 sin escudo): la bala no explota, sigue de largo. Game se encarga de
-// la animacion de muerte, resetear el nivel y respawnear.
+// 1-3 sin escudo, o un enemigo Basico/Rapido/Blindado sin escudo): la bala
+// no explota, sigue de largo. Game se encarga de la animacion de muerte y,
+// segun sea jugador o enemigo, resetear el nivel+respawnear o acreditarle
+// el puntaje a shooterOwnerId.
 struct SpecialDirectKillEvent {
     int targetOwnerId = -1;
+    int shooterOwnerId = -1;
 };
 
 // Estado de un tanque que BulletSystem necesita para resolver el choque
@@ -62,7 +68,11 @@ public:
     // nivel 1-3 sin escudo destruye directo y la bala sigue de largo; con
     // escudo o nivel 4, la bala explota (con el efecto especial de cada caso
     // aplicado por Game via directHitOwnerId).
-    void Update(double dt, TileMap& map, BulletImpactSystem& impacts, SpecialExplosionSystem& specialExplosions, std::vector<SpecialExplosionEvent>& explosionEvents, const std::vector<TankCombatState>& tanks, std::vector<SpecialDirectKillEvent>& directKillEvents);
+    // brickBreakSound suena cada vez que se rompe una unidad de ladrillo;
+    // blockResistSound cuando una bala pega en hierro (o un obstaculo
+    // generico) y no lo rompe; explosionSound cuando se destruye el aguila
+    // o explota la bala especial (pedido explicitamente).
+    void Update(double dt, TileMap& map, BulletImpactSystem& impacts, SpecialExplosionSystem& specialExplosions, std::vector<SpecialExplosionEvent>& explosionEvents, const std::vector<TankCombatState>& tanks, std::vector<SpecialDirectKillEvent>& directKillEvents, Sound brickBreakSound, Sound blockResistSound, Sound explosionSound);
 
     const std::vector<Bullet>& Bullets() const { return bullets_; }
 
@@ -77,31 +87,45 @@ public:
     // todavia puede disparar otra mas).
     int AliveBulletCount(int ownerId) const;
 
-    // Fuego amigo (seccion custom, configurable): mata las balas vivas, no
-    // especiales, de un dueño distinto a excludeOwnerId que esten dentro de
-    // la caja indicada (el tanque que se esta chequeando), y les dispara un
-    // destello de impacto normal. Devuelve true si mato al menos una; cada
-    // una agrega su weaponLevel a outShooterWeaponLevels (en orden), para
-    // que Game aplique el efecto que corresponda segun el nivel de quien
-    // disparo cada bala.
-    bool KillBulletsHittingBox(int excludeOwnerId, float left, float right, float top, float bottom, BulletImpactSystem& impacts, std::vector<int>& outShooterWeaponLevels);
+    // Sistema de resistencia bala-vs-tanque (pedido explicitamente, ver
+    // Bullet::health): cada bala que efectivamente toca la caja recibe una
+    // consulta a "resolve" (weaponLevel, isSpecial de esa bala) -> cuanta
+    // salud del OBJETIVO se consumio con ese impacto (lo decide quien llama,
+    // que es quien conoce al tanque real: aplica el dano/escudo ahi mismo).
+    // Esa cantidad se le resta a la salud propia de la bala: si llega a 0 la
+    // bala se destruye (mismo destello de siempre); si le queda salud, la
+    // bala SIGUE DE LARGO (pedido explicitamente: "ciertas balas puedan
+    // atravesar objetos y tanques") reubicada justo pasando el borde de la
+    // caja en su direccion de avance, para no volver a chocar contra el
+    // MISMO tanque al cuadro siguiente mientras siga solapada.
+    using TankHitResolver = std::function<int(int weaponLevel, bool isSpecial)>;
+
+    // Fuego amigo (seccion custom, configurable): balas vivas, no
+    // especiales, de OTRO JUGADOR (ownerId < kEnemyOwnerIdBase, y distinto a
+    // excludeOwnerId, el tanque que se esta chequeando) que esten dentro de
+    // la caja indicada — las balas enemigas quedan afuera a proposito (el
+    // fuego amigo es entre jugadores nada mas, ver KillEnemyBulletsHittingBox
+    // para esas). Devuelve true si toco al menos una.
+    bool KillBulletsHittingBox(int excludeOwnerId, float left, float right, float top, float bottom, BulletImpactSystem& impacts, const TankHitResolver& resolve);
 
     // Igual que KillBulletsHittingBox, pero solo cuenta balas de tanques
     // enemigo (ownerId >= kEnemyOwnerIdBase): un jugador siempre puede
     // recibir dano de un enemigo, sin importar el modo de fuego amigo (que
     // solo aplica entre jugadores, ver Game::ApplyFriendlyFire). Devuelve
-    // true si mato al menos una.
-    bool KillEnemyBulletsHittingBox(float left, float right, float top, float bottom, BulletImpactSystem& impacts);
+    // true si toco al menos una.
+    bool KillEnemyBulletsHittingBox(float left, float right, float top, float bottom, BulletImpactSystem& impacts, const TankHitResolver& resolve);
 
     // Lo opuesto de KillEnemyBulletsHittingBox: solo cuenta balas de
     // jugador (ownerId < kEnemyOwnerIdBase). La usan EnemySystem/
     // FastEnemySystem para chequear si UN ENEMIGO murio: asi las balas
     // enemigas (de cualquier tipo, incluidas las de otro enemigo) los
     // atraviesan sin hacerles nada, en vez de matarse entre ellos.
-    // outShooterOwnerIds sale en paralelo a outShooterWeaponLevels (mismo
-    // indice = misma bala), para poder acreditarle el puntaje al jugador
-    // que disparo (ver ScoreEvent).
-    bool KillPlayerBulletsHittingBox(float left, float right, float top, float bottom, BulletImpactSystem& impacts, std::vector<int>& outShooterWeaponLevels, std::vector<int>& outShooterOwnerIds);
+    // outShooterOwnerIds sale en paralelo (mismo indice = misma bala que
+    // efectivamente toco, en el orden en que se encontraron), para poder
+    // acreditarle el puntaje al jugador que disparo (ver ScoreEvent);
+    // resolve recibe el ownerId de esa bala tambien (ultimo parametro) ya
+    // que el dano a un enemigo puede depender de quien la disparo.
+    bool KillPlayerBulletsHittingBox(float left, float right, float top, float bottom, BulletImpactSystem& impacts, std::vector<int>& outShooterOwnerIds, const std::function<int(int weaponLevel, bool isSpecial, int shooterOwnerId)>& resolve);
 
 private:
     // Destruye unidades minimas alrededor del punto de impacto (hitX,hitY):
@@ -109,28 +133,41 @@ private:
     // toda esa fila/columna (4 unidades); si cae en el borde ("esquina"),
     // destruye solo la mitad cercana (2 unidades). Devuelve true si frena la
     // bala (habia material ahi), false si ya estaba todo destruido y la bala
-    // puede seguir de largo. Con doubleLayer, ademas destruye la capa
-    // siguiente en la direccion de avance (nivel 4). weaponLevel solo hace
-    // falta para el dano si de rebote golpea de refilon un hierro vecino
-    // (ver CheckSeamGraze en el .cpp). oldX/oldY (posicion antes de este
-    // frame) se usan junto con hitX/hitY para recorrer TODAS las capas que
-    // la bala atraveso este frame, no solo la de llegada: con velocidades
-    // altas (nivel 2) un solo paso puede ser mas ancho que una capa y
-    // saltearse una si solo se mirara el punto final.
-    static bool HandleBrickHit(TileMap& map, int cellX, int cellY, float oldX, float oldY, float hitX, float hitY, Direction hitFrom, bool doubleLayer, int weaponLevel);
+    // puede seguir de largo. power solo hace falta para el dano si de rebote
+    // golpea de refilon un hierro vecino (ver CheckSeamGraze en el .cpp) —
+    // el ladrillo en si tiene salud 1, cualquier potencia >=1 destruye la
+    // unidad de un golpe. Recorre TODAS las capas desde la cara de ENTRADA
+    // (segun hitFrom) hasta la de llegada, no solo esta ultima: asi nunca se
+    // saltea una capa que siga viva mas cerca de la entrada, ni con
+    // velocidades altas ni con la bala arrancando ya bien adentro de la
+    // celda (tanque pegado al bloque, pedido explicitamente — antes se
+    // estimaba la capa de arranque con la posicion anterior de la bala, y
+    // ese estimado podia arrancar demasiado adentro y dejar pasar la bala de
+    // largo). Ya no existe el antiguo caso especial "doubleLayer" (nivel 4
+    // rompia 2 capas de un solo llamado): el sistema de salud de bala (ver
+    // Bullet::health en Update) logra lo mismo de forma mas general, dejando
+    // que la bala siga de largo sola si le sobra salud.
+    static bool HandleBrickHit(TileMap& map, int cellX, int cellY, float hitX, float hitY, Direction hitFrom, int power);
 
     // Igual que HandleBrickHit pero para hierro (grilla 2x2, ver SteelUnit.h):
     // golpe centrado destruye la capa entera (2 unidades), golpe en la punta
-    // destruye solo 1. A diferencia del ladrillo, cada unidad tiene puntos de
-    // vida (resistencia) y el dano por disparo depende de weaponLevel, asi
-    // que no siempre muere de un golpe. Devuelve true si la bala se frena
-    // (habia una unidad viva ahi), false si ya estaba vacio.
-    static bool HandleSteelHit(TileMap& map, int cellX, int cellY, float hitX, float hitY, Direction hitFrom, int weaponLevel);
+    // destruye solo 1. Cada unidad tiene salud propia (SteelUnit::hp,
+    // kSteelUnitMaxHp) y power se le resta directo por impacto, asi que no
+    // siempre muere de un golpe. Prueba primero la capa de ENTRADA (segun
+    // hitFrom) y, si ahi ya no quedaba nada, la otra (solo hay 2) antes de
+    // dejarla pasar — mismo motivo que en HandleBrickHit. Devuelve true si
+    // la bala se frena (habia una unidad viva en alguna de las 2), false si
+    // ya estaba todo vacio. outDealt recibe cuanta salud le costo a la
+    // PRIMERA unidad viva encontrada (min(power, su hp antes del golpe)):
+    // eso es lo que Update le resta a la salud propia de la bala.
+    // outPrimaryUnitDestroyed dice si esa misma unidad quedo destruida (para
+    // decidir el sonido de "resiste" vs "se rompe").
+    static bool HandleSteelHit(TileMap& map, int cellX, int cellY, float hitX, float hitY, Direction hitFrom, int power, int& outDealt, bool& outPrimaryUnitDestroyed);
 
     // Destruye por completo todo lo destructible (ladrillo, acero, base) en
     // un radio alrededor de (x,y) y registra el destello + el evento.
     // directHitOwnerId se copia tal cual al evento (ver SpecialExplosionEvent).
-    static void TriggerSpecialExplosion(TileMap& map, float x, float y, int ownerId, SpecialExplosionSystem& specialExplosions, std::vector<SpecialExplosionEvent>& explosionEvents, int directHitOwnerId = -1);
+    static void TriggerSpecialExplosion(TileMap& map, float x, float y, int ownerId, SpecialExplosionSystem& specialExplosions, std::vector<SpecialExplosionEvent>& explosionEvents, Sound explosionSound, int directHitOwnerId = -1);
 
     std::vector<Bullet> bullets_;
 };

@@ -3,6 +3,8 @@
 #include <random>
 #include <vector>
 
+#include <raylib.h>
+
 #include "BaseDistanceField.h"
 #include "Bullet.h"
 #include "Enemy.h"
@@ -38,7 +40,7 @@ public:
     // FastEnemySystem.cpp, igual que EnemySystem). otherEnemyTanks: tanques
     // de otros tipos de enemigo (el "Basico", ver EnemySystem), solo para
     // colision, nunca como blanco.
-    void Update(double dt, TileMap& map, BulletSystem& bullets, BulletImpactSystem& impacts, SpecialExplosionSystem& specialExplosions, const std::vector<Tank*>& playerTanks, const std::vector<Tank*>& otherEnemyTanks, float baseX, float baseY, std::vector<ScoreEvent>& outScoreEvents);
+    void Update(double dt, TileMap& map, BulletSystem& bullets, BulletImpactSystem& impacts, SpecialExplosionSystem& specialExplosions, const std::vector<Tank*>& playerTanks, const std::vector<Tank*>& otherEnemyTanks, float baseX, float baseY, std::vector<ScoreEvent>& outScoreEvents, Sound tankDeathSound);
 
     std::vector<Enemy>& Enemies() { return enemies_; }
     const std::vector<Enemy>& Enemies() const { return enemies_; }

@@ -11,11 +11,6 @@ namespace bc {
 namespace {
 constexpr float kBulletHitRadius = 0.2f;     // celdas, para la anulacion bala-contra-bala (seccion 4.5)
 constexpr float kSpecialBulletSpeed = 24.0f; // el triple de la bala normal de nivel 1 (8.0)
-
-// Dano por disparo contra hierro, segun el nivel de quien dispara. Con
-// kSteelUnitMaxHp = 75 (ver SteelUnit.h), esto hace que romper el bloque
-// entero a puro impacto central tome 50/76/10/2 disparos en nivel 1/2/3/4.
-constexpr int kSteelDamageByLevel[4] = {3, 2, 15, 75};
 }
 
 bool BulletSystem::TryShoot(int ownerId, float muzzleX, float muzzleY, Direction direction, float speed, int weaponLevel, int maxPerOwner) {
@@ -37,6 +32,7 @@ bool BulletSystem::TryShoot(int ownerId, float muzzleX, float muzzleY, Direction
     bullet.alive = true;
     bullet.speed = speed;
     bullet.weaponLevel = weaponLevel;
+    bullet.health = BulletHealthForLevel(weaponLevel);
     bullets_.push_back(bullet);
     return true;
 }
@@ -70,6 +66,7 @@ bool BulletSystem::TryShootSpecial(int ownerId, float muzzleX, float muzzleY, Di
     bullet.speed = kSpecialBulletSpeed;
     bullet.weaponLevel = 4;
     bullet.isSpecial = true;
+    bullet.health = kSpecialBulletHealth;
     bullets_.push_back(bullet);
     return true;
 }
@@ -147,9 +144,9 @@ void GrazeNeighborCorner(TileMap& map, int neighborX, int neighborY, float along
 // angosta pegada al borde compartido con la celda vecina (no toda la mitad
 // "esquina", solo bien cerca de la costura) y esa vecina tambien es
 // destructible, tambien le pega a su unidad mas cercana a la costura.
-void CheckSeamGraze(TileMap& map, int cellX, int cellY, bool horizontalHit, float fracX, float fracY, int weaponLevel) {
+void CheckSeamGraze(TileMap& map, int cellX, int cellY, bool horizontalHit, float fracX, float fracY, int power) {
     constexpr float kSeamBand = 0.15f;
-    const int steelDamage = kSteelDamageByLevel[weaponLevel - 1];
+    const int steelDamage = power;
     if (horizontalHit) {
         // La bala penetro por la cara izq/der: la costura relevante es
         // arriba/abajo, decidida por fracY. La vecina comparte columna, y
@@ -173,7 +170,7 @@ void CheckSeamGraze(TileMap& map, int cellX, int cellY, bool horizontalHit, floa
 
 } // namespace
 
-bool BulletSystem::HandleBrickHit(TileMap& map, int cellX, int cellY, float oldX, float oldY, float hitX, float hitY, Direction hitFrom, bool doubleLayer, int weaponLevel) {
+bool BulletSystem::HandleBrickHit(TileMap& map, int cellX, int cellY, float hitX, float hitY, Direction hitFrom, int power) {
     Cell& cell = map.At(cellX, cellY);
 
     const float fracX = hitX - static_cast<float>(cellX);
@@ -215,15 +212,15 @@ bool BulletSystem::HandleBrickHit(TileMap& map, int cellX, int cellY, float oldX
         return did;
     };
 
-    // Capas que la bala atraveso este frame, desde donde estaba hasta donde
-    // penetro (no solo la de llegada): con velocidades altas (nivel 2, cuyo
-    // paso por frame es mas ancho que una capa de 0.25) un solo frame puede
-    // saltearse una capa entera de otro modo, y si esa capa ya no vuelve a
-    // chequearse queda indestructible para siempre. Se para en la primera
-    // capa viva que encuentra en ese rango; si estaban todas vacias, la bala
-    // sigue de largo.
-    const float travelOld = std::clamp(horizontalHit ? (oldX - static_cast<float>(cellX)) : (oldY - static_cast<float>(cellY)), 0.0f, 0.999f);
-    const int layerFrom = std::clamp(static_cast<int>(travelOld * kBrickGridSize), 0, kBrickGridSize - 1);
+    // Siempre escanea desde la capa de ENTRADA (la mas cercana a por donde
+    // vino la bala) hasta la capa de llegada, nunca desde la posicion previa
+    // de la bala (pedido explicitamente: con el tanque pegado al bloque, el
+    // cano dispara ya practicamente adentro de la celda, y estimar la capa
+    // de arranque con esa posicion podia saltearse la unica capa que
+    // quedaba viva mas cerca de la entrada, dejando pasar la bala de largo).
+    // Escanear las hasta 4 capas es barato y encuentra la primera viva sin
+    // importar cuantas ya esten vacias antes.
+    const int layerFrom = (hitFrom == Direction::Right || hitFrom == Direction::Down) ? 0 : (kBrickGridSize - 1);
     const int layerTo = horizontalHit ? col : row;
     const int travelStep = (layerTo >= layerFrom) ? 1 : -1;
 
@@ -242,81 +239,94 @@ bool BulletSystem::HandleBrickHit(TileMap& map, int cellX, int cellY, float oldX
         return false; // todo el tramo ya estaba vacio: no frena la bala
     }
 
-    if (doubleLayer) {
-        // Nivel 4: rompe tambien la siguiente capa en la direccion de avance.
-        int step = 0;
-        switch (hitFrom) {
-            case Direction::Right: step = 1; break;
-            case Direction::Left:  step = -1; break;
-            case Direction::Down:  step = 1; break;
-            case Direction::Up:    step = -1; break;
-        }
-        destroyLayer(stoppedAtLayer + step);
-    }
+    // Nota: antes, nivel 4 rompia ademas la capa siguiente en un solo
+    // llamado (doubleLayer). Ya no hace falta: con el sistema de
+    // potencia/salud de bala (ver Bullet::health en Update), una bala que le
+    // sobra salud despues de este impacto sigue de largo sola, y el
+    // sub-paso siguiente (a 0.1 celdas, mas angosto que una unidad minima de
+    // 0.25) vuelve a llamar a esta funcion, encontrando y rompiendo la
+    // proxima capa viva por su cuenta — logra lo mismo de forma mas general
+    // (tambien atraviesa tanques, no solo capas de un mismo bloque).
 
     if (cell.BrickFullyDestroyed()) {
         cell.type = TileType::Empty;
     }
 
-    CheckSeamGraze(map, cellX, cellY, horizontalHit, fracX, fracY, weaponLevel);
+    CheckSeamGraze(map, cellX, cellY, horizontalHit, fracX, fracY, power);
     return true;
 }
 
-bool BulletSystem::HandleSteelHit(TileMap& map, int cellX, int cellY, float hitX, float hitY, Direction hitFrom, int weaponLevel) {
+bool BulletSystem::HandleSteelHit(TileMap& map, int cellX, int cellY, float hitX, float hitY, Direction hitFrom, int power, int& outDealt, bool& outPrimaryUnitDestroyed) {
     Cell& cell = map.At(cellX, cellY);
 
     const float fracX = hitX - static_cast<float>(cellX);
     const float fracY = hitY - static_cast<float>(cellY);
     const bool horizontalHit = (hitFrom == Direction::Left || hitFrom == Direction::Right);
 
-    // Capa de entrada real (0 o 1), calculada con la posicion actual de la
-    // bala (igual que en ladrillo): si esa capa ya esta vacia, la siguiente
-    // llamada cae sola en la capa de al lado.
-    const int entryLayer = std::clamp(static_cast<int>((horizontalHit ? fracX : fracY) * kSteelGridSize), 0, kSteelGridSize - 1);
-
     // El otro eje decide centro (capa entera, 2 unidades) vs punta (1 unidad).
     const float otherFrac = horizontalHit ? fracY : fracX;
     constexpr float kCenterBandMin = 0.25f;
     constexpr float kCenterBandMax = 0.75f;
     const bool centerHit = otherFrac >= kCenterBandMin && otherFrac <= kCenterBandMax;
+    const int tipIndex = (otherFrac < 0.5f) ? 0 : 1;
 
-    const int damage = kSteelDamageByLevel[weaponLevel - 1];
     bool hitAliveUnit = false;
+    outDealt = 0; // cuanta salud de la unidad PRIMARIA (la primera viva que encuentra) se le resta a la bala, ver Update
+    outPrimaryUnitDestroyed = false; // si esa misma unidad PRIMARIA quedo destruida con este golpe (para el sonido de "resiste" vs "se rompe", ver Update)
 
     auto damageUnit = [&](int row, int col) {
         SteelUnit& unit = cell.steelUnits[row * kSteelGridSize + col];
         if (!unit.alive) {
             return;
         }
+        if (!hitAliveUnit) {
+            outDealt = std::min(power, unit.hp); // la primera unidad viva que toca esta llamada es la "primaria" para el sistema de resistencia de la bala
+        }
+        const bool isPrimary = !hitAliveUnit;
         hitAliveUnit = true;
-        unit.hp -= damage;
+        unit.hp -= power;
         if (unit.hp <= 0) {
             unit.alive = false;
+            if (isPrimary) {
+                outPrimaryUnitDestroyed = true;
+            }
         }
     };
 
-    if (centerHit) {
-        for (int i = 0; i < kSteelGridSize; ++i) {
-            damageUnit(horizontalHit ? i : entryLayer, horizontalHit ? entryLayer : i);
+    auto tryLayer = [&](int layer) {
+        if (centerHit) {
+            for (int i = 0; i < kSteelGridSize; ++i) {
+                damageUnit(horizontalHit ? i : layer, horizontalHit ? layer : i);
+            }
+        } else {
+            damageUnit(horizontalHit ? tipIndex : layer, horizontalHit ? layer : tipIndex);
         }
-    } else {
-        const int tipIndex = (otherFrac < 0.5f) ? 0 : 1;
-        damageUnit(horizontalHit ? tipIndex : entryLayer, horizontalHit ? entryLayer : tipIndex);
+    };
+
+    // Prueba primero la capa de ENTRADA (la mas cercana a por donde vino la
+    // bala); si ahi ya no quedaba nada, prueba la otra antes de dejarla
+    // pasar (pedido explicitamente: con el tanque pegado al bloque no hay
+    // que esperar a un frame futuro para que la posicion "caiga sola" en la
+    // capa de al lado — ver el mismo motivo en HandleBrickHit).
+    const int entryLayer = (hitFrom == Direction::Right || hitFrom == Direction::Down) ? 0 : (kSteelGridSize - 1);
+    tryLayer(entryLayer);
+    if (!hitAliveUnit) {
+        tryLayer(kSteelGridSize - 1 - entryLayer);
     }
 
     if (!hitAliveUnit) {
-        return false; // ahi ya estaba vacio: no frena la bala
+        return false; // las 2 capas ya estaban vacias: no frena la bala
     }
 
     if (cell.SteelFullyDestroyed()) {
         cell.type = TileType::Empty;
     }
 
-    CheckSeamGraze(map, cellX, cellY, horizontalHit, fracX, fracY, weaponLevel);
+    CheckSeamGraze(map, cellX, cellY, horizontalHit, fracX, fracY, power);
     return true;
 }
 
-void BulletSystem::TriggerSpecialExplosion(TileMap& map, float x, float y, int ownerId, SpecialExplosionSystem& specialExplosions, std::vector<SpecialExplosionEvent>& explosionEvents, int directHitOwnerId) {
+void BulletSystem::TriggerSpecialExplosion(TileMap& map, float x, float y, int ownerId, SpecialExplosionSystem& specialExplosions, std::vector<SpecialExplosionEvent>& explosionEvents, Sound explosionSound, int directHitOwnerId) {
     const int minX = std::max(0, static_cast<int>(std::floor(x - kSpecialExplosionRadius)));
     const int maxX = std::min(map.Width() - 1, static_cast<int>(std::floor(x + kSpecialExplosionRadius)));
     const int minY = std::max(0, static_cast<int>(std::floor(y - kSpecialExplosionRadius)));
@@ -336,17 +346,22 @@ void BulletSystem::TriggerSpecialExplosion(TileMap& map, float x, float y, int o
                     unit.alive = false;
                 }
                 cell.type = TileType::Empty;
-            } else if (cell.type == TileType::Steel || cell.type == TileType::Base) {
+            } else if (cell.type == TileType::Steel) {
                 cell.type = TileType::Empty;
+            } else if (cell.type == TileType::Base) {
+                // Pedido explicitamente: queda con su frame de "destruida"
+                // (ver TileType::BaseDestroyed) en vez de desaparecer.
+                cell.type = TileType::BaseDestroyed;
             }
         }
     }
 
     specialExplosions.Spawn(x, y);
     explosionEvents.push_back(SpecialExplosionEvent{x, y, kSpecialExplosionRadius, ownerId, directHitOwnerId});
+    PlaySound(explosionSound);
 }
 
-void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, SpecialExplosionSystem& specialExplosions, std::vector<SpecialExplosionEvent>& explosionEvents, const std::vector<TankCombatState>& tanks, std::vector<SpecialDirectKillEvent>& directKillEvents) {
+void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, SpecialExplosionSystem& specialExplosions, std::vector<SpecialExplosionEvent>& explosionEvents, const std::vector<TankCombatState>& tanks, std::vector<SpecialDirectKillEvent>& directKillEvents, Sound brickBreakSound, Sound blockResistSound, Sound explosionSound) {
     explosionEvents.clear();
     directKillEvents.clear();
 
@@ -361,6 +376,23 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
         preMoveY[i] = bullets_[i].y;
     }
 
+    // Tope de cuanto se mueve una bala entre cada chequeo de colision
+    // (pedido explicitamente: "la bala es mas rapida y tiene problemas para
+    // detectar las colisiones", niveles 2 y 4 de ataque). Antes cada bala
+    // se movia toda su distancia del frame de un solo salto y RECIEN AHI se
+    // fijaba si habia algo solido en el punto de llegada: a las velocidades
+    // mas altas (16 y 14 celdas/seg, ver kBulletSpeedByLevel) ese salto
+    // podia terminar del otro lado de una celda vecina angosta sin que
+    // ningun chequeo intermedio la haya visto nunca, dejando pasar la bala
+    // de largo. Ahora, si la distancia de este frame es mayor a este tope,
+    // se parte en varios sub-pasos mas cortos (cada uno con su propio
+    // chequeo completo de colision, exactamente igual al de antes), asi
+    // ninguna celda/unidad angosta en el medio del camino queda sin
+    // revisar. kMaxCollisionStep queda bien por debajo del ancho de la
+    // unidad minima de ladrillo (0.25 celdas, ver kBrickGridSize) para que
+    // ni la bala mas rapida (especial, 24 celdas/seg) pueda saltearse una.
+    constexpr float kMaxCollisionStep = 0.1f;
+
     for (Bullet& bullet : bullets_) {
         if (!bullet.alive) {
             continue;
@@ -369,9 +401,13 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
         float dx = 0.0f, dy = 0.0f;
         DirectionVector(bullet.direction, dx, dy);
 
-        const float distance = static_cast<float>(bullet.speed * dt);
-        const float newX = bullet.x + dx * distance;
-        const float newY = bullet.y + dy * distance;
+        const float totalDistance = static_cast<float>(bullet.speed * dt);
+        const int numSteps = std::max(1, static_cast<int>(std::ceil(totalDistance / kMaxCollisionStep)));
+        const float stepDistance = totalDistance / static_cast<float>(numSteps);
+
+        for (int step = 0; step < numSteps; ++step) {
+        const float newX = bullet.x + dx * stepDistance;
+        const float newY = bullet.y + dy * stepDistance;
         int cellX = static_cast<int>(std::floor(newX));
         int cellY = static_cast<int>(std::floor(newY));
 
@@ -383,61 +419,70 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
         // central esta vacia pero el margen del sprite (perpendicular al
         // movimiento) roza la celda de al lado y esa si bloquea, se usa esa
         // celda en su lugar.
-        constexpr float kBulletHitHalfWidth = 0.09f + (1.0f / 16.0f); // +1px (celda de 16px), pedido explicitamente
+        // Antes tenia +1px de margen extra (pedido explicitamente en su
+        // momento para no dejar pasar rozes reales), pero se paso de largo:
+        // el margen quedaba mas ancho que el sprite y rompia bloques que la
+        // bala ni tocaba visualmente. Se achica de vuelta al ancho real del
+        // sprite nada mas (pedido explicitamente).
+        constexpr float kBulletHitHalfWidth = 0.09f;
         const bool centerBlocks = map.InBounds(cellX, cellY) && TileBlocksShots(map.At(cellX, cellY).type);
+        bool nudgedY = false;
+        bool nudgedX = false;
         if (!centerBlocks && dx != 0.0f) {
             const int cellYLow = static_cast<int>(std::floor(newY - kBulletHitHalfWidth));
             const int cellYHigh = static_cast<int>(std::floor(newY + kBulletHitHalfWidth));
             if (cellYLow != cellY && map.InBounds(cellX, cellYLow) && TileBlocksShots(map.At(cellX, cellYLow).type)) {
                 cellY = cellYLow;
+                nudgedY = true;
             } else if (cellYHigh != cellY && map.InBounds(cellX, cellYHigh) && TileBlocksShots(map.At(cellX, cellYHigh).type)) {
                 cellY = cellYHigh;
+                nudgedY = true;
             }
         } else if (!centerBlocks && dy != 0.0f) {
             const int cellXLow = static_cast<int>(std::floor(newX - kBulletHitHalfWidth));
             const int cellXHigh = static_cast<int>(std::floor(newX + kBulletHitHalfWidth));
             if (cellXLow != cellX && map.InBounds(cellXLow, cellY) && TileBlocksShots(map.At(cellXLow, cellY).type)) {
                 cellX = cellXLow;
+                nudgedX = true;
             } else if (cellXHigh != cellX && map.InBounds(cellXHigh, cellY) && TileBlocksShots(map.At(cellXHigh, cellY).type)) {
                 cellX = cellXHigh;
+                nudgedX = true;
             }
         }
 
-        // Si la bala recien entra a esta celda (la posicion de ANTES de
-        // este paso todavia no habia cruzado el borde de entrada), la capa
-        // que "toca" es siempre la de entrada, nunca el punto al que
-        // sobrepaso el movimiento de este frame. Con velocidades altas
-        // (p.ej. nivel 2) un solo paso puede ser mas ancho que una capa
-        // entera, y disparando pegado al bloque la bala ya arranca en el
-        // borde mismo (mismo indice de celda desde el primer frame), asi
-        // que comparar indices de celda no alcanza: hay que comparar contra
-        // el borde real. hitX/hitY son solo para decidir la capa/unidad de
-        // ladrillo o hierro; newX/newY (la posicion real) se siguen usando
-        // para todo lo demas.
-        float hitX = newX;
-        float hitY = newY;
-        if (dx > 0.0f && bullet.x <= static_cast<float>(cellX)) {
-            hitX = static_cast<float>(cellX);
-        } else if (dx < 0.0f && bullet.x >= static_cast<float>(cellX) + 1.0f) {
-            hitX = static_cast<float>(cellX) + 0.999f;
-        }
-        if (dy > 0.0f && bullet.y <= static_cast<float>(cellY)) {
-            hitY = static_cast<float>(cellY);
-        } else if (dy < 0.0f && bullet.y >= static_cast<float>(cellY) + 1.0f) {
-            hitY = static_cast<float>(cellY) + 0.999f;
-        }
+        // hitX/hitY son la posicion real de llegada de este sub-paso (para
+        // decidir la capa/unidad de ladrillo o hierro en la que penetro,
+        // ver HandleBrickHit/HandleSteelHit); newX/newY se siguen usando
+        // para todo lo demas. Cuando el chequeo de arriba redirigio a la
+        // celda vecina (nudgedX/nudgedY), la posicion real de la bala
+        // siempre queda pegada al borde MAS LEJANO de esa celda vecina (es
+        // la definicion misma del roce): usar esa posicion tal cual para
+        // decidir fila/columna en HandleBrickHit/HandleSteelHit la hacia
+        // caer SIEMPRE en la banda de esquina, destruyendo solo la mitad de
+        // esa capa en vez de la capa entera — pedido explicitamente,
+        // "disparar entre dos bloques" iba dejando un patron dentado en vez
+        // de tocarlos de lleno. Se fuerza al centro de la celda vecina en
+        // el eje perpendicular en su lugar, como si hubiera entrado derecho.
+        const float hitX = nudgedX ? (static_cast<float>(cellX) + 0.5f) : newX;
+        const float hitY = nudgedY ? (static_cast<float>(cellY) + 0.5f) : newY;
 
         if (!map.InBounds(cellX, cellY)) {
             // Borde del escenario: no hay tile ahi, pero igual es un impacto.
             const float edgeX = std::clamp(newX, 0.0f, static_cast<float>(map.Width()));
             const float edgeY = std::clamp(newY, 0.0f, static_cast<float>(map.Height()));
             if (bullet.isSpecial) {
-                TriggerSpecialExplosion(map, edgeX, edgeY, bullet.ownerId, specialExplosions, explosionEvents);
+                TriggerSpecialExplosion(map, edgeX, edgeY, bullet.ownerId, specialExplosions, explosionEvents, explosionSound);
             } else {
                 impacts.Spawn(edgeX, edgeY, bullet.weaponLevel == 4);
+                if (bullet.ownerId < kEnemyOwnerIdBase) {
+                    // Pedido explicitamente: tambien cuenta como "pega en
+                    // una pared y no la rompe" — las paredes del nivel
+                    // (borde del mapa), solo para balas de jugador.
+                    PlaySound(blockResistSound);
+                }
             }
             bullet.alive = false;
-            continue;
+            break;
         }
 
         const TileType hitType = map.At(cellX, cellY).type;
@@ -445,7 +490,11 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
         if (bullet.isSpecial) {
             // Choque directo contra un tanque (que no sea el propio dueño):
             // nivel 1-3 sin escudo se destruye directo y la bala sigue de
-            // largo (no explota); con escudo o nivel 4, la bala explota.
+            // largo (consume 1 punto de su propia salud); con escudo o
+            // nivel 4 (asi es como esta lista fuerza que el Power - que no
+            // tiene el mismo concepto de "nivel" que un jugador - tambien
+            // caiga en este caso, ver como se arma "tanks" mas arriba en
+            // Game.cpp), la bala explota entera.
             const TankCombatState* hitTank = nullptr;
             for (const TankCombatState& t : tanks) {
                 if (t.ownerId == bullet.ownerId) {
@@ -458,68 +507,188 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
             }
 
             if (hitTank != nullptr && !hitTank->shielded && hitTank->weaponLevel != 4) {
-                directKillEvents.push_back(SpecialDirectKillEvent{hitTank->ownerId});
+                directKillEvents.push_back(SpecialDirectKillEvent{hitTank->ownerId, bullet.ownerId});
+                bullet.health -= 1;
+                if (bullet.health <= 0) {
+                    TriggerSpecialExplosion(map, newX, newY, bullet.ownerId, specialExplosions, explosionEvents, explosionSound, hitTank->ownerId);
+                    bullet.alive = false;
+                    break;
+                }
                 bullet.x = newX;
                 bullet.y = newY;
                 continue;
             }
 
-            // El especial no distingue capas ni tipo de bloqueo: cualquier
-            // cosa solida lo hace explotar y la explosion se lleva todo.
-            if (hitTank != nullptr || TileBlocksShots(hitType)) {
-                const int directHitOwnerId = (hitTank != nullptr) ? hitTank->ownerId : -1;
-                TriggerSpecialExplosion(map, newX, newY, bullet.ownerId, specialExplosions, explosionEvents, directHitOwnerId);
+            if (hitTank != nullptr) {
+                // Escudo o nivel 4: fuerza la explosion.
+                TriggerSpecialExplosion(map, newX, newY, bullet.ownerId, specialExplosions, explosionEvents, explosionSound, hitTank->ownerId);
                 bullet.alive = false;
-            } else {
+                break;
+            }
+
+            if (hitType == TileType::Base) {
+                // El aguila: siempre destruye y explota de una, sin
+                // consumir salud (el fin de la partida no espera a que se
+                // agote). Pedido explicitamente: queda con su frame de
+                // "destruida" (ver TileType::BaseDestroyed) en vez de
+                // desaparecer. Quien llama (Game::Update) detecta que la
+                // celda dejo de ser Base y termina la partida.
+                map.At(cellX, cellY).type = TileType::BaseDestroyed;
+                TriggerSpecialExplosion(map, hitX, hitY, bullet.ownerId, specialExplosions, explosionEvents, explosionSound);
+                bullet.alive = false;
+                break;
+            }
+
+            if (hitType == TileType::Brick) {
+                if (HandleBrickHit(map, cellX, cellY, hitX, hitY, bullet.direction, kSpecialBulletPower)) {
+                    if (bullet.ownerId < kEnemyOwnerIdBase) {
+                        PlaySound(brickBreakSound); // pedido explicitamente: solo bala de jugador
+                    }
+                    bullet.health -= 1; // ladrillo salud 1: siempre consume 1 punto
+                    if (bullet.health <= 0) {
+                        // hitX/hitY (no newX/newY): si esto se disparo por un
+                        // roce a la celda vecina (nudgedX/nudgedY), la
+                        // explosion tiene que verse ahi, no en la posicion
+                        // real (sin nudgear) de la bala — pedido
+                        // explicitamente, se veia "flotando" separada del
+                        // bloque que en realidad rompio.
+                        TriggerSpecialExplosion(map, hitX, hitY, bullet.ownerId, specialExplosions, explosionEvents, explosionSound);
+                        bullet.alive = false;
+                        break;
+                    }
+                    // Le sobra salud: sigue de largo, sin animacion de impacto
+                    // (pedido explicitamente: esa animacion es solo cuando la
+                    // bala se destruye de verdad, no en cada golpe que sobrevive).
+                    bullet.x = newX;
+                    bullet.y = newY;
+                    continue;
+                }
                 bullet.x = newX;
                 bullet.y = newY;
+                continue;
             }
+
+            if (hitType == TileType::Steel) {
+                int dealt = 0;
+                bool unitDestroyed = false;
+                if (HandleSteelHit(map, cellX, cellY, hitX, hitY, bullet.direction, kSpecialBulletPower, dealt, unitDestroyed)) {
+                    bullet.health -= dealt;
+                    if (bullet.health <= 0) {
+                        TriggerSpecialExplosion(map, hitX, hitY, bullet.ownerId, specialExplosions, explosionEvents, explosionSound);
+                        bullet.alive = false;
+                        break;
+                    }
+                    bullet.x = newX;
+                    bullet.y = newY;
+                    continue;
+                }
+                bullet.x = newX;
+                bullet.y = newY;
+                continue;
+            }
+
+            if (TileBlocksShots(hitType)) {
+                // Obstaculo generico sin nocion de salud (p.ej. tile no
+                // destructible fuera de ladrillo/hierro/base): siempre
+                // explota entero, como antes.
+                TriggerSpecialExplosion(map, hitX, hitY, bullet.ownerId, specialExplosions, explosionEvents, explosionSound);
+                bullet.alive = false;
+                break;
+            }
+            bullet.x = newX;
+            bullet.y = newY;
             continue;
         }
 
         if (hitType == TileType::Brick) {
-            if (HandleBrickHit(map, cellX, cellY, bullet.x, bullet.y, hitX, hitY, bullet.direction, bullet.weaponLevel == 4, bullet.weaponLevel)) {
-                impacts.Spawn(newX, newY, bullet.weaponLevel == 4);
-                bullet.alive = false;
-            } else {
-                // La unidad exacta del impacto ya estaba destruida: la bala sigue de largo.
+            const int power = BulletPower(bullet);
+            if (HandleBrickHit(map, cellX, cellY, hitX, hitY, bullet.direction, power)) {
+                if (bullet.ownerId < kEnemyOwnerIdBase) {
+                    PlaySound(brickBreakSound); // pedido explicitamente: solo bala de jugador
+                }
+                bullet.health -= 1; // ladrillo salud 1: siempre consume 1 punto de la bala
+                if (bullet.health <= 0) {
+                    // hitX/hitY (no newX/newY): si el golpe se disparo por un
+                    // roce a la celda vecina (nudgedX/nudgedY), el destello
+                    // tiene que verse ahi, no en la posicion real (sin
+                    // nudgear) de la bala — pedido explicitamente, se veia
+                    // "flotando" separado del bloque que en realidad rompio.
+                    impacts.Spawn(hitX, hitY, bullet.weaponLevel == 4);
+                    bullet.alive = false;
+                    break;
+                }
+                // Le sobra salud: sigue de largo (pedido explicitamente,
+                // "ciertas balas puedan atravesar objetos y tanques"), sin
+                // animacion de impacto (esa es solo cuando la bala se
+                // destruye de verdad, pedido explicitamente).
                 bullet.x = newX;
                 bullet.y = newY;
+                continue;
             }
+            // La unidad exacta del impacto ya estaba destruida: la bala sigue de largo.
+            bullet.x = newX;
+            bullet.y = newY;
             continue;
         }
 
         if (hitType == TileType::Steel) {
-            if (HandleSteelHit(map, cellX, cellY, hitX, hitY, bullet.direction, bullet.weaponLevel)) {
-                impacts.Spawn(newX, newY, bullet.weaponLevel == 4);
-                bullet.alive = false;
-            } else {
-                // La unidad exacta del impacto ya estaba destruida: la bala sigue de largo.
+            const int power = BulletPower(bullet);
+            int dealt = 0;
+            bool unitDestroyed = false;
+            if (HandleSteelHit(map, cellX, cellY, hitX, hitY, bullet.direction, power, dealt, unitDestroyed)) {
+                if (!unitDestroyed && bullet.ownerId < kEnemyOwnerIdBase) {
+                    // Pedido explicitamente: sonido de "pega y no lo rompe", solo bala de jugador.
+                    PlaySound(blockResistSound);
+                }
+                bullet.health -= dealt;
+                if (bullet.health <= 0) {
+                    impacts.Spawn(hitX, hitY, bullet.weaponLevel == 4);
+                    bullet.alive = false;
+                    break;
+                }
                 bullet.x = newX;
                 bullet.y = newY;
+                continue;
             }
+            // La unidad exacta del impacto ya estaba destruida: la bala sigue de largo.
+            bullet.x = newX;
+            bullet.y = newY;
             continue;
         }
 
         if (hitType == TileType::Base) {
-            // El aguila: un solo impacto (de cualquier nivel de arma) la
-            // destruye, sin capas ni HP como ladrillo/hierro. Quien llama
-            // (Game::Update) detecta que la celda dejo de ser Base y termina
-            // la partida.
-            map.At(cellX, cellY).type = TileType::Empty;
-            impacts.Spawn(newX, newY, bullet.weaponLevel == 4);
+            // El aguila: un solo impacto (de cualquier potencia) la
+            // destruye, sin capas ni salud como ladrillo/hierro, y siempre
+            // frena a la bala aunque le quedara salud (el fin de la partida
+            // no espera a que se agote). Pedido explicitamente: la misma
+            // animacion chica de explosion que usa Game::DestroyTank para
+            // un tanque, centrada en la celda; el frame de "destruida" (ver
+            // TileType::BaseDestroyed) ya queda debajo desde este mismo
+            // instante, asi que es lo unico que se ve una vez que la
+            // explosion termina de reproducirse. Quien llama (Game::Update)
+            // detecta que la celda dejo de ser Base y termina la partida.
+            map.At(cellX, cellY).type = TileType::BaseDestroyed;
+            specialExplosions.Spawn(static_cast<float>(cellX) + 0.5f, static_cast<float>(cellY) + 0.5f, /*nativeScale=*/true);
+            PlaySound(explosionSound);
+            impacts.Spawn(hitX, hitY, bullet.weaponLevel == 4);
             bullet.alive = false;
-            continue;
+            break;
         }
 
         if (TileBlocksShots(hitType)) {
-            impacts.Spawn(newX, newY, bullet.weaponLevel == 4);
+            // Obstaculo generico sin nocion de salud: siempre frena del
+            // todo, como antes.
+            if (bullet.ownerId < kEnemyOwnerIdBase) {
+                PlaySound(blockResistSound); // pedido explicitamente: solo bala de jugador
+            }
+            impacts.Spawn(hitX, hitY, bullet.weaponLevel == 4);
             bullet.alive = false;
-            continue;
+            break;
         }
 
         bullet.x = newX;
         bullet.y = newY;
+        } // fin de los sub-pasos de esta bala
     }
 
     // Se solaparon en algun momento de este frame en un eje: o terminaron
@@ -563,7 +732,7 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
                 Bullet& normal = a.isSpecial ? b : a;
                 if (normal.weaponLevel >= 3) {
                     // La detiene: se destruyen las dos y el especial explota ahi.
-                    TriggerSpecialExplosion(map, midX, midY, special.ownerId, specialExplosions, explosionEvents);
+                    TriggerSpecialExplosion(map, midX, midY, special.ownerId, specialExplosions, explosionEvents, explosionSound);
                     normal.alive = false;
                     special.alive = false;
                 } else {
@@ -578,8 +747,8 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
                 // Caso raro (cada jugador solo tiene un especial a la vez):
                 // si chocan entre si, explotan las dos, cada una con su
                 // propio dueño para el dano directo que corresponda.
-                TriggerSpecialExplosion(map, midX, midY, a.ownerId, specialExplosions, explosionEvents);
-                TriggerSpecialExplosion(map, midX, midY, b.ownerId, specialExplosions, explosionEvents);
+                TriggerSpecialExplosion(map, midX, midY, a.ownerId, specialExplosions, explosionEvents, explosionSound);
+                TriggerSpecialExplosion(map, midX, midY, b.ownerId, specialExplosions, explosionEvents, explosionSound);
                 a.alive = false;
                 b.alive = false;
                 continue;
@@ -595,48 +764,76 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
     bullets_.erase(std::remove_if(bullets_.begin(), bullets_.end(), [](const Bullet& b) { return !b.alive; }), bullets_.end());
 }
 
-bool BulletSystem::KillBulletsHittingBox(int excludeOwnerId, float left, float right, float top, float bottom, BulletImpactSystem& impacts, std::vector<int>& outShooterWeaponLevels) {
+namespace {
+// Resta a la salud propia de la bala lo que "resolve" diga que el objetivo
+// absorbio de este impacto: si se agota, la bala se destruye (recien ahi se
+// dispara la animacion de impacto, pedido explicitamente: solo cuando la
+// bala se destruye de verdad, no en cada golpe que sobrevive); si le queda
+// salud, sigue de largo, reubicada justo pasando el borde de la caja del
+// tanque en su direccion de avance para no volver a chocar contra el MISMO
+// tanque al cuadro siguiente mientras sigan solapados.
+void ResolveBulletVsTankBox(Bullet& bullet, int dealt, float left, float right, float top, float bottom, BulletImpactSystem& impacts) {
+    bullet.health -= dealt;
+    if (bullet.health <= 0) {
+        impacts.Spawn(bullet.x, bullet.y, bullet.weaponLevel == 4);
+        bullet.alive = false;
+        return;
+    }
+    switch (bullet.direction) {
+        case Direction::Right: bullet.x = right + 0.01f; break;
+        case Direction::Left:  bullet.x = left - 0.01f;  break;
+        case Direction::Down:  bullet.y = bottom + 0.01f; break;
+        case Direction::Up:    bullet.y = top - 0.01f;   break;
+    }
+}
+} // namespace
+
+bool BulletSystem::KillBulletsHittingBox(int excludeOwnerId, float left, float right, float top, float bottom, BulletImpactSystem& impacts, const TankHitResolver& resolve) {
     bool hitAny = false;
     for (Bullet& bullet : bullets_) {
-        if (!bullet.alive || bullet.isSpecial || bullet.ownerId == excludeOwnerId) {
+        // Solo balas de OTRO JUGADOR (pedido explicitamente: el fuego amigo
+        // es entre jugadores nada mas). Antes solo excluia al propio dueño,
+        // asi que de paso agarraba tambien balas enemigas que pasaban por
+        // esta misma caja, aplicandoles el modo de fuego amigo (paralizar/
+        // danar segun friendlyFireMode_) en vez de dejarlas para el camino
+        // dedicado a enemigos (dano fijo, ver KillEnemyBulletsHittingBox).
+        if (!bullet.alive || bullet.isSpecial || bullet.ownerId == excludeOwnerId || bullet.ownerId >= kEnemyOwnerIdBase) {
             continue;
         }
         if (bullet.x >= left && bullet.x <= right && bullet.y >= top && bullet.y <= bottom) {
-            impacts.Spawn(bullet.x, bullet.y, bullet.weaponLevel == 4);
-            outShooterWeaponLevels.push_back(bullet.weaponLevel);
-            bullet.alive = false;
+            const int dealt = resolve(bullet.weaponLevel, bullet.isSpecial);
+            ResolveBulletVsTankBox(bullet, dealt, left, right, top, bottom, impacts);
             hitAny = true;
         }
     }
     return hitAny;
 }
 
-bool BulletSystem::KillEnemyBulletsHittingBox(float left, float right, float top, float bottom, BulletImpactSystem& impacts) {
+bool BulletSystem::KillEnemyBulletsHittingBox(float left, float right, float top, float bottom, BulletImpactSystem& impacts, const TankHitResolver& resolve) {
     bool hitAny = false;
     for (Bullet& bullet : bullets_) {
         if (!bullet.alive || bullet.isSpecial || bullet.ownerId < kEnemyOwnerIdBase) {
             continue;
         }
         if (bullet.x >= left && bullet.x <= right && bullet.y >= top && bullet.y <= bottom) {
-            impacts.Spawn(bullet.x, bullet.y, bullet.weaponLevel == 4);
-            bullet.alive = false;
+            const int dealt = resolve(bullet.weaponLevel, bullet.isSpecial);
+            ResolveBulletVsTankBox(bullet, dealt, left, right, top, bottom, impacts);
             hitAny = true;
         }
     }
     return hitAny;
 }
 
-bool BulletSystem::KillPlayerBulletsHittingBox(float left, float right, float top, float bottom, BulletImpactSystem& impacts, std::vector<int>& outShooterWeaponLevels, std::vector<int>& outShooterOwnerIds) {
+bool BulletSystem::KillPlayerBulletsHittingBox(float left, float right, float top, float bottom, BulletImpactSystem& impacts, std::vector<int>& outShooterOwnerIds, const std::function<int(int weaponLevel, bool isSpecial, int shooterOwnerId)>& resolve) {
     bool hitAny = false;
     for (Bullet& bullet : bullets_) {
         if (!bullet.alive || bullet.isSpecial || bullet.ownerId >= kEnemyOwnerIdBase) {
             continue;
         }
         if (bullet.x >= left && bullet.x <= right && bullet.y >= top && bullet.y <= bottom) {
-            impacts.Spawn(bullet.x, bullet.y, bullet.weaponLevel == 4);
-            outShooterWeaponLevels.push_back(bullet.weaponLevel);
             outShooterOwnerIds.push_back(bullet.ownerId);
-            bullet.alive = false;
+            const int dealt = resolve(bullet.weaponLevel, bullet.isSpecial, bullet.ownerId);
+            ResolveBulletVsTankBox(bullet, dealt, left, right, top, bottom, impacts);
             hitAny = true;
         }
     }

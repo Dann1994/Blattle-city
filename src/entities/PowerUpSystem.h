@@ -21,7 +21,10 @@ struct TankOccupiedBounds {
 // bloquee movimiento ni un tanque encima).
 class PowerUpSystem {
 public:
-    void Update(double dt, const TileMap& map, const std::vector<TankOccupiedBounds>& occupiedByTanks);
+    // Devuelve true en el cuadro exacto en que aparece un item nuevo en el
+    // mapa (pedido explicitamente, para el sonido de aparicion — ver
+    // Game::TickAudio/Game::Update).
+    bool Update(double dt, const TileMap& map, const std::vector<TankOccupiedBounds>& occupiedByTanks);
 
     // Si el tanque (celda 1x1 en tankX,tankY) se solapa con el power-up activo,
     // lo recoge y devuelve el tipo en outType.
@@ -35,17 +38,24 @@ public:
     bool IsBlinkVisible() const { return blinkVisible_; }
 
     // Fuerza la aparicion de un tipo especifico en una celda abierta al azar,
-    // saltando el timer. Botones de prueba (F1, F2, ...).
-    void ForceSpawn(PowerUpType type, const TileMap& map, const std::vector<TankOccupiedBounds>& occupiedByTanks);
+    // saltando el timer. Botones de prueba (F1, F2, ...). Devuelve true si
+    // encontro donde ponerlo (ver Update).
+    bool ForceSpawn(PowerUpType type, const TileMap& map, const std::vector<TankOccupiedBounds>& occupiedByTanks);
 
 private:
-    void SpawnAt(PowerUpType type, const TileMap& map, const std::vector<TankOccupiedBounds>& occupiedByTanks);
+    bool SpawnAt(PowerUpType type, const TileMap& map, const std::vector<TankOccupiedBounds>& occupiedByTanks);
 
     PowerUp powerUp_;
     double spawnTimer_ = 5.0; // primera aparicion a los 5s de iniciada la partida
     double lifeTimer_ = 0.0;
     double blinkTimer_ = 0.0;
     bool blinkVisible_ = true;
+
+    // Cuantos items van aparecidos en el nivel actual (pedido explicitamente,
+    // ver kMaxItemsPerLevel en el .cpp): al llegar al maximo, el ciclo
+    // automatico de Update() deja de largar nuevos. Se reinicia solo, ya que
+    // Game reconstruye PowerUpSystem entero en cada nivel nuevo.
+    int spawnedThisLevel_ = 0;
 };
 
 } // namespace bc

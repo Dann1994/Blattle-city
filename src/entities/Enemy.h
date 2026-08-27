@@ -47,6 +47,13 @@ struct Enemy {
     // kBrickBreachPatienceFrames en EnemySystem.cpp).
     int stuckFrames = 0;
 
+    // Al toparse con algo que la frena (pedido explicitamente, ver
+    // kBlockedPauseDuration en cada *EnemySystem.cpp): cuenta regresiva de
+    // la pausa antes de elegir la proxima direccion (nunca la misma que la
+    // freno, ver el paso 3 de cada sistema). 0 = no esta frenada ahora
+    // mismo; se reinicia apenas deja de estarlo.
+    double blockedPauseTimer = 0.0;
+
     // Direccion de movimiento elegida este frame: el mejor vecino segun
     // BaseDistanceField, salvo que este desviandose (ver deviationDir),
     // atascada (esquive) o plantada rompiendo un ladrillo.

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <string>
 #include <vector>
 
 #include <raylib.h>
@@ -34,25 +35,42 @@ namespace bc {
 // Off: las balas de un jugador atraviesan al otro, sin ningun efecto.
 // Paralyze (nivel 1): la bala aliada se frena en el tanque y lo paraliza
 //   parpadeando 5 segundos (reusa Freeze/IsFrozen), sin quitarle nada mas.
-// Damage (nivel 2): el efecto depende del nivel de arma de quien dispara
-//   (ver ProcessFriendlyFireDamageHit) — de "resta 1 nivel" a "atraviesa el
-//   escudo y resta 2". Si el objetivo ya esta en nivel 1, cualquier impacto
-//   sin escudo lo destruye: explota con la animacion del disparo especial y
-//   respawnea como si hubiera perdido una vida.
+// Damage (nivel 2): sistema de potencia/salud unificado (ver ResolveTankHit)
+//   — la potencia de quien disparo se resta directo del nivel de arma
+//   actual del objetivo (su "salud"); si eso lo agota, queda destruido:
+//   explota con la animacion del disparo especial y respawnea como si
+//   hubiera perdido una vida. El escudo absorbe el golpe entero mientras le
+//   quede salud propia (ver Tank::AbsorbShieldHit).
 enum class FriendlyFireMode { Off, Paralyze, Damage };
 
 // Pantalla de titulo (seccion custom, pedida explicitamente con un arbol de
 // opciones concreto): Menu = en algun lugar del menu (ver MenuScreen para
 // cual exactamente), Playing = la partida en curso (Update/Render de
-// siempre).
-enum class AppState { Menu, Playing };
+// siempre), CharacterSelect = pantalla de "cuantos jugadores y de que color"
+// entre elegir Arcade > Local y que arranque el nivel (ver EnterCharacterSelect/
+// ProcessCharacterSelectInput/RenderCharacterSelect, pedida explicitamente).
+enum class AppState { Menu, Playing, CharacterSelect };
 
 // Los niveles del arbol de menu. Options solo se entra desde la pantalla
 // principal (Main), asi que Esc siempre vuelve ahi. ControlMapping = lista
 // Jugador 1-4; PlayerActions = las 7 acciones reasignables de un jugador
 // puntual, con la tecla actual al lado; CapturingKey = el prompt "Presione
 // una tecla" al reasignar una.
-enum class MenuScreen { Main, ModeSubmenu, Options, ControlMapping, PlayerActions, CapturingKey };
+// PauseMain/PauseEndChoice/PauseConfirmEnd son el menu de pausa (ver
+// paused_ mas abajo): PauseMain = la lista Continuar/Guardar/Cargar/
+// Opciones/Terminar partida; PauseEndChoice = Menu principal/Cerrar el
+// juego (al elegir "Terminar partida"); PauseConfirmEnd = confirmacion Si/No
+// de esa eleccion. Options/ControlMapping/PlayerActions/CapturingKey se
+// REUSAN tal cual desde la pausa (mismo codigo que desde el titulo, ver
+// RenderMenuScreenBody/optionsBackTarget_), asi que ese submenu se ve y se
+// maneja identico este en pantalla de titulo o en medio de una partida.
+// ControlDeviceChoice (pedido explicitamente, entre ControlMapping y
+// PlayerActions): Teclado/Mando, que dispositivo se va a configurar para
+// ese jugador. PlayerActions/CapturingKey pasan a leer/escribir
+// playerGamepadBindings_ en vez de playerBindings_ si se eligio Mando (ver
+// mappingGamepad_), mostrando solo Disparar/Especial/Inicio/Pausa (el
+// movimiento con mando es fijo: D-pad + analogico, no se remapea).
+enum class MenuScreen { Main, ModeSubmenu, Options, ControlMapping, ControlDeviceChoice, PlayerActions, CapturingKey, PauseMain, PauseEndChoice, PauseConfirmEnd, MainConfirmExit };
 
 // Transicion de nivel (seccion custom, calcada del original): None = juego
 // normal; ShowingText = pantalla gris solida con "NIVEL N" en el centro
@@ -62,6 +80,18 @@ enum class MenuScreen { Main, ModeSubmenu, Options, ControlMapping, PlayerAction
 // Update() congela todo el juego (nada se mueve/dispara/spawnea) y solo
 // avanza el temporizador de la transicion (ver BeginLevelTransition).
 enum class LevelTransitionPhase { None, ShowingText, Curtain };
+
+// Secuencia de fin de partida (pedida explicitamente, ver TriggerGameOver):
+// None = partida en curso normal; Rising = el sprite "GAME OVER" (Tanques.png)
+// sube desde abajo de la pantalla hasta el centro, mientras el resto del
+// juego (enemigos, balas, spawns) sigue andando y SOLO los jugadores quedan
+// congelados (ver gameOver_, que se usa como ese freeze puntual); Holding =
+// ya centrado, se queda quieto kGameOverHoldDuration o hasta que se apriete
+// el boton de Pausa/Enter; NameEntry = si el mejor puntaje de la partida
+// supero matchStartHighScore_, pide el nombre de ese jugador antes de volver
+// al menu (ver ProcessGameOverInput) — a partir de esta fase si se congela
+// todo (ya no hay "espectaculo" de fondo que mostrar).
+enum class GameOverPhase { None, Rising, Holding, NameEntry };
 
 // Pantalla de puntuacion de fin de nivel (seccion custom, calcada del
 // original): None = no se muestra; Counting = fondo negro con una fila por
@@ -74,14 +104,27 @@ enum class LevelTransitionPhase { None, ShowingText, Curtain };
 // None Update() congela el juego igual que LevelTransitionPhase.
 enum class ScoreTallyPhase { None, Counting, Holding };
 
-// Las 7 acciones de juego que se pueden reasignar por jugador (ver
+// Las 8 acciones de juego que se pueden reasignar por jugador (ver
 // PlayerKeyBindings). Start es la tecla que une/saca a ese jugador de la
-// partida (antes fija en las teclas 1/2/3/4, ver ProcessInput).
-enum class InputAction { Up, Down, Left, Right, Shoot, Special, Start };
-constexpr int kInputActionCount = 7;
+// partida (antes fija en las teclas 1/2/3/4, ver ProcessInput). Pause abre
+// el menu de pausa (ver paused_/MenuScreen::PauseMain) — CUALQUIER jugador
+// (activo o no) puede pausar con la suya; ademas, fija y sin importar el
+// mapeo de nadie, la tecla Enter del teclado tambien pausa (pedido
+// explicitamente, ver ProcessInput).
+enum class InputAction { Up, Down, Left, Right, Shoot, Special, Start, Pause };
+constexpr int kInputActionCount = 8;
 
 struct PlayerKeyBindings {
     int keys[kInputActionCount] = {};
+};
+
+// Botones de mando por jugador (pedido explicitamente): mismos indices que
+// PlayerKeyBindings (InputAction) para poder reusar el mismo codigo de
+// render/captura, pero solo Shoot/Special/Start/Pause tienen sentido aca
+// (Up/Down/Left/Right quedan sin usar: el movimiento con mando es siempre
+// D-pad + analogico, no una asignacion de un boton por direccion).
+struct PlayerGamepadBindings {
+    int buttons[kInputActionCount] = {};
 };
 
 class Game {
@@ -95,15 +138,60 @@ private:
     void Render(double interpolationAlpha);
     void Shutdown();
 
-    // Entrada del menu (flechas/Enter/Esc) mientras appState_ != Playing;
-    // reemplaza a ProcessInput() por completo ese frame (el menu no necesita
-    // el resto: input de jugador, teclas de prueba, etc.).
+    // Musica/ambiente (pedido explicitamente): se llama una vez por frame
+    // real (no por paso fijo, ver Run) para alimentar el stream de audio.
+    // battleLoopMusic_ suena en bucle infinito mientras haya enemigos por
+    // eliminar en el nivel actual (ver EnemiesRemainingThisLevel) Y la
+    // partida este realmente en curso (no en el menu, pausa, transicion de
+    // nivel, puntuacion o fin de partida) — se corta y arranca de nuevo
+    // desde el principio cada vez que esa condicion cambia, no queda
+    // pausada a mitad de pista.
+    void TickAudio();
+
+    // Entrada del menu (flechas/Enter/Esc) mientras appState_ != Playing O
+    // mientras paused_ (ver MenuScreen::PauseMain y siguientes): reemplaza a
+    // ProcessInput() por completo ese frame (el menu no necesita el resto:
+    // input de jugador, teclas de prueba, etc.). Options/ControlMapping/
+    // PlayerActions/CapturingKey se manejan identico venga de titulo o de
+    // pausa; solo "back" en Options usa optionsBackTarget_ para saber a cual
+    // volver.
     void ProcessMenuInput();
+
+    // El boton de Pausa de CUALQUIER jugador (activo o no) en su teclado o
+    // en SU mando asignado, o la tecla Enter del teclado (fija, no
+    // configurable): true en el frame exacto en que se aprieta. Se reusa
+    // tanto para ABRIR el menu de pausa como, pedido explicitamente, para
+    // CERRARLO de nuevo si se lo vuelve a apretar estando ya en la pantalla
+    // principal de pausa (ver ProcessInput).
+    bool IsPauseButtonPressed() const;
 
     // Dibuja la pantalla de titulo/menu completa (logo, puntaje maximo, la
     // lista que corresponda a menuScreen_, y el texto de ayuda de abajo).
     // Reemplaza a Render() por completo mientras appState_ != Playing.
     void RenderMenu();
+
+    // El cuerpo de la lista segun menuScreen_ (Main/ModeSubmenu/Options/
+    // ControlMapping/PlayerActions+CapturingKey), extraido de RenderMenu
+    // para poder reusarlo tal cual desde RenderPauseOverlay (Options y todo
+    // lo que cuelga de ahi se ve identico en el menu de pausa). listTop es
+    // la altura en Y donde arranca la lista (RenderMenu la calcula debajo
+    // del logo; RenderPauseOverlay usa una fija, mas arriba, sin logo).
+    // hintText sale llena con el texto de ayuda de abajo, si corresponde.
+    void RenderMenuScreenBody(float listTop, std::string& hintText);
+
+    // Pie de pagina comun (texto de ayuda + leyenda de controles, mas el
+    // cuadro "Presione una tecla" si menuScreen_ es CapturingKey), extraido
+    // de RenderMenu por la misma razon que RenderMenuScreenBody.
+    void RenderMenuFooter(const std::string& hintText);
+
+    // Encima de la escena de juego ya congelada (ver paused_), sin arrancar
+    // su propio BeginDrawing/ClearBackground como RenderMenu (se dibuja
+    // DENTRO del mismo frame de Render()): atenua el fondo y dibuja la
+    // pantalla de pausa que corresponda a menuScreen_ (lista principal,
+    // Terminar partida, la confirmacion Si/No, o -reusando
+    // RenderMenuScreenBody/RenderMenuFooter- Opciones y lo que cuelga de
+    // ahi).
+    void RenderPauseOverlay();
 
     // Una linea de una lista del menu, centrada, con el tanque selector
     // (menuSelectorTexture_) a la izquierda si esta resaltada; en gris si
@@ -116,17 +204,136 @@ private:
     // gameplay propio (ver ProcessMenuInput).
     void StartArcadeLocal();
 
+    // Pantalla de seleccion de personaje (pedida explicitamente), entre
+    // elegir Arcade > Local y que arranque el nivel: 4 recuadros en fila,
+    // "JUGADOR 1".."JUGADOR 4" arriba de cada uno. El jugador 1 siempre esta
+    // presente (arranca en el primer color) y elige su color con
+    // izquierda/derecha; los jugadores 2-4 arrancan en "PULSE DISPARAR"
+    // parpadeando y se unen apretando Disparar (se les asigna el primer
+    // color libre, ver FirstAvailableColor) o se van apretando Especial.
+    // Cualquier jugador presente puede apretar Pausa/Start para confirmar y
+    // arrancar la partida (ver StartArcadeLocal), o Esc para volver al menu.
+    void EnterCharacterSelect();
+    void ProcessCharacterSelectInput();
+    void RenderCharacterSelect();
+
+    // Dibuja un marco decorativo de ladrillos (reusa brickUnitTextures_[0])
+    // alrededor de box, expandido hacia afuera thickness ladrillos de
+    // tileSize px de lado — para la pantalla de seleccion de personaje, que
+    // no usa el viewport del mapa (ver RenderCharacterSelect).
+    void DrawBrickBorder(Rectangle box, float tileSize, int thickness);
+
+    // El color de cada jugador (0-3, ver playerColorIndex_) es independiente
+    // de su numero de jugador desde que existe la pantalla de seleccion de
+    // personaje: estas funciones traducen ese indice de color al set de
+    // sprites o color de HUD que ya existian por jugador (playerNSprites_/
+    // kPlayerNHudColor), para poder usar CUALQUIERA de los 4 en cualquier
+    // jugador.
+    TankSpriteSet& SpriteSetForColor(int colorIndex);
+    Color HudColorForColor(int colorIndex) const;
+
+    // Boton de una accion (Disparar/Especial) o direccion fija de mando
+    // (Izquierda/Derecha, no configurable con mando — ver ApplyGamepadInput)
+    // para el slot indicado (0-3), en su teclado o en el mando que le
+    // corresponda por orden de conexion (mismo criterio que
+    // IsPauseButtonPressed/GamepadIdForSlot). Pensado para la pantalla de
+    // seleccion de personaje, que necesita leer input por jugador ANTES de
+    // que existan tanques/PlayerInput reales.
+    int GamepadIdForSlot(int slot) const;
+    bool IsSlotShootPressed(int slot) const;
+    bool IsSlotSpecialPressed(int slot) const;
+    bool IsSlotLeftPressed(int slot) const;
+    bool IsSlotRightPressed(int slot) const;
+
+    // Le cambia el color al slot indicado, salteando los colores que ya
+    // tenga tomados OTRO jugador activo (para que nunca haya dos con el
+    // mismo) — direction +1/-1. Ver ProcessCharacterSelectInput.
+    void CycleLobbyColor(int slot, int direction);
+
+    // El primer color (0-3) que ningun jugador activo tenga puesto ahora
+    // mismo; 0 como ultimo recurso si los 4 ya estan tomados (no deberia
+    // pasar, solo hay 4 slots). Usado al unirse un jugador nuevo, desde la
+    // pantalla de seleccion de personaje o mid-partida (ver SetPlayerActive).
+    int FirstAvailableColor() const;
+
     // Puntaje maximo historico (no de esta partida sino de todas), mostrado
-    // arriba de todo en el menu. Se guarda en un archivo de texto en
-    // /assets junto a los niveles (mismo criterio que usa el editor).
+    // arriba de todo en el menu, y su nombre (ver highScoreHolderName_, se
+    // pide en GameOverPhase::NameEntry). Se guarda en un archivo de texto en
+    // /assets junto a los niveles (mismo criterio que usa el editor): primer
+    // renglon el numero, segundo el nombre (vacio/ausente en partidas viejas
+    // de antes de que el nombre existiera, se lee como "").
     void LoadHighScore();
     void SaveHighScore();
+
+    // Persistencia de controles (pedido explicitamente: la configuracion de
+    // teclado/mando de cada jugador debe sobrevivir a cerrar el juego).
+    // Mismo criterio que el highscore: un archivo de texto en /assets con
+    // los 4x8 codigos de tecla (playerBindings_) y despues los 4x4 codigos
+    // de boton de mando (playerGamepadBindings_), todos separados por
+    // espacios/saltos de linea. LoadControls() se llama una sola vez desde
+    // Init(), DESPUES de InitDefaultKeyBindings/InitDefaultGamepadBindings
+    // (para que el archivo pise los valores por defecto si existe, y si no
+    // existe o esta incompleto los valores por defecto ya cargados quedan
+    // como estaban). SaveControls() se llama cada vez que se confirma una
+    // reasignacion (ver MenuScreen::CapturingKey).
+    void LoadControls();
+    void SaveControls();
 
     // Si candidateScore supera al maximo historico, lo actualiza (y lo
     // persiste) y recuerda a ownerId como quien lo tiene ahora (ver
     // highScoreHolderId_), para mostrar su nombre junto al puntaje maximo en
-    // la pantalla de puntuacion de fin de nivel.
+    // la pantalla de puntuacion de fin de nivel. Ojo: esto es el numero nada
+    // mas, en caliente durante la partida — el NOMBRE del record historico
+    // (highScoreHolderName_) solo se pide una vez, al final de la partida
+    // (ver FinishGameOverHolding/matchStartHighScore_), no ac.
     void MaybeUpdateHighScore(int candidateScore, int ownerId);
+
+    // Fin de partida (pedido explicitamente, ver GameOverPhase): arranca la
+    // secuencia (Rising) la primera vez que se cumple alguna de las 2
+    // condiciones (aguila destruida o todos los jugadores activos sin
+    // vidas); si ya estaba en curso (gameOver_ ya en true) no hace nada, asi
+    // que da lo mismo llamarla desde los 2 lugares sin chequear antes cual
+    // disparo primero.
+    void TriggerGameOver();
+
+    // Entrada durante GameOverPhase != None (reemplaza a ProcessInput por
+    // completo ese frame, ver ProcessInput): en Holding, el boton de Pausa
+    // de cualquier jugador o Enter saltea la espera; en NameEntry, tipeo de
+    // texto (letras/numeros, Backspace para borrar, Enter para confirmar
+    // con al menos 1 caracter). En Rising no hace nada, la animacion corre
+    // sola.
+    void ProcessGameOverInput();
+
+    // Avanza el temporizador de Rising/Holding (ver GameOverPhase) y hace
+    // las transiciones de fase que dependen del tiempo (no del boton de
+    // salteo, eso lo maneja ProcessGameOverInput). NameEntry no tiene nada
+    // que tickear aca: es enteramente por input.
+    void TickGameOverSequence(double dt);
+
+    // Termina la espera de Holding (por tiempo o por boton, ver
+    // ProcessGameOverInput/TickGameOverSequence): busca al jugador activo
+    // con mas puntaje: si supera matchStartHighScore_ (el record que habia
+    // ANTES de esta partida, no el que pueda haberse ido actualizando en
+    // caliente durante ella, ver MaybeUpdateHighScore) pasa a NameEntry;
+    // si no, termina la secuencia directo (ver FinishGameOverSequence).
+    void FinishGameOverHolding();
+
+    // Guarda gameOverNameEntry_ como highScoreHolderName_ (el puntaje en si,
+    // highScore_, ya esta al dia por MaybeUpdateHighScore) y termina la
+    // secuencia.
+    void ConfirmGameOverNameEntry();
+
+    // Ultimo paso de GameOverPhase, con o sin NameEntry de por medio: vuelve
+    // al menu principal, mismo criterio que Esc/Terminar partida durante la
+    // partida (sin ResetState: se arma todo de nuevo recien cuando se elija
+    // Arcade > Local otra vez).
+    void FinishGameOverSequence();
+
+    // Dibuja la secuencia de fin de partida (ver GameOverPhase) encima de
+    // todo lo demas: el sprite "GAME OVER" en su posicion segun la fase
+    // (Rising/Holding), o el cuadro de pedido de nombre (NameEntry). No hace
+    // nada si gameOverPhase_ es None.
+    void RenderGameOverOverlay();
 
     // Esquema de teclado por defecto de cada jugador (el mismo que antes
     // estaba fijo en ProcessInput: WASD/flechas/IJKL/numpad + Ctrl-Espacio/
@@ -135,11 +342,21 @@ private:
     // desde el menu (ver MenuScreen::CapturingKey).
     void InitDefaultKeyBindings();
 
-    // Suma el mando gamepadId al input (no reemplaza el teclado, cualquiera
-    // de los dos mueve/dispara). D-pad + stick izquierdo mueven; los botones
-    // de disparo/especial se ajustan segun kGamepadShootButton/kGamepadSpecialButton
-    // (ver ProcessInput). No hace nada si ese mando no esta conectado.
-    void ApplyGamepadInput(PlayerInput& input, int gamepadId) const;
+    // Esquema de mando por defecto de cada jugador (pedido explicitamente,
+    // pensado para un control de Xbox): Disparar = A, Especial = B, Inicio
+    // y Pausa = el boton central derecho ("Menu"/Play, ver
+    // GamepadButtonName). Se llama una sola vez desde Init(); de ahi en mas
+    // playerGamepadBindings_ se edita desde el menu (Opciones > Mapeo de
+    // controles > Jugador N > Mando).
+    void InitDefaultGamepadBindings();
+
+    // Suma el mando gamepadId al input del jugador playerIndex (0-3, para
+    // leer sus botones configurados, ver playerGamepadBindings_) — no
+    // reemplaza el teclado, cualquiera de los dos mueve/dispara. D-pad +
+    // stick izquierdo mueven (fijo, no configurable); disparo/especial usan
+    // los botones asignados a ESE jugador. No hace nada si ese mando no
+    // esta conectado.
+    void ApplyGamepadInput(PlayerInput& input, int gamepadId, int playerIndex) const;
 
     // Recarga el mapa y reinicia tanque/balas/power-ups a estado inicial,
     // empezando siempre en el nivel 1 (ver Game.cpp). Llamada desde Init()
@@ -176,7 +393,11 @@ private:
     // ese jugador (no se mueve, no dispara, no es blanco de nada, no se
     // dibuja) hasta que se vuelva a activar. Distinto de Eliminate(): esto es
     // reversible, pensado solo para probar con menos jugadores en pantalla.
-    void SetPlayerActive(bool& activeFlag, Tank& tank, SpawnFlash& spawn, float spawnX, float spawnY, bool active);
+    // slotIndex (0-3) se usa solo para asignarle un color libre (ver
+    // playerColorIndex_/FirstAvailableColor) al activarlo mid-partida por
+    // esta via (la pantalla de seleccion de personaje, ver
+    // EnterCharacterSelect, ya asigna el suyo antes de llamar aca).
+    void SetPlayerActive(bool& activeFlag, Tank& tank, SpawnFlash& spawn, float spawnX, float spawnY, bool active, int slotIndex);
 
     // Item Pala (seccion custom): convierte en hierro temporal las hasta 8
     // celdas alrededor de la base (las que sean Ladrillo o Vacio; el hierro
@@ -201,12 +422,22 @@ private:
 
     // Aplica el dano de las explosiones especiales de este frame a un
     // tanque (ownerId identifica cual, para reconocer un choque directo -
-    // ver SpecialExplosionEvent::directHitOwnerId): con escudo, se pierde el
-    // escudo y 1 nivel; sin escudo, 2 niveles (salvo choque directo en nivel
-    // 4: -3 niveles y paralizado 5s). Si ya estaba en nivel 1, en vez de
-    // bajar mas queda destruido (devuelve true) y quien llama debe
-    // respawnearlo.
+    // ver SpecialExplosionEvent::directHitOwnerId): usa el mismo sistema de
+    // potencia/salud que el resto (ver ResolveTankHit), con la potencia de
+    // explosion del especial (kSpecialExplosionPower). Con escudo, lo
+    // absorbe el escudo (y ademas paraliza 5s, es una explosion). Devuelve
+    // true si el tanque quedo destruido y quien llama debe respawnearlo.
     bool ApplyExplosionSelfDamage(Tank& tank, int ownerId);
+
+    // Efecto de las explosiones especiales de este frame (ver
+    // specialExplosionEvents_) sobre los 4 tipos de enemigo, pedido
+    // explicitamente: Basico/Rapido/Blindado mueren de un saque si la
+    // explosion los alcanza (la bala en si los atraviesa sin frenarse salvo
+    // que tengan escudo, ver la lista "tanks" en Update); Power resiste (ver
+    // Enemy::hp) — la explosion lo deja a un impacto de morir
+    // (kSpecialExplosionPowerWeakenHp) en vez de matarlo, salvo que ya
+    // estuviera asi, en cuyo caso lo remata.
+    void ApplySpecialExplosionsToEnemies();
 
     // Anima la muerte de un tanque (explosion chica a escala nativa, ver
     // Documentaciones/Exploción.png) y le resetea el nivel de arma. No
@@ -219,11 +450,19 @@ private:
     // quedo destruido, y quien llama debe respawnearlo.
     bool ApplyFriendlyFire(Tank& tank, int ownerId);
 
-    // Nivel 2 de fuego amigo: efecto de un solo impacto sobre tank, segun el
-    // nivel de arma de quien disparo (shooterWeaponLevel). Devuelve true si
-    // el tanque quedo destruido (explota y se resetea; RespawnPlayerN queda
-    // a cargo de quien llama).
-    bool ProcessFriendlyFireDamageHit(Tank& tank, int shooterWeaponLevel);
+    // Sistema de resistencia bala-vs-tanque unificado (pedido explicitamente,
+    // reemplaza el viejo switch por nivel con throttle/congelamiento
+    // especiales): la "salud" del tanque es su nivel de arma actual
+    // (Tank::WeaponLevel); un impacto de potencia "power" le resta
+    // min(power, nivel actual) — si eso agota el nivel, el tanque queda
+    // destruido (DestroyTank + outDestroyed=true); si no, ApplyWeaponLevelPenalty
+    // con esa misma cantidad. Mientras el tanque tenga escudo (Tank::
+    // IsShielded), el golpe se lo lleva el escudo entero (AbsorbShieldHit)
+    // y el tanque no pierde nivel ese impacto. Devuelve cuanta salud
+    // (del escudo o del tanque, la que haya absorbido) consumio este
+    // impacto — lo usa quien llama para restarselo a la salud propia de la
+    // bala que pego (ver BulletSystem::TankHitResolver).
+    int ResolveTankHit(Tank& tank, int power, bool& outDestroyed);
 
     // Movimiento, disparo (normal y especial) y recogida de power-ups de un
     // tanque para este frame; comun a todos los jugadores activos. No toca
@@ -268,6 +507,15 @@ private:
     // y si points es un puntaje de eliminacion, el conteo de ese tipo de
     // enemigo), para la pantalla de puntuacion de fin de nivel.
     void AwardScoreAt(int ownerId, float x, float y, int points);
+
+    // Vida extra por puntaje (pedido explicitamente, ver kExtraLifeScoreThreshold
+    // y extraLifeMilestonesClaimed_): si newScore ya paso algun escalon de
+    // 20.000 que este jugador todavia no tenia acreditado, le suma tantas
+    // vidas como escalones nuevos crucen de una sola vez (por si un bono
+    // grande lo hace saltar mas de uno) y suena extraLifeSound_. No hace
+    // nada si el jugador ya esta eliminado (sin vidas, fuera de la partida)
+    // o si el ownerId no es un jugador.
+    void CheckExtraLifeByScore(int ownerId, int newScore);
 
     // Automatizacion de oleadas (40 niveles, ver ResetState/kEnemyWaveTiers
     // en Game.cpp): cada 1s intenta spawnear 1 enemigo (tipo al azar entre
@@ -389,7 +637,11 @@ private:
     // Panel de nivel de arma / disparo especial / calor / paralisis de un
     // tanque, alineado al centro: centerX es el centro horizontal del bloque.
     // score es el puntaje propio de ESE jugador (ver playerXScore_).
-    void RenderPlayerHud(const Tank& tank, const char* label, int centerX, int y, int score);
+    // playerColor tine el texto de datos (etiqueta/vidas/nivel/calor/
+    // puntaje, ver kPlayer1HudColor..kPlayer4HudColor); las alertas
+    // (sobrecalentado, especial listo, paralizado) siguen en rojo/amarillo
+    // fijo, sin importar el jugador.
+    void RenderPlayerHud(const Tank& tank, const char* label, int centerX, int y, int score, Color playerColor);
 
     static constexpr int kPlayer1Id = 0;
     static constexpr int kPlayer2Id = 1;
@@ -425,6 +677,15 @@ private:
     float player4SpawnX_ = 0.0f;
     float player4SpawnY_ = 0.0f;
     bool player4Active_ = false;
+
+    // Que color (0-3, indice entre player1Sprites_..player4Sprites_ y
+    // kPlayer1HudColor..kPlayer4HudColor, ver SpriteSetForColor/
+    // HudColorForColor) tiene puesto CADA jugador (0=P1..3=P4) — pedido
+    // explicitamente: desde que existe la pantalla de seleccion de
+    // personaje, el color ya no es siempre "igual al numero de jugador".
+    // Por defecto cada uno arranca con su propio numero (0,1,2,3), como
+    // era antes de que existiera esa pantalla.
+    int playerColorIndex_[4] = {0, 1, 2, 3};
     BulletSystem bullets_;
     BulletSpriteSet bulletSprites_;
     EnemySystem enemies_;
@@ -466,6 +727,13 @@ private:
     int player3Score_ = 0;
     int player4Score_ = 0;
 
+    // Vida extra por puntaje (pedido explicitamente, investigado del juego
+    // original: cada 20.000 puntos — ver kExtraLifeScoreThreshold en
+    // Game.cpp). Cuantos "escalones" de ese umbral ya se le convirtieron en
+    // vida a cada jugador, para no volver a darle una si simplemente se
+    // vuelve a chequear el mismo puntaje en otro frame (ver AwardScoreAt).
+    std::array<int, 4> extraLifeMilestonesClaimed_{};
+
     // Eliminaciones (por tipo, mismo orden 0=Basico 1=Rapido 2=Blindado
     // 3=Power que levelEnemyTypeSequence_) y puntaje total conseguidos por
     // CADA jugador en el nivel actual: se resetea al empezar cada nivel
@@ -485,11 +753,13 @@ private:
     // (es un dato de la partida en curso, no se persiste en highscore.txt).
     int highScoreHolderId_ = -1;
 
-    // Animacion de la fila de un jugador en la pantalla de puntuacion: que
-    // slot de tipo de enemigo (0-3) esta revelando ahora (4 = fila
-    // terminada, ya se ve TOTAL), el numero que va mostrando ese slot
-    // mientras cuenta, y el acumulador de tiempo para el proximo tick (ver
-    // TickScoreTally).
+    // Animacion de la fila de un jugador en la pantalla de puntuacion: el
+    // numero que va mostrando el slot actual mientras cuenta, y el
+    // acumulador de tiempo para el proximo tick (ver TickScoreTally).
+    // currentSlot se limita a REFLEJAR scoreTallySlot_ (el slot es
+    // compartido entre todos los jugadores, pedido explicitamente — ver mas
+    // abajo), no lo maneja cada fila por su cuenta; queda en la struct nada
+    // mas para no tener que tocar RenderScoreTally.
     struct ScoreTallyRowAnim {
         int currentSlot = 0;
         int currentCount = 0;
@@ -497,14 +767,34 @@ private:
     };
     std::array<ScoreTallyRowAnim, 4> scoreTallyAnim_{};
 
+    // Slot de tipo de enemigo (0-3, 4 = todas las filas ya terminaron de
+    // contar) que estan revelando TODOS los jugadores a la vez (pedido
+    // explicitamente): cada uno cuenta hasta su propio numero de ese tipo a
+    // su propio ritmo, pero el que termina antes (porque mato menos de ese
+    // tipo) espera a los demas — recien cuando TODOS terminaron ese slot
+    // (incluida la pausa de kScoreTallyRowPause) se avanza al siguiente,
+    // para todos al mismo tiempo. Ver TickScoreTally/BeginScoreTally.
+    int scoreTallySlot_ = 0;
+
     // Bono de fin de nivel (pedido explicito): al terminar de contar todas
     // las filas, el/los jugador(es) con mayor scoreGained en
     // playerLevelStats_ (empate incluido) lo tienen en true — reciben
     // kScoreTallyClearBonus extra (ya sumado a su puntaje real) que se
     // muestra en rojo a la derecha de su TOTAL, sin mezclarse con ese numero
     // (ver TickScoreTally/RenderScoreTally). Se arma recien al pasar a
-    // ScoreTallyPhase::Holding, todo en false mientras se cuenta.
+    // ScoreTallyPhase::Holding, todo en false mientras se cuenta. Pedido
+    // explicitamente: solo existe con MAS de un jugador activo (con uno
+    // solo no tendria sentido, siempre "ganaria" el mismo) — con un jugador
+    // queda todo en false y nunca se revela nada.
     std::array<bool, 4> scoreTallyBonusAwarded_{};
+
+    // Pedido explicitamente: el bono no aparece apenas termina el conteo,
+    // espera 1s mas (dentro de la pausa de Holding) antes de sumarse al
+    // puntaje real y mostrarse en pantalla. scoreTallyBonusRevealTimer_
+    // cuenta ese segundo hacia atras; scoreTallyBonusRevealed_ se pone en
+    // true una sola vez, cuando llega a 0 (ver TickScoreTally/RenderScoreTally).
+    double scoreTallyBonusRevealTimer_ = 0.0;
+    bool scoreTallyBonusRevealed_ = false;
 
     // Pantalla de puntuacion de fin de nivel (ver ScoreTallyPhase arriba).
     ScoreTallyPhase scoreTallyPhase_ = ScoreTallyPhase::None;
@@ -539,6 +829,23 @@ private:
     Texture2D waterTextures_[2]{};       // agua: 2 frames que alternan para animar el oleaje
     Texture2D iceTexture_{};             // hielo: hace patinar al tanque y enfria el arma el doble de rapido (ver Tank)
     Texture2D baseEagleTexture_{};       // aguila (Tanques.png, misma fila que agua/arbusto/hielo): objeto a defender, un impacto la destruye y termina la partida
+    Texture2D baseEagleDestroyedTexture_{}; // frame de aguila destruida (Tanques.png, celda siguiente a la de arriba), pedido explicitamente: queda dibujada asi en vez de desaparecer (ver TileType::BaseDestroyed)
+    Music battleLoopMusic_{}; // pedido explicitamente: bucle infinito mientras haya enemigos en el nivel (ver TickAudio)
+    Music movementLoopMusic_{}; // pedido explicitamente: bucle infinito mientras al menos un jugador se este moviendo (ver TickAudio)
+    Sound scoreTickSound_{};      // cada vez que sube el recuento de enemigos eliminados en la pantalla de puntuacion (ver TickScoreTallySequence)
+    Sound hitNonLethalSound_{};   // un jugador o enemigo recibe un disparo que no lo destruye
+    Sound blockResistSound_{};    // una bala pega en hierro (u otro obstaculo indestructible) y no lo rompe
+    Sound brickBreakSound_{};     // se rompe un ladrillo
+    Sound playerShootSound_{};    // un jugador dispara (normal o especial)
+    Sound tankDeathSound_{};      // un jugador o enemigo muere
+    Sound scoreBonusSound_{};     // termina el recuento de la pantalla de puntuacion y se dan los puntos extra
+    Sound bigExplosionSound_{};   // se destruye el aguila, o explota la bala especial
+    Sound itemAppearSound_{};     // aparece un power-up en el mapa
+    Sound pauseToggleSound_{};    // se abre el menu de pausa, o se cierra para seguir jugando
+    Sound itemPickupSound_{};     // un jugador o enemigo agarra un power-up (todos menos la vida extra)
+    Sound extraLifeSound_{};      // el contador de vidas de algun jugador sube en una
+    Sound stageStartSound_{};     // empieza un nivel (ver BeginLevelTransition)
+    Sound specialShootSound_{};   // un jugador dispara el disparo especial (distinto del disparo normal, ver playerShootSound_)
     Texture2D hudLifeIconTexture_{};     // icono chico (Tanques.png, junto a "1P") que reemplaza la "X" en "P1 X 3" del HUD
     Texture2D stageFlagIconTexture_{};   // icono de bandera (Tanques.png, junto a "STAGE"), arriba de la barra izquierda
     SpawnFlashSprites spawnFlashSprites_;
@@ -546,27 +853,90 @@ private:
     double screenShakeTimer_ = 0.0; // onda expansiva del disparo especial
     FriendlyFireMode friendlyFireMode_ = FriendlyFireMode::Off;
     bool showGrid_ = false; // grilla de referencia sobre el mapa (boton de prueba F6, ver kDebugFeaturesEnabled), para ubicar bloques al diseñar el escenario
+    bool showHitboxes_ = false; // recuadros verdes de colision de cada objeto (boton de prueba H, ver kDebugFeaturesEnabled)
     int lastGamepadButtonPressed_ = -1; // debug: para calibrar a que numero de boton responde cada mando (ver Render)
-    bool gameOver_ = false; // el aguila (TileType::Base) recibio un impacto: se congela todo hasta reiniciar (ESC)
+
+    // Estado del stick analogico izquierdo del mando del menu, cuadro
+    // anterior (ver ProcessMenuInput): el D-pad ya tiene deteccion de flanco
+    // gratis via IsGamepadButtonPressed, pero el stick analogico no — sin
+    // guardar si YA estaba inclinado en cada direccion el cuadro anterior,
+    // mantenerlo inclinado repetiria el movimiento sin control cada cuadro.
+    bool menuStickUpHeld_ = false;
+    bool menuStickDownHeld_ = false;
+    bool menuStickLeftHeld_ = false;
+    bool menuStickRightHeld_ = false;
+    bool gameOver_ = false; // el aguila fue destruida O todos los jugadores activos se quedaron sin vidas (ver TriggerGameOver); mientras sea true, los jugadores quedan congelados pero el resto del juego sigue (ver GameOverPhase)
     int windowWidth_ = 0;
     int windowHeight_ = 0;
+
+    // Secuencia de fin de partida (ver GameOverPhase/TriggerGameOver).
+    GameOverPhase gameOverPhase_ = GameOverPhase::None;
+    double gameOverTimer_ = 0.0;        // progreso de Rising, o cuenta regresiva de Holding
+    int gameOverWinnerOwnerId_ = -1;    // jugador activo con mas puntaje al terminar Holding (ver FinishGameOverHolding); -1 = ninguno (no deberia pasar si hubo al menos 1 activo)
+    int gameOverWinnerScore_ = 0;       // su puntaje final, lo que se guarda como highScore_ si se confirma el nombre
+    std::string gameOverNameEntry_;     // texto que se va tipeando en GameOverPhase::NameEntry (ver ProcessGameOverInput)
+    Texture2D gameOverTexture_{};       // "GAME OVER" (2 renglones), extraido de Documentaciones/Tanques.png
+
+    // Puntaje maximo que HABIA antes de que arrancara la partida actual
+    // (foto de highScore_ tomada en ResetState): highScore_ se puede ir
+    // actualizando en caliente durante la partida (ver MaybeUpdateHighScore),
+    // asi que compararse contra el ya no sirve para saber si ESTA partida
+    // rompio records — hay que compararse contra este valor congelado.
+    int matchStartHighScore_ = 0;
+
+    // Nombre del dueño del record historico (ver highScoreHolderName_ en el
+    // menu principal y GameOverPhase::NameEntry/ConfirmGameOverNameEntry).
+    // Persistido en highscore.txt junto al numero; vacio si nunca se cargo
+    // uno (partidas de antes de que esto existiera, o el record nunca se
+    // supero desde entonces).
+    std::string highScoreHolderName_;
 
     // Pantalla de titulo/menu (ver AppState/MenuScreen arriba y
     // ProcessMenuInput/RenderMenu en Game.cpp).
     AppState appState_ = AppState::Menu;
     MenuScreen menuScreen_ = MenuScreen::Main;
-    int mainMenuIndex_ = 0;         // 0=Arcade 1=Supervivencia 2=Versus 3=Modo construccion 4=Opciones
+    int mainMenuIndex_ = 0;         // 0=Arcade 1=Supervivencia 2=Versus 3=Modo construccion 4=Opciones 5=Salir
+    int mainConfirmExitIndex_ = 1;  // 0=Si 1=No (MenuScreen::MainConfirmExit); arranca en No por seguridad
     int modeSubmenuIndex_ = 0;      // 0=Local 1=Lan ("Opciones" solo esta en la pantalla principal)
     int optionsIndex_ = 0;          // 0=Fuego amigo 1=Pantalla 2=Mapeo de controles
     int controlMappingIndex_ = 0;   // 0-3, Jugador 1-4 (ver MenuScreen::ControlMapping)
     std::array<PlayerKeyBindings, 4> playerBindings_{}; // se llenan en InitDefaultKeyBindings; editables desde el menu
+    std::array<PlayerGamepadBindings, 4> playerGamepadBindings_{}; // se llenan en InitDefaultGamepadBindings; editables desde el menu
+    int controlDeviceIndex_ = 0;    // 0=Teclado 1=Mando (ver MenuScreen::ControlDeviceChoice)
+    bool mappingGamepad_ = false;   // que dispositivo eligio en ControlDeviceChoice: PlayerActions/CapturingKey leen/escriben playerGamepadBindings_ en vez de playerBindings_ si es true
     int mappingPlayerIndex_ = 0;    // 0-3, que jugador se esta configurando (ver MenuScreen::PlayerActions)
-    int playerActionIndex_ = 0;     // 0-6 (InputAction), que accion esta resaltada en PlayerActions
-    int capturedKey_ = 0;           // ultima tecla detectada en CapturingKey; 0 = ninguna todavia
+    int playerActionIndex_ = 0;     // 0-6 (indice dentro de kKeyMappableActions) en teclado, 0-2 (indice dentro de kGamepadMappableActions) en mando; que fila esta resaltada en PlayerActions
+    int capturedKey_ = 0;           // ultima tecla o boton de mando detectado en CapturingKey; 0 = ninguna todavia
     int selectedMainModeIndex_ = 0; // que modo (0-2) abrio el ModeSubmenu actual
     int highScore_ = 0;
     Texture2D titleLogoTexture_{};    // "BATTLE CITY" en ladrillos, extraido de Documentaciones/Titulo.png
     Texture2D menuSelectorTexture_{}; // tanque amarillo chico que senala la opcion resaltada
+
+    // A que pantalla vuelve "Esc" desde MenuScreen::Options: Main si se entro
+    // desde el titulo, PauseMain si se entro desde el menu de pausa (ver
+    // MenuScreen::PauseMain). Options/ControlMapping/PlayerActions/
+    // CapturingKey son el mismo codigo en los dos casos; solo este dato
+    // cambia segun de donde se vino.
+    MenuScreen optionsBackTarget_ = MenuScreen::Main;
+
+    // Menu de pausa (pedido explicitamente, ver MenuScreen::PauseMain y
+    // siguientes): paused_ congela el juego entero (Update() no hace nada
+    // mientras sea true, ver Update()) y hace que ProcessInput() reuse
+    // ProcessMenuInput() en vez del input de gameplay normal. Se activa con
+    // el boton de Pausa de cualquier jugador o con Enter (ver ProcessInput),
+    // pero nunca durante la transicion de nivel, la pantalla de puntuacion,
+    // o con la partida ya terminada (aguila destruida).
+    bool paused_ = false;
+    int pauseMenuIndex_ = 0;      // 0=Continuar 1=Guardar 2=Cargar 3=Opciones 4=Terminar partida
+    int pauseEndChoiceIndex_ = 0; // 0=Menu principal 1=Cerrar el juego (MenuScreen::PauseEndChoice)
+    int pauseConfirmIndex_ = 1;   // 0=Si 1=No (MenuScreen::PauseConfirmEnd); arranca en No por seguridad
+
+    // "Cerrar el juego" (ver MenuScreen::PauseConfirmEnd) no puede cerrar la
+    // ventana en el momento (seguiria dibujando ese mismo frame despues):
+    // solo pide que termine, y Run() corta el bucle principal apenas puede
+    // (ver el while de Run()), pasando por Shutdown() como al cerrar con la
+    // X de la ventana.
+    bool wantsExit_ = false;
 
     // Item Pala: ver ApplyShovelFortification/TickBaseFortification.
     struct FortifiedCell {

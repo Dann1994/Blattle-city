@@ -61,6 +61,28 @@ constexpr int kMaxRunCells = 6;
 // prueba este paso.
 constexpr int kHardUnstuckFrames = 900; // ~15s a 60fps
 
+// Al toparse con algo que la frena (pedido explicitamente): se queda quieta
+// este tiempo antes de elegir la proxima direccion, para no insistir contra
+// lo mismo (ver Enemy::blockedPauseTimer).
+constexpr double kBlockedPauseDuration = 0.5;
+
+// Cuantas celdas mantiene la direccion elegida tras un frenado, antes de
+// volver a decidir con el campo de distancias/ponderacion normal (a
+// diferencia del tramo normal de 1-6 celdas, ver RandomRunLength). Corto a
+// proposito: si el bloqueo era un ladrillo a punto de romperse (le puede
+// quedar 1 sola capa, ver disparo de reaccion mas abajo), conviene
+// reconsiderar pronto en vez de alejarse varias celdas de un obstaculo que
+// ya se puede haber abierto — evita que quede yendo y viniendo sin avanzar.
+constexpr int kBlockedRedirectRunCells = 1;
+
+// Chance por frame de disparar hacia lo que lo esta frenando (pedido
+// explicitamente: se mantiene igual que antes en agresividad 4, "me gusta
+// mucho como rompen bloques ahi", pero mientras mas bajo el nivel menos
+// seguido disparan, para que no revienten un muro tan rapido). Mismo indice
+// (nivel-1) que kWeightsByLevel; nivel 5 copia a nivel 3, placeholder igual
+// que esa tabla.
+constexpr float kBlockedShotChanceByLevel[5] = {0.04f, 0.12f, 0.25f, 0.5f, 0.25f};
+
 constexpr float kLookaheadStep = 0.2f;
 
 // Disparo: intervalo fijo, sin puntoria ni prioridades — placeholder
@@ -273,7 +295,7 @@ void EnemySystem::SpawnAt(float x, float y) {
     enemies_.push_back(enemy);
 }
 
-void EnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, BulletImpactSystem& impacts, SpecialExplosionSystem& specialExplosions, const std::vector<Tank*>& playerTanks, const std::vector<Tank*>& otherEnemyTanks, float baseX, float baseY, std::vector<ScoreEvent>& outScoreEvents) {
+void EnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, BulletImpactSystem& impacts, SpecialExplosionSystem& specialExplosions, const std::vector<Tank*>& playerTanks, const std::vector<Tank*>& otherEnemyTanks, float baseX, float baseY, std::vector<ScoreEvent>& outScoreEvents, Sound tankDeathSound) {
     outScoreEvents.clear();
     const int baseCellX = static_cast<int>(std::round(baseX));
     const int baseCellY = static_cast<int>(std::round(baseY));
@@ -304,11 +326,17 @@ void EnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, BulletI
         // entre ellos.
         float eLeft = 0.0f, eRight = 0.0f, eTop = 0.0f, eBottom = 0.0f;
         enemy.tank.GetBounds(eLeft, eRight, eTop, eBottom);
-        std::vector<int> hitLevels;
         std::vector<int> hitOwnerIds;
-        if (bullets.KillPlayerBulletsHittingBox(eLeft, eRight, eTop, eBottom, impacts, hitLevels, hitOwnerIds)) {
+        // Salud propia sin cambios (muere de 1 solo impacto, cualquier
+        // potencia): siempre consume 1 punto de la salud de la bala que
+        // pego, para el sistema de resistencia bala-vs-objeto (ver
+        // BulletSystem::TankHitResolver) — asi una bala de nivel 4 (salud
+        // 2) puede atravesar hasta 2 de estos enemigos en un mismo disparo.
+        auto resolve = [](int /*weaponLevel*/, bool /*isSpecial*/, int /*shooterOwnerId*/) { return 1; };
+        if (bullets.KillPlayerBulletsHittingBox(eLeft, eRight, eTop, eBottom, impacts, hitOwnerIds, resolve)) {
             specialExplosions.Spawn(enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, /*nativeScale=*/true);
             enemy.alive = false;
+            PlaySound(tankDeathSound);
             outScoreEvents.push_back(ScoreEvent{hitOwnerIds[0], enemy.tank.X() + 0.5f, enemy.tank.Y() + 0.5f, kScoreBasicKill});
             continue;
         }
@@ -418,67 +446,76 @@ void EnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, BulletI
         // evita que se quede trabada insistiendo en avanzar contra algo. Se
         // evalua cada frame que siga bloqueada, no solo la primera vez.
         if (!hardUnstuckTriggered && WouldBeBlocked(enemy.tank, enemy.moveDir, map, others)) {
-            if (RollChance(enemy.rng, 0.5)) {
-                // Prefiere una direccion que ya ahora mismo este libre (si
-                // hay alguna disponible entre varios intentos ponderados):
-                // si no, redirige igual a la mejor candidata ponderada
-                // (puede seguir bloqueada, pero el proximo frame se vuelve
-                // a intentar). Antes elegia a ciegas sin mirar si la nueva
-                // tambien chocaba, lo que la podia dejar rebotando entre 2
-                // direcciones igual de tapadas.
-                Direction newDir = enemy.moveDir;
-                if (usePathfinding) {
-                    // Igual que en la decision normal, pero descartando
-                    // ademas la direccion bloqueada actual.
-                    const std::array<Direction, 4> ranked = baseField_.RankedDirections(cellX, cellY);
-                    bool found = false;
-                    for (Direction candidate : ranked) {
-                        if (candidate == enemy.moveDir) {
-                            continue;
-                        }
-                        if (!WouldBeBlocked(enemy.tank, candidate, map, others)) {
-                            newDir = candidate;
-                            found = true;
-                            break;
-                        }
-                    }
-                    if (!found) {
+            // Se queda quieta kBlockedPauseDuration (pedido explicitamente,
+            // en vez del sorteo de 50% por frame de antes) y recien ahi
+            // elige la proxima direccion, que nunca es la misma que la
+            // freno — para no insistir contra lo mismo.
+            if (enemy.blockedPauseTimer <= 0.0) {
+                enemy.blockedPauseTimer = kBlockedPauseDuration;
+            } else {
+                enemy.blockedPauseTimer -= dt;
+                if (enemy.blockedPauseTimer <= 0.0) {
+                    // Prefiere una direccion que ya ahora mismo este libre (si
+                    // hay alguna disponible entre varios intentos ponderados):
+                    // si no, redirige igual a la mejor candidata ponderada
+                    // (puede seguir bloqueada, pero el proximo frame se arma
+                    // otra pausa y se vuelve a intentar).
+                    const Direction blockedDir = enemy.moveDir;
+                    Direction newDir = blockedDir;
+                    if (usePathfinding) {
+                        // Igual que en la decision normal, pero descartando
+                        // ademas la direccion bloqueada actual.
+                        const std::array<Direction, 4> ranked = baseField_.RankedDirections(cellX, cellY);
+                        bool found = false;
                         for (Direction candidate : ranked) {
-                            if (candidate != enemy.moveDir) {
+                            if (candidate == blockedDir) {
+                                continue;
+                            }
+                            if (!WouldBeBlocked(enemy.tank, candidate, map, others)) {
+                                newDir = candidate;
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) {
+                            for (Direction candidate : ranked) {
+                                if (candidate != blockedDir) {
+                                    newDir = candidate;
+                                    break;
+                                }
+                            }
+                        }
+                    } else {
+                        Direction firstCandidate = blockedDir;
+                        while (firstCandidate == blockedDir) {
+                            firstCandidate = WeightedRandomDirection(enemy.rng, cellX, cellY, baseCellX, baseCellY, weights);
+                        }
+                        newDir = firstCandidate; // si ninguna sale libre, se usa esta igual (se reintenta con otra pausa)
+                        for (int tries = 0; tries < 6; ++tries) {
+                            Direction candidate = blockedDir;
+                            while (candidate == blockedDir) {
+                                candidate = WeightedRandomDirection(enemy.rng, cellX, cellY, baseCellX, baseCellY, weights);
+                            }
+                            if (!WouldBeBlocked(enemy.tank, candidate, map, others)) {
                                 newDir = candidate;
                                 break;
                             }
                         }
                     }
-                } else {
-                    Direction firstCandidate = enemy.moveDir;
-                    while (firstCandidate == enemy.moveDir) {
-                        firstCandidate = WeightedRandomDirection(enemy.rng, cellX, cellY, baseCellX, baseCellY, weights);
-                    }
-                    newDir = firstCandidate; // si ninguna sale libre, se usa esta igual (se reintenta el proximo frame)
-                    for (int tries = 0; tries < 6; ++tries) {
-                        Direction candidate = enemy.moveDir;
-                        while (candidate == enemy.moveDir) {
-                            candidate = WeightedRandomDirection(enemy.rng, cellX, cellY, baseCellX, baseCellY, weights);
-                        }
-                        if (!WouldBeBlocked(enemy.tank, candidate, map, others)) {
-                            newDir = candidate;
-                            break;
-                        }
-                    }
+                    enemy.moveDir = newDir;
+                    // Encara la nueva direccion YA, sin esperar a tank.Update()
+                    // mas abajo en este mismo frame (que tambien lo haria, pero
+                    // solo si el input de movimiento efectivamente se procesa):
+                    // asi el giro es inmediato y visible pase lo que pase con
+                    // el intento de movimiento en si.
+                    enemy.tank.SetFacing(newDir);
+                    enemy.decisionCellX = cellX;
+                    enemy.decisionCellY = cellY;
+                    enemy.deviationCellsRemaining = kBlockedRedirectRunCells;
+                    enemy.blockedPauseTimer = 0.0;
                 }
-                enemy.moveDir = newDir;
-                // Encara la nueva direccion YA, sin esperar a tank.Update()
-                // mas abajo en este mismo frame (que tambien lo haria, pero
-                // solo si el input de movimiento efectivamente se procesa):
-                // asi el giro es inmediato y visible pase lo que pase con
-                // el intento de movimiento en si.
-                enemy.tank.SetFacing(newDir);
-                enemy.decisionCellX = cellX;
-                enemy.decisionCellY = cellY;
-                enemy.deviationCellsRemaining = RandomRunLength(enemy.rng);
             }
-            if (RollChance(enemy.rng, 0.5)) {
+            if (RollChance(enemy.rng, kBlockedShotChanceByLevel[aggressivenessLevel_ - 1])) {
                 const bool bulletAlreadyAlive = bullets.HasAliveBullet(enemy.ownerId);
                 if (!bulletAlreadyAlive && enemy.tank.CanShoot()) {
                     // Importante: encara YA la direccion bloqueada antes de
@@ -493,6 +530,8 @@ void EnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, BulletI
                     bullets.TryShoot(enemy.ownerId, muzzleX, muzzleY, enemy.moveDir, enemy.tank.BulletSpeed(), kWeaponLevel, 1);
                 }
             }
+        } else {
+            enemy.blockedPauseTimer = 0.0;
         }
 
         PlayerInput input;
@@ -509,11 +548,29 @@ void EnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, BulletI
 
         // Fiel a la fila/columna: si avanza en horizontal, se mantiene
         // exactamente en su fila (Y entero); si avanza en vertical, se
-        // mantiene exactamente en su columna (X entero).
+        // mantiene exactamente en su columna (X entero). Pero solo si esa
+        // posicion redondeada esta libre (pedido explicitamente, corrige el
+        // tanque quedando superpuesto con la ultima capa de un ladrillo):
+        // Tank::Update ya puede haber centrado al tanque en un hueco valido
+        // pero NO alineado a la grilla, entre 2 filas/columnas parcialmente
+        // destruidas (ver TrySlidePerpendicularY/X, el caso "a caballo entre
+        // 2 celdas"), y redondear a ciegas ahi lo metia de lleno en el
+        // material solido de al lado. Si redondear chocaria, se deja la
+        // posicion exacta sin redondear en vez de forzarla.
         if (enemy.moveDir == Direction::Left || enemy.moveDir == Direction::Right) {
-            enemy.tank.SetPosition(enemy.tank.X(), std::round(enemy.tank.Y()));
+            const float roundedY = std::round(enemy.tank.Y());
+            float boundsLeft = 0.0f, boundsRight = 0.0f, boundsTop = 0.0f, boundsBottom = 0.0f;
+            enemy.tank.GetBounds(boundsLeft, boundsRight, boundsTop, boundsBottom);
+            if (!map.IsBoxBlocked(boundsLeft, boundsRight, roundedY, roundedY + (boundsBottom - boundsTop))) {
+                enemy.tank.SetPosition(enemy.tank.X(), roundedY);
+            }
         } else {
-            enemy.tank.SetPosition(std::round(enemy.tank.X()), enemy.tank.Y());
+            const float roundedX = std::round(enemy.tank.X());
+            float boundsLeft = 0.0f, boundsRight = 0.0f, boundsTop = 0.0f, boundsBottom = 0.0f;
+            enemy.tank.GetBounds(boundsLeft, boundsRight, boundsTop, boundsBottom);
+            if (!map.IsBoxBlocked(roundedX, roundedX + (boundsRight - boundsLeft), boundsTop, boundsBottom)) {
+                enemy.tank.SetPosition(roundedX, enemy.tank.Y());
+            }
         }
 
         const float movedDist = std::fabs(enemy.tank.X() - prevX) + std::fabs(enemy.tank.Y() - prevY);

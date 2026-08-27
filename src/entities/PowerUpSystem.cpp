@@ -10,6 +10,7 @@ namespace {
 constexpr double kSpawnInterval = 12.0; // segundos entre apariciones
 constexpr double kLifetime = 10.0;      // segundos que permanece antes de desaparecer sin recoger
 constexpr double kBlinkInterval = 0.15; // segundos entre cada toggle de visibilidad
+constexpr int kMaxItemsPerLevel = 5;    // pedido explicitamente: tope total de items por nivel
 
 std::mt19937& Rng() {
     static std::mt19937 engine(std::random_device{}());
@@ -30,18 +31,18 @@ bool CellOccupiedByTank(int x, int y, const std::vector<TankOccupiedBounds>& occ
 }
 } // namespace
 
-void PowerUpSystem::SpawnAt(PowerUpType type, const TileMap& map, const std::vector<TankOccupiedBounds>& occupiedByTanks) {
+bool PowerUpSystem::SpawnAt(PowerUpType type, const TileMap& map, const std::vector<TankOccupiedBounds>& occupiedByTanks) {
     std::vector<std::pair<int, int>> openCells;
     for (int y = 0; y < map.Height(); ++y) {
         for (int x = 0; x < map.Width(); ++x) {
             const TileType cellType = map.At(x, y).type;
-            if (!TileBlocksMovement(cellType) && cellType != TileType::Base && !CellOccupiedByTank(x, y, occupiedByTanks)) {
+            if (!TileBlocksMovement(cellType) && cellType != TileType::Base && cellType != TileType::BaseDestroyed && !CellOccupiedByTank(x, y, occupiedByTanks)) {
                 openCells.emplace_back(x, y);
             }
         }
     }
     if (openCells.empty()) {
-        return;
+        return false;
     }
 
     std::uniform_int_distribution<size_t> dist(0, openCells.size() - 1);
@@ -54,14 +55,17 @@ void PowerUpSystem::SpawnAt(PowerUpType type, const TileMap& map, const std::vec
     lifeTimer_ = kLifetime;
     blinkTimer_ = 0.0;
     blinkVisible_ = true;
+    ++spawnedThisLevel_;
+    return true;
 }
 
-void PowerUpSystem::ForceSpawn(PowerUpType type, const TileMap& map, const std::vector<TankOccupiedBounds>& occupiedByTanks) {
-    SpawnAt(type, map, occupiedByTanks);
+bool PowerUpSystem::ForceSpawn(PowerUpType type, const TileMap& map, const std::vector<TankOccupiedBounds>& occupiedByTanks) {
+    const bool spawned = SpawnAt(type, map, occupiedByTanks);
     spawnTimer_ = kSpawnInterval;
+    return spawned;
 }
 
-void PowerUpSystem::Update(double dt, const TileMap& map, const std::vector<TankOccupiedBounds>& occupiedByTanks) {
+bool PowerUpSystem::Update(double dt, const TileMap& map, const std::vector<TankOccupiedBounds>& occupiedByTanks) {
     if (powerUp_.alive) {
         lifeTimer_ -= dt;
 
@@ -75,11 +79,11 @@ void PowerUpSystem::Update(double dt, const TileMap& map, const std::vector<Tank
             powerUp_.alive = false;
             spawnTimer_ = kSpawnInterval;
         }
-        return;
+        return false;
     }
 
     spawnTimer_ -= dt;
-    if (spawnTimer_ <= 0.0) {
+    if (spawnTimer_ <= 0.0 && spawnedThisLevel_ < kMaxItemsPerLevel) {
         // Probabilidades pedidas (suman 100%): Vida 3%, Pistola 8%, Granada
         // 10%, Pala 12%, Estrella 17%, Reloj 20%, Escudo 30%.
         constexpr PowerUpType kTypes[7] = {
@@ -87,8 +91,9 @@ void PowerUpSystem::Update(double dt, const TileMap& map, const std::vector<Tank
             PowerUpType::Star, PowerUpType::Clock, PowerUpType::Helmet,
         };
         std::discrete_distribution<int> typeDist({3.0, 8.0, 10.0, 12.0, 17.0, 20.0, 30.0});
-        SpawnAt(kTypes[typeDist(Rng())], map, occupiedByTanks);
+        return SpawnAt(kTypes[typeDist(Rng())], map, occupiedByTanks);
     }
+    return false;
 }
 
 bool PowerUpSystem::TryPickup(float tankX, float tankY, PowerUpType& outType) {

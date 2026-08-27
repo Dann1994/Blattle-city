@@ -18,12 +18,12 @@ constexpr float kBulletSpeedByLevel[4] = {8.0f, 16.0f, 12.0f, 14.0f};
 constexpr int kMaxBulletsByLevel[4] = {1, 1, 2, 2};
 constexpr int kMaxWeaponLevel = 4;
 constexpr double kOverheatLockSeconds = 5.0;
-constexpr float kHeatPerShotByLevel[4] = {5.0f, 5.0f, 5.0f, 15.0f}; // nivel 4 calienta mas
+constexpr float kHeatPerShotByLevel[4] = {5.0f, 5.0f, 5.0f, 10.0f}; // nivel 4 calienta mas
 constexpr float kHeatMax = 100.0f;
 constexpr double kHeatDecayInterval = 0.5; // segundos entre cada paso de enfriado
 constexpr float kHeatDecayStep = 5.0f;
-constexpr int kChipHitsPerLevel = 2; // fuego amigo nivel 2 disparado por un rival nivel 2
 constexpr float kRecoilSpeed = 5.0f; // celdas por segundo a las que se anima el retroceso
+constexpr int kShieldMaxHealth = 5; // pedido explicitamente: "Escudo salud X5"
 
 // Hielo (seccion custom): patina un poco al soltar el movimiento (sigue
 // deslizando por inercia) y se enfria el doble de rapido.
@@ -54,16 +54,6 @@ void Tank::ApplyWeaponLevelPenalty(int levels) {
     if (weaponLevel_ < kMaxWeaponLevel) {
         specialShotCharges_ = 0;
     }
-}
-
-bool Tank::RegisterChipHit() {
-    ++chipHitCount_;
-    if (chipHitCount_ >= kChipHitsPerLevel) {
-        chipHitCount_ = 0;
-        ApplyWeaponLevelPenalty(1);
-        return true;
-    }
-    return false;
 }
 
 void Tank::RegisterNormalShotHeat() {
@@ -116,10 +106,28 @@ int Tank::MaxBullets() const {
     return kMaxBulletsByLevel[weaponLevel_ - 1];
 }
 
+void Tank::ActivateShield(double durationSeconds) {
+    shieldTimer_ = durationSeconds;
+    shieldHealth_ = kShieldMaxHealth;
+}
+
 void Tank::TickShield(double dt) {
     if (shieldTimer_ > 0.0) {
         shieldTimer_ = std::max(0.0, shieldTimer_ - dt);
+        if (shieldTimer_ <= 0.0) {
+            shieldHealth_ = 0;
+        }
     }
+}
+
+int Tank::AbsorbShieldHit(int power) {
+    const int absorbed = std::min(power, shieldHealth_);
+    shieldHealth_ -= absorbed;
+    if (shieldHealth_ <= 0) {
+        shieldHealth_ = 0;
+        shieldTimer_ = 0.0; // se rompio del todo: no espera a que el tiempo llegue solo a 0
+    }
+    return absorbed;
 }
 
 bool Tank::ConsumeShootTrigger(const PlayerInput& input) {
@@ -298,6 +306,7 @@ void Tank::Update(double dt, const PlayerInput& input, const TileMap& map, const
 
     if (freezeTimer_ > 0.0) {
         animTimer_ = 0.0; // paralizado: no se mueve, no anima, mantiene la ultima direccion
+        movedLastUpdate_ = false;
         return;
     }
 
@@ -362,6 +371,7 @@ void Tank::Update(double dt, const PlayerInput& input, const TileMap& map, const
     } else {
         animTimer_ = 0.0;
     }
+    movedLastUpdate_ = moved;
 }
 
 } // namespace bc
