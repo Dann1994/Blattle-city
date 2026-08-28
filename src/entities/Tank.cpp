@@ -249,48 +249,75 @@ bool Tank::TryMoveWithAssist(float dx, float dy, const TileMap& map, const std::
     return false;
 }
 
-bool Tank::TrySlidePerpendicularY(float dx, const TileMap& map, const std::vector<Tank*>& others) {
-    const float rowTop = std::floor(y_);
-    const float fracBottom = y_ - rowTop;    // fraccion del sprite metida en la fila de abajo
-    const float fracTop = 1.0f - fracBottom; // fraccion metida en la fila de arriba
+namespace {
+// Los unicos bordes reales donde puede empezar o terminar un hueco en una
+// pared son multiplos de 1/4 de celda (kBrickGridSize, la unidad minima mas
+// fina del juego, ver BulletSystem) medidos desde el borde de celda -nunca
+// una fraccion arbitraria, ya que ninguna unidad destructible mide menos
+// que eso- asi que el ajuste solo prueba esas posiciones, de la mas cercana
+// a la mas lejana. Antes solo probaba alinear del todo a la fila/columna de
+// arriba/abajo entera (2 posiciones) o el borde exacto entre 2 celdas (1
+// mas): alcanzaba para un hueco que ocupaba una celda entera, pero no para
+// uno "corrido" -desplazado por una sola unidad minima respecto a la
+// grilla de celdas, p.ej. rompiendo el ladrillo de al lado en vez del de
+// enfrente- (bug reportado: "si rompo ladrillos manteniendome alineado
+// bien en una celda, el tanque logra meterse... pero si hago un hueco un
+// ladrillo corrido, ya no puede meterse"). Un intento anterior probo un
+// barrido continuo en pasos de 1/32 de celda en vez de estos bordes reales,
+// pero eso podia asentar al tanque en un offset que no correspondia a
+// ningun borde de verdad -y ese offset dejaba de servir apenas se movia un
+// pixel mas, trabandolo de nuevo o haciendolo temblar- (reportado como
+// "empeoro todo"); por eso ahora se limita solo a los bordes reales.
+constexpr float kSlideAssistUnit = 1.0f / kBrickGridSize; // 0.25
+constexpr float kSlideAssistMaxNudge = 0.5f; // pedido explicitamente desde un principio: nunca mas de medio sprite
 
-    // Probar alinear del todo a la fila de arriba: si funciona, la fila de
-    // abajo era la que chocaba, y solo se acepta si esa porcion era minoria.
-    if (fracBottom > 0.001f && fracBottom < 0.5f && TryMove(dx, -fracBottom, map, others)) {
-        return true;
+// Genera, en orden creciente de distancia, los offsets candidatos (bordes
+// de unidad minima) que llevarian "value" a caer justo en uno de esos
+// bordes, hasta kSlideAssistMaxNudge de distancia. Devuelve cuantos
+// candidatos valen (como mucho 5: el borde mas cercano, +-1 unidad y +-2
+// unidades, que a 0.25 cada una cubre justo el medio sprite permitido).
+int BuildAlignCandidates(float value, float outOffsets[5]) {
+    const float nearestLine = std::round(value / kSlideAssistUnit) * kSlideAssistUnit;
+    const float residual = nearestLine - value; // ya casi siempre ~0, salvo error de punto flotante
+    int count = 0;
+    for (int k = 0; k <= 2; ++k) {
+        const float minus = residual - static_cast<float>(k) * kSlideAssistUnit;
+        const float plus = residual + static_cast<float>(k) * kSlideAssistUnit;
+        if (k == 0) {
+            if (std::fabs(minus) > 0.001f && std::fabs(minus) <= kSlideAssistMaxNudge + 0.001f) {
+                outOffsets[count++] = minus;
+            }
+            continue;
+        }
+        if (std::fabs(minus) <= kSlideAssistMaxNudge + 0.001f) {
+            outOffsets[count++] = minus;
+        }
+        if (std::fabs(plus) <= kSlideAssistMaxNudge + 0.001f) {
+            outOffsets[count++] = plus;
+        }
     }
-    // Simetrico: alinear a la fila de abajo si la de arriba era la que chocaba.
-    if (fracTop > 0.001f && fracTop < 0.5f && TryMove(dx, fracTop, map, others)) {
-        return true;
-    }
-    // Huecos a caballo entre 2 celdas (p.ej. rebajados por igual de dos
-    // bloques pegados, ver graze de costura): ni el alineado de arriba ni el
-    // de abajo entran, pero centrado justo en el borde entre filas si puede
-    // haber lugar. Se prueba al final, solo si las dos alineaciones enteras
-    // ya fallaron.
-    const float deltaToCenter = 0.5f - fracBottom;
-    if (std::fabs(deltaToCenter) > 0.001f && TryMove(dx, deltaToCenter, map, others)) {
-        return true;
+    return count;
+}
+} // namespace
+
+bool Tank::TrySlidePerpendicularY(float dx, const TileMap& map, const std::vector<Tank*>& others) {
+    float offsets[5];
+    const int count = BuildAlignCandidates(y_, offsets);
+    for (int i = 0; i < count; ++i) {
+        if (TryMove(dx, offsets[i], map, others)) {
+            return true;
+        }
     }
     return false;
 }
 
 bool Tank::TrySlidePerpendicularX(float dy, const TileMap& map, const std::vector<Tank*>& others) {
-    const float colLeft = std::floor(x_);
-    const float fracRight = x_ - colLeft;    // fraccion del sprite metida en la columna de la derecha
-    const float fracLeft = 1.0f - fracRight; // fraccion metida en la columna de la izquierda
-
-    if (fracRight > 0.001f && fracRight < 0.5f && TryMove(-fracRight, dy, map, others)) {
-        return true;
-    }
-    if (fracLeft > 0.001f && fracLeft < 0.5f && TryMove(fracLeft, dy, map, others)) {
-        return true;
-    }
-    // Simetrico al caso de TrySlidePerpendicularY: hueco a caballo entre 2
-    // columnas, centrado en el borde entre ellas.
-    const float deltaToCenter = 0.5f - fracRight;
-    if (std::fabs(deltaToCenter) > 0.001f && TryMove(deltaToCenter, dy, map, others)) {
-        return true;
+    float offsets[5];
+    const int count = BuildAlignCandidates(x_, offsets);
+    for (int i = 0; i < count; ++i) {
+        if (TryMove(offsets[i], dy, map, others)) {
+            return true;
+        }
     }
     return false;
 }
