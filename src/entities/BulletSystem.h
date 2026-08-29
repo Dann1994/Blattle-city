@@ -76,6 +76,11 @@ public:
 
     const std::vector<Bullet>& Bullets() const { return bullets_; }
 
+    // Fase 7 (red, ver Game::ApplyWorldSnapshot): pisa la lista entera con
+    // lo que mando el servidor — el cliente en red no simula balas (no
+    // llama a Update() de este sistema), solo refleja lo que ya paso.
+    void ApplyNetworkSnapshot(std::vector<Bullet> bullets) { bullets_ = std::move(bullets); }
+
     // Hay alguna bala viva de este dueño en pantalla ahora mismo (ver
     // EnemySystem: el enemigo espera a que la suya impacte/desaparezca antes
     // de arrancar la cuenta regresiva para el proximo disparo).

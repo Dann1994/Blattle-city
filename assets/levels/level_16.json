@@ -1,0 +1,84 @@
+{
+  "base_position": [
+    14,
+    16
+  ],
+  "block_shapes": [
+    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+    "FFFFFFFFFFFFF4D3FFFFFFFFFFFFF",
+    "FFFFFFFFFFFFFRFLFFFFFFFFFFFFF"
+  ],
+  "enemy_spawns": [
+    [
+      0,
+      0
+    ],
+    [
+      14,
+      0
+    ],
+    [
+      28,
+      0
+    ]
+  ],
+  "enemy_wave": {
+    "armor": 2,
+    "basic": 8,
+    "fast": 6,
+    "power": 4
+  },
+  "height": 17,
+  "player_spawns": [
+    [
+      12,
+      16
+    ],
+    [
+      16,
+      16
+    ],
+    [
+      11,
+      16
+    ],
+    [
+      17,
+      16
+    ]
+  ],
+  "tiles": [
+    ".............................",
+    "...T.....................T...",
+    "..BTT...T..WWW...WW.T...TTB..",
+    ".TTBTTTTTT....WWWW.TTTTTTBTT.",
+    ".T.TBTTTT...........TTTTBT.T.",
+    ".T...BT....TT...TT....TB...T.",
+    "......B.....T.S.T.....B......",
+    ".....T.B......S......B.T.....",
+    "BB..TTT.B.....S.....B.TTT..BB",
+    ".BB..T...B...WWW...B...T..BB.",
+    "..BB......B..WWW..B.........W",
+    "WW.....T...B..W..B...T.....WW",
+    "WWW..TTTT...B...B...TTTT..WWW",
+    "WWW....T....TTTTTT...T....WWW",
+    "..........TTTTTTTTTT.........",
+    "....TTTTT....BBB......TTTT...",
+    ".............BEB............."
+  ],
+  "width": 29
+}

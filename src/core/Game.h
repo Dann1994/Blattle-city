@@ -15,6 +15,9 @@
 #include "EnemySprites.h"
 #include "EnemySystem.h"
 #include "FastEnemySystem.h"
+#include "LanDiscovery.h"
+#include "LevelFormat.h"
+#include "NetHost.h"
 #include "PowerEnemySystem.h"
 #include "PowerUpSystem.h"
 #include "ScoreEvent.h"
@@ -49,7 +52,7 @@ enum class FriendlyFireMode { Off, Paralyze, Damage };
 // siempre), CharacterSelect = pantalla de "cuantos jugadores y de que color"
 // entre elegir Arcade > Local y que arranque el nivel (ver EnterCharacterSelect/
 // ProcessCharacterSelectInput/RenderCharacterSelect, pedida explicitamente).
-enum class AppState { Menu, Playing, CharacterSelect };
+enum class AppState { Menu, Playing, CharacterSelect, LevelBuilder };
 
 // Los niveles del arbol de menu. Options solo se entra desde la pantalla
 // principal (Main), asi que Esc siempre vuelve ahi. ControlMapping = lista
@@ -70,7 +73,7 @@ enum class AppState { Menu, Playing, CharacterSelect };
 // playerGamepadBindings_ en vez de playerBindings_ si se eligio Mando (ver
 // mappingGamepad_), mostrando solo Disparar/Especial/Inicio/Pausa (el
 // movimiento con mando es fijo: D-pad + analogico, no se remapea).
-enum class MenuScreen { Main, ModeSubmenu, Options, ControlMapping, ControlDeviceChoice, PlayerActions, CapturingKey, PauseMain, PauseEndChoice, PauseConfirmEnd, MainConfirmExit };
+enum class MenuScreen { Main, ModeSubmenu, Options, ControlMapping, ControlDeviceChoice, PlayerActions, CapturingKey, PauseMain, PauseEndChoice, PauseConfirmEnd, MainConfirmExit, LanModeChoice, LanHosting, LanBrowsing, LanConnectIp, LanConnecting };
 
 // Transicion de nivel (seccion custom, calcada del original): None = juego
 // normal; ShowingText = pantalla gris solida con "NIVEL N" en el centro
@@ -924,6 +927,146 @@ private:
     int capturedKey_ = 0;           // ultima tecla o boton de mando detectado en CapturingKey; 0 = ninguna todavia
     int selectedMainModeIndex_ = 0; // que modo (0-2) abrio el ModeSubmenu actual
     int highScore_ = 0;
+
+    // Red LAN (Fase 7, fundacion nada mas: conexion + handshake +
+    // descubrimiento, ver src/net/. Todavia NO hay gameplay real viajando
+    // por la red, ver el plan de esta fase). netHost_ vale tanto para
+    // hostear (rol servidor) como para conectarse (rol cliente); nunca los
+    // dos a la vez. lanAnnouncer_ solo corre mientras se hostea (emite el
+    // broadcast, ver MenuScreen::LanHosting); lanBrowser_ solo mientras se
+    // busca (escucha ese broadcast, ver MenuScreen::LanBrowsing).
+    bc::net::NetHost netHost_;
+    bc::net::LanAnnouncer lanAnnouncer_;
+    bc::net::LanBrowser lanBrowser_;
+    int lanModeChoiceIndex_ = 0;   // 0=Hostear 1=Buscar 2=Conectar por IP (ver MenuScreen::LanModeChoice)
+    int lanBrowsingIndex_ = 0;     // que partida de lanBrowser_.Hosts() esta resaltada (ver MenuScreen::LanBrowsing)
+    std::string lanIpEntry_;       // IP que se va tipeando en MenuScreen::LanConnectIp
+    std::string lanStatusMessage_; // texto de estado en MenuScreen::LanConnecting (conectando/aceptado/rechazado/caido)
+    bool lanClientAccepted_ = false; // true una vez que el servidor acepto al cliente (ver TickLanNetworking)
+
+    void EnterLanModeChoice();
+    // Procesa los eventos pendientes de netHost_/lanAnnouncer_/lanBrowser_
+    // (llamar 1 vez por paso fijo, ver Update()); actualiza
+    // lanStatusMessage_/lanClientAccepted_ segun lo que vaya llegando.
+    void TickLanNetworking(double dt);
+    // Corta host/busqueda/conexion en curso y vuelve todo a como estaba
+    // antes de entrar a la Fase 7 (se llama al volver atras del todo, o al
+    // salir del menu de LAN por cualquier camino).
+    void StopLanActivity();
+
+    // Gameplay real en red (Fase 7 completa, ver el plan): lobby
+    // distribuido (M1), input del cliente (M2), snapshot del mundo (M3) y
+    // terreno (M4). slotOwnerPeer_[i]/slotOwnerLocalIndex_[i] dicen a quien
+    // pertenece cada casillero i (0-3) del lobby/partida: 0 = un
+    // dispositivo local de ESTA pc (el host, o el propio cliente si Role()
+    // es Client — el servidor y cada cliente lo llenan con su punto de
+    // vista), 1-3 = un cliente remoto conectado (numero de slot de red, ver
+    // NetHost::Slot); slotOwnerLocalIndex_[i] es el indice de dispositivo
+    // local (0-3) EN LA PC duena de ese casillero. El servidor es quien
+    // decide esto (ver HandleLobbyClaimFromPeer); los clientes solo lo
+    // reciben (ver ApplyLobbySlotUpdate) para saber cuales de sus propios
+    // dispositivos ya estan adentro.
+    int slotOwnerPeer_[4] = {0, 0, 0, 0};
+    int slotOwnerLocalIndex_[4] = {0, 1, 2, 3};
+    bool matchStartedOverNetwork_ = false; // cliente: true una vez que llego MatchStartMsg
+    bool terrainReceivedOverNetwork_ = false; // cliente: true una vez que llego el primer TerrainSyncMsg (hasta entonces no dibuja el mapa: vendria vacio/desactualizado)
+    std::uint32_t lastSentTerrainHash_ = 0;   // servidor: para no remandar TerrainSyncMsg si el terreno no cambio este paso fijo (ver TickServerTerrainSync)
+
+    // Servidor: ultimo input local conocido de cada (cliente remoto,
+    // indice local 0-3) — se sigue usando si un paso fijo no trae paquete
+    // nuevo de ese cliente, en vez de tratarlo como "sin apretar nada"
+    // (pedido implicito: 1 paquete perdido no debe frenar en seco al
+    // jugador).
+    std::array<std::array<PlayerInput, net::kMaxLocalSlotsPerPeer>, 3> remotePeerLocalInputs_{};
+
+    void EnterCharacterSelectAsClient();       // versión de EnterCharacterSelect cuando Role()==Client: no auto-activa el slot 0 (nadie entra solo en red)
+    void ProcessCharacterSelectInputAsClient();
+    void SendLobbyClaim(int localSlot, bc::net::LobbyClaimAction action);
+    void HandleLobbyClaimFromPeer(int peerSlot, const bc::net::LobbyClaimMsg& msg);
+    void FreeLobbySlotsOwnedByPeer(int peerSlot); // desconexion (lobby o mid-partida, ver M5)
+    void ApplyLobbySlotUpdate(const bc::net::LobbySlotUpdateMsg& msg);
+    void BroadcastLobbyState();  // servidor, 1 vez por paso fijo mientras appState_==CharacterSelect
+    void BroadcastMatchStart();  // servidor: cierra el lobby, arranca la partida para todos
+    void HandleRawNetMessage(int fromSlot, const std::vector<std::uint8_t>& data); // despacha segun MessageType, ver NetHost::NetEventType::RawMessage
+
+    // M2 (input) + M3 (snapshot del mundo).
+    void SendLocalInputBatchToServer();  // cliente, 1 vez por paso fijo durante la partida
+    void HandlePlayerInputBatchFromPeer(int peerSlot, const std::uint8_t* data, size_t size); // servidor
+    void BroadcastWorldSnapshot();       // servidor, 1 vez por paso fijo durante la partida
+    void ApplyWorldSnapshot(const std::uint8_t* data, size_t size); // cliente
+    void SerializeWorldSnapshot(std::vector<std::uint8_t>& out) const;
+
+    // M4 (terreno).
+    std::uint32_t HashTerrain() const;
+    void SerializeTerrain(std::vector<std::uint8_t>& out) const;
+    void ApplyTerrainSync(const std::uint8_t* data, size_t size);
+    void TickServerTerrainSync(); // servidor, 1 vez por paso fijo: remanda TerrainSyncMsg solo si HashTerrain() cambio
+
+    // Editor de niveles integrado ("MODO CONSTRUCCION", ver el plan): port
+    // de tools/level_editor/main.cpp (herramienta interna, ejecutable
+    // aparte) a un AppState propio del juego. Guarda en
+    // assets/levels/custom/ (custom_level_%03d.json), grupo separado de la
+    // campaña Arcade (assets/levels/level_NN.json) — nunca se mezclan.
+    enum class LevelBuilderMode { Browser, Editing, ConfirmDelete };
+    enum class LevelBuilderDragKind { None, Player, Enemy };
+
+    LevelBuilderMode levelBuilderMode_ = LevelBuilderMode::Browser;
+
+    // Lienzo actual (mismos datos que LevelData pero desglosados para
+    // pintar rapido, igual que el editor standalone).
+    std::vector<TileType> levelBuilderCells_;
+    std::vector<BlockShape> levelBuilderCellShapes_;
+    std::vector<std::array<int, 2>> levelBuilderPlayerSpawns_;
+    std::vector<std::array<int, 2>> levelBuilderEnemySpawns_;
+    int levelBuilderWidth_ = 0;
+    int levelBuilderHeight_ = 0;
+    int levelBuilderBaseX_ = 0;
+    int levelBuilderBaseY_ = 0;
+    TileType levelBuilderSelectedType_ = TileType::Brick;
+    int levelBuilderVertical_ = 0;   // 0=ninguno 1=arriba 2=abajo (ver CombineLevelBuilderShape)
+    int levelBuilderHorizontal_ = 0; // 0=ninguno 1=izquierda 2=derecha
+    bool levelBuilderToolActive_ = true;
+    std::string levelBuilderStatusMessage_;
+    int levelBuilderEditingId_ = -1; // -1 = todavia no guardado (nuevo); >=1 = pisa ese archivo al guardar
+    LevelBuilderDragKind levelBuilderDragKind_ = LevelBuilderDragKind::None;
+    size_t levelBuilderDragIndex_ = 0;
+
+    // Navegador (lista con vista previa, ver el plan): ids encontrados en
+    // assets/levels/custom/, y cual esta resaltado ahora.
+    std::vector<int> levelBuilderCustomIds_;
+    int levelBuilderBrowseIndex_ = 0;
+    LevelData levelBuilderBrowsePreview_;
+    bool levelBuilderBrowsePreviewValid_ = false;
+
+    // "Jugar" un nivel personalizado: mini-campaña por TODOS los niveles
+    // personalizados en orden (pedido explicitamente), reusando la misma
+    // maquinaria de progresion/game over que Arcade (ver
+    // LoadCurrentLevelMap/AdvanceToNextLevel/FinishGameOverSequence).
+    bool playingCustomLevels_ = false;
+    std::vector<int> customLevelPlayOrder_;
+    int customLevelPlayIndex_ = 0;
+
+    void EnterLevelBuilderBrowser();  // desde el menu principal
+    void RefreshLevelBuilderCustomIds();
+    void RefreshLevelBuilderBrowsePreview();
+    void ResetLevelBuilderCanvas();   // lienzo en blanco + anillo de ladrillo por defecto (misma plantilla que el editor standalone)
+    void LoadLevelDataIntoBuilderCanvas(const LevelData& level);
+    LevelData BuildLevelDataFromBuilderCanvas() const;
+    void SaveLevelBuilderCanvas(); // usa levelBuilderEditingId_ (nuevo -> NextCustomLevelId(); existente -> pisa)
+    int NextCustomLevelId() const;
+    std::string CustomLevelFilePath(int id) const;
+    void StartPlayingCustomLevels(int startId);
+    BlockShape CombineLevelBuilderShape() const; // segun levelBuilderVertical_/levelBuilderHorizontal_, mismo criterio que CombineShape del editor standalone
+    bool IsLevelBuilderCellProtected(int x, int y) const; // el aguila y los puntos de spawn: no se pintan encima, se arrastran
+    // Dibuja un tipo+forma de terreno en pantalla (usa las texturas que
+    // Game::Init() ya carga para el mapa real, ver brickUnitTextures_ etc.
+    // en vez de cargar duplicados): unico lugar que sabe dibujar cada tipo,
+    // reusado por el lienzo, la paleta y la vista previa del navegador.
+    void DrawLevelBuilderTerrainCell(TileType type, BlockShape shape, Vector2 pos, float cellSize, Color tint) const;
+
+    void ProcessLevelBuilderInput();
+    void RenderLevelBuilder();
+
     Texture2D titleLogoTexture_{};    // "BATTLE CITY" en ladrillos, extraido de Documentaciones/Titulo.png
     Texture2D menuSelectorTexture_{}; // tanque amarillo chico que senala la opcion resaltada
 

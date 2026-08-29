@@ -166,6 +166,25 @@ public:
     // quien llama a esto ya se aseguro de darle al menos 1 vida antes).
     void Revive() { eliminated_ = false; }
 
+    // Fase 7 (red, ver Game::ApplyWorldSnapshot): pisa de una el estado que
+    // le importa a Render() con lo que mando el servidor -el cliente en red
+    // no simula nada, solo refleja-. No toca animTimer_/heatPercent_/
+    // recoil/patinada en hielo: son puramente de feel local, no cambian el
+    // resultado del juego, y sin esto el cliente igual se ve razonablemente
+    // bien (el snapshot llega varias veces por segundo).
+    void ApplyNetworkState(float x, float y, Direction facing, int animFrame, int weaponLevel, int lives, double shieldSeconds, int shieldHealth, bool frozen, bool eliminated) {
+        x_ = x;
+        y_ = y;
+        facing_ = facing;
+        animFrame_ = animFrame;
+        weaponLevel_ = weaponLevel;
+        lives_ = lives;
+        shieldTimer_ = shieldSeconds;
+        shieldHealth_ = shieldHealth;
+        freezeTimer_ = frozen ? std::max(freezeTimer_, 1.0) : 0.0; // alcanza con que IsFrozen() de bien; el valor exacto no se usa para nada mas del lado cliente
+        eliminated_ = eliminated;
+    }
+
 private:
     bool IsPositionBlocked(float newX, float newY, const TileMap& map, const std::vector<Tank*>& others) const;
     bool TryMove(float dx, float dy, const TileMap& map, const std::vector<Tank*>& others);

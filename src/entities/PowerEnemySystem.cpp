@@ -289,6 +289,14 @@ void PowerEnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, Bu
         enemy.tank.TickFreeze(dt);
         enemy.tank.TickShield(dt);
 
+        if (enemy.spawn.IsActive()) {
+            // Mientras dura el destello de aparicion es un "fantasma": ni
+            // siquiera puede recibir dano (pedido explicitamente). El
+            // chequeo de bala va DESPUES de este return, no antes.
+            enemy.spawn.Update(dt);
+            continue;
+        }
+
         // A diferencia del resto (que muere de 1 sola bala de jugador sin
         // importar el nivel), este SI tiene resistencia (ver Enemy::hp):
         // cada impacto resta el dano que corresponda al nivel de arma de
@@ -336,11 +344,6 @@ void PowerEnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, Bu
             // Recibio dano pero sigue en pie (pedido explicitamente: sonido
             // de impacto no letal, distinto del que la termina de matar).
             PlaySound(hitNonLethalSound);
-        }
-
-        if (enemy.spawn.IsActive()) {
-            enemy.spawn.Update(dt);
-            continue;
         }
 
         if (enemy.tank.IsFrozen()) {

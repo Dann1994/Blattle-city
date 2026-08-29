@@ -27,6 +27,31 @@ constexpr bool kDebugFeaturesEnabled = true;
 constexpr bool kDebugFeaturesEnabled = false;
 #endif
 
+// BC_ASSETS_DIR normalmente es una ruta ABSOLUTA fijada en tiempo de
+// compilacion (ver CMakeLists.txt: "${CMAKE_SOURCE_DIR}/assets/") — comoda
+// en esta PC de desarrollo, pero rota apenas se copia el .exe a otra
+// maquina (esa ruta de la PC de origen no existe ahi). Para poder
+// empaquetar el juego (probar el modo LAN entre 2 PCs sin instalar
+// MSYS2/recompilar del otro lado), se resuelve en tiempo de EJECUCION: si
+// hay una carpeta "assets/" al lado del .exe (caso empaquetado, ver
+// scripts/package_release.*), se usa esa; si no (build normal, corriendo
+// desde build/bin/ dentro del repo), se cae en la ruta de compilacion de
+// siempre. GetApplicationDirectory() es de raylib, no depende de que ya
+// exista una ventana.
+constexpr const char* kAssetsDirCompileTime = BC_ASSETS_DIR;
+#undef BC_ASSETS_DIR
+#define BC_ASSETS_DIR (AssetsDirResolved())
+const char* AssetsDirResolved() {
+    static const std::string dir = []() -> std::string {
+        const std::string candidate = std::string(GetApplicationDirectory()) + "assets/";
+        if (std::filesystem::exists(candidate)) {
+            return candidate;
+        }
+        return kAssetsDirCompileTime;
+    }();
+    return dir.c_str();
+}
+
 // Transicion de nivel (seccion custom, calcada del original): pantalla gris
 // solida con "NIVEL N" un tiempo fijo, despues esa misma pantalla partida al
 // medio se abre como un telon (ver LevelTransitionPhase/RenderLevelTransition).
@@ -546,7 +571,10 @@ std::string Game::LevelFilePath(int levelNumber) const {
 }
 
 void Game::LoadCurrentLevelMap() {
-    const LevelData level = LoadLevel(LevelFilePath(currentLevel_));
+    const std::string mapPath = playingCustomLevels_
+        ? CustomLevelFilePath(customLevelPlayOrder_[static_cast<size_t>(customLevelPlayIndex_)])
+        : LevelFilePath(currentLevel_);
+    const LevelData level = LoadLevel(mapPath);
     map_.LoadFrom(level);
 
     basePositionX_ = level.base_position[0];
@@ -902,12 +930,35 @@ void Game::ApplyGamepadInput(PlayerInput& input, int gamepadId, int playerIndex)
 }
 
 void Game::ProcessInput() {
+    // Red LAN (Fase 7, fundacion): pumpea la conexion/descubrimiento activo
+    // cada paso fijo, sin importar en que pantalla este el menu ahora mismo
+    // (asi un cliente que se conecto desde MenuScreen::LanConnectIp sigue
+    // viendo el handshake avanzar aunque en el medio haya navegado a otro
+    // lado, y el host ve entrar/salir jugadores en tiempo real desde
+    // MenuScreen::LanHosting). Barato cuando no hay nada activo (ver los
+    // IsActive() adentro).
+    TickLanNetworking(kFixedTimestep);
+
     if (appState_ == AppState::CharacterSelect) {
         ProcessCharacterSelectInput();
         return;
     }
+    if (appState_ == AppState::LevelBuilder) {
+        ProcessLevelBuilderInput();
+        return;
+    }
     if (appState_ != AppState::Playing) {
         ProcessMenuInput();
+        return;
+    }
+
+    if (netHost_.Role() == net::NetRole::Client) {
+        // El cliente en red no procesa nada de la simulacion local (no
+        // pausa, no se une/roba vidas via el input de siempre — todo eso
+        // es autoridad del servidor): solo junta su propio input local y lo
+        // manda (ver SendLocalInputBatchToServer). Se sale antes de tocar
+        // nada del resto de esta funcion, pensada para simular localmente.
+        SendLocalInputBatchToServer();
         return;
     }
 
@@ -1209,6 +1260,34 @@ void Game::EnterCharacterSelect() {
     player3Active_ = false;
     player4Active_ = false;
     playerColorIndex_[0] = 0; // amarillo por defecto; se cicla con izquierda/derecha (ver ProcessCharacterSelectInput)
+    // Todos empiezan "locales" (dueños de si mismos): si hay red activa
+    // como servidor, HandleLobbyClaimFromPeer va pisando esto a medida que
+    // clientes remotos reclaman casilleros 1-3 (ver NetMessages.h).
+    for (int i = 0; i < 4; ++i) {
+        slotOwnerPeer_[i] = 0;
+        slotOwnerLocalIndex_[i] = i;
+    }
+    matchStartedOverNetwork_ = false;
+}
+
+void Game::EnterCharacterSelectAsClient() {
+    // Version para cuando esta pantalla la ve un CLIENTE conectado a una
+    // partida hosteada por otra PC (ver TickLanNetworking, NetEventType::
+    // Accepted): a diferencia del lobby local/del host, nadie se auto-une
+    // -ni siquiera "el jugador 1" del propio cliente- hasta que el host
+    // (unica fuente de verdad) lo confirme via LobbySlotUpdateMsg. Arranca
+    // todo apagado; ApplyLobbySlotUpdate lo va llenando con lo que llegue.
+    appState_ = AppState::CharacterSelect;
+    player1Active_ = false;
+    player2Active_ = false;
+    player3Active_ = false;
+    player4Active_ = false;
+    for (int i = 0; i < 4; ++i) {
+        playerColorIndex_[i] = i;
+        slotOwnerPeer_[i] = 0;
+        slotOwnerLocalIndex_[i] = i;
+    }
+    matchStartedOverNetwork_ = false;
 }
 
 TankSpriteSet& Game::SpriteSetForColor(int colorIndex) {
@@ -1315,7 +1394,13 @@ bool Game::IsSlotRightPressed(int slot) const {
 void Game::ProcessCharacterSelectInput() {
     if (IsKeyPressed(KEY_ESCAPE)) {
         // Se cancela del todo, sin dejar jugadores 2-4 colgados a medio
-        // unir para la proxima vez que se entre a esta pantalla.
+        // unir para la proxima vez que se entre a esta pantalla. Si hay red
+        // activa (hosteando o conectado), tambien la corta -no tiene
+        // sentido dejar el servidor/la conexion viva sin nadie mirando el
+        // lobby.
+        if (netHost_.Role() != net::NetRole::None) {
+            StopLanActivity();
+        }
         player2Active_ = false;
         player3Active_ = false;
         player4Active_ = false;
@@ -1324,22 +1409,44 @@ void Game::ProcessCharacterSelectInput() {
         return;
     }
 
-    // Jugador 1 (slot 0): siempre presente, elige su color con izquierda/derecha.
+    if (netHost_.Role() == net::NetRole::Client) {
+        // El cliente nunca aplica cambios localmente: solo manda pedidos
+        // (ver SendLobbyClaim) y pinta lo que el servidor confirme (ver
+        // ApplyLobbySlotUpdate, llamado desde HandleRawNetMessage). Tampoco
+        // puede arrancar la partida — eso es solo del host.
+        ProcessCharacterSelectInputAsClient();
+        return;
+    }
+
+    // Local, o servidor hosteando (el host tambien juega, ver mas abajo):
+    // jugador 1 (slot 0) siempre presente, elige su color con
+    // izquierda/derecha. El casillero 0 nunca es de un cliente remoto (ver
+    // NetMessages.h), asi que esto no cambia si hay red activa o no.
     if (IsSlotLeftPressed(0)) {
         CycleLobbyColor(0, -1);
     } else if (IsSlotRightPressed(0)) {
         CycleLobbyColor(0, 1);
     }
 
-    // Jugadores 2-4 (slots 1-3): se suman apretando Disparar (color libre
-    // asignado solo, ver FirstAvailableColor), se van apretando Especial, y
-    // mientras esten unidos tambien pueden cambiar su propio color con
-    // izquierda/derecha (pedido explicitamente), igual que el jugador 1.
+    // Jugadores 2-4 (slots 1-3, dispositivos LOCALES de esta misma PC): se
+    // suman apretando Disparar (color libre asignado solo, ver
+    // FirstAvailableColor), se van apretando Especial, y mientras esten
+    // unidos tambien pueden cambiar su propio color con izquierda/derecha
+    // (pedido explicitamente), igual que el jugador 1. Si hay red activa
+    // como servidor y ese casillero ya lo tiene un CLIENTE remoto, el host
+    // no lo toca con sus propios dispositivos (se salta, ver
+    // slotOwnerPeer_) — solo Esc/desconexion de ese cliente lo libera.
+    const bool isServer = (netHost_.Role() == net::NetRole::Server);
     bool* const activeFlags[4] = {&player1Active_, &player2Active_, &player3Active_, &player4Active_};
     for (int slot = 1; slot < 4; ++slot) {
+        if (isServer && *activeFlags[slot] && slotOwnerPeer_[slot] != 0) {
+            continue; // casillero de un cliente remoto: el host no lo pisa
+        }
         if (!*activeFlags[slot] && IsSlotShootPressed(slot)) {
             playerColorIndex_[slot] = FirstAvailableColor();
             *activeFlags[slot] = true;
+            slotOwnerPeer_[slot] = 0;
+            slotOwnerLocalIndex_[slot] = slot;
         } else if (*activeFlags[slot] && IsSlotSpecialPressed(slot)) {
             *activeFlags[slot] = false;
         } else if (*activeFlags[slot] && IsSlotLeftPressed(slot)) {
@@ -1350,10 +1457,1250 @@ void Game::ProcessCharacterSelectInput() {
     }
 
     // Cualquier jugador presente confirma y arranca la partida (mismo boton
-    // que abre/cierra la pausa durante el juego).
+    // que abre/cierra la pausa durante el juego). Hosteando, ademas hace
+    // falta al menos 2 jugadores en total (pedido explicitamente: "que no
+    // sea necesario los 4 si o si... apenas tenga un jugador conectado") —
+    // sin red, arranca solo como siempre.
     if (IsPauseButtonPressed()) {
+        constexpr int kMinPlayersToStartOverLan = 2;
+        if (isServer && netHost_.ConnectedCount() < kMinPlayersToStartOverLan) {
+            return; // todavia nadie mas se sumo: no arranca
+        }
+        // StartArcadeLocal primero (carga el mapa real, ver ResetState):
+        // recien con eso hecho tiene sentido mandar el primer TerrainSync.
         StartArcadeLocal();
+        if (isServer) {
+            BroadcastMatchStart();
+            lastSentTerrainHash_ = 0; // fuerza el primer envio, aunque por algun motivo coincidiera con el ultimo mandado en una partida anterior
+            TickServerTerrainSync();
+        }
     }
+}
+
+void Game::ProcessCharacterSelectInputAsClient() {
+    // Hasta net::kMaxLocalSlotsPerPeer dispositivos LOCALES de esta PC
+    // (mismo criterio de siempre: IsSlotShootPressed/IsSlotLeftPressed/etc
+    // por indice de slot local 0-3), todos compitiendo por los casilleros
+    // 1-3 del lobby del servidor (el 0 nunca es de un cliente, ver
+    // NetMessages.h). A diferencia del lobby local, ACA ni siquiera "el
+    // jugador 1" de este cliente entra solo: todos, incluido el slot local
+    // 0, tienen que apretar Disparar para unirse.
+    for (int localSlot = 0; localSlot < net::kMaxLocalSlotsPerPeer; ++localSlot) {
+        // "Es mio": alguno de los 4 casilleros globales me pertenece a MI
+        // (mySlot_) con ESTE indice local, segun el ultimo
+        // LobbySlotUpdateMsg recibido (ver ApplyLobbySlotUpdate).
+        int ownedBox = -1;
+        for (int box = 0; box < 4; ++box) {
+            const bool active = (box == 0) ? player1Active_ : (box == 1) ? player2Active_ : (box == 2) ? player3Active_ : player4Active_;
+            if (active && slotOwnerPeer_[box] == netHost_.MySlot() && slotOwnerLocalIndex_[box] == localSlot) {
+                ownedBox = box;
+                break;
+            }
+        }
+        if (ownedBox == -1 && IsSlotShootPressed(localSlot)) {
+            SendLobbyClaim(localSlot, net::LobbyClaimAction::Join);
+        } else if (ownedBox != -1 && IsSlotSpecialPressed(localSlot)) {
+            SendLobbyClaim(localSlot, net::LobbyClaimAction::Leave);
+        } else if (ownedBox != -1 && IsSlotLeftPressed(localSlot)) {
+            SendLobbyClaim(localSlot, net::LobbyClaimAction::CycleLeft);
+        } else if (ownedBox != -1 && IsSlotRightPressed(localSlot)) {
+            SendLobbyClaim(localSlot, net::LobbyClaimAction::CycleRight);
+        }
+    }
+    // Pausa/Start no hace nada aca: solo el host puede confirmar el
+    // arranque (ver ProcessCharacterSelectInput, rama Server).
+}
+
+void Game::SendLobbyClaim(int localSlot, net::LobbyClaimAction action) {
+    net::LobbyClaimMsg msg;
+    msg.localSlotIndex = static_cast<std::uint8_t>(localSlot);
+    msg.action = action;
+    const std::vector<std::uint8_t> packet = net::PackMessage(net::MessageType::LobbyClaim, msg);
+    netHost_.SendToServer(packet.data(), packet.size(), /*reliable=*/true);
+}
+
+void Game::HandleLobbyClaimFromPeer(int peerSlot, const net::LobbyClaimMsg& msg) {
+    if (appState_ != AppState::CharacterSelect) {
+        return; // llego tarde (la partida ya arranco, o se volvio al menu): se ignora
+    }
+    bool* const activeFlags[4] = {&player1Active_, &player2Active_, &player3Active_, &player4Active_};
+
+    int existingBox = -1;
+    for (int box = 1; box < 4; ++box) {
+        if (*activeFlags[box] && slotOwnerPeer_[box] == peerSlot && slotOwnerLocalIndex_[box] == msg.localSlotIndex) {
+            existingBox = box;
+            break;
+        }
+    }
+
+    if (msg.action == net::LobbyClaimAction::Join) {
+        if (existingBox != -1) {
+            return; // ese dispositivo de ese cliente ya estaba adentro
+        }
+        for (int box = 1; box < 4; ++box) {
+            if (!*activeFlags[box]) {
+                playerColorIndex_[box] = FirstAvailableColor();
+                *activeFlags[box] = true;
+                slotOwnerPeer_[box] = peerSlot;
+                slotOwnerLocalIndex_[box] = msg.localSlotIndex;
+                return;
+            }
+        }
+        // No hay casillero libre: no pasa nada, el cliente lo nota porque
+        // no aparece en el proximo LobbySlotUpdateMsg.
+    } else if (msg.action == net::LobbyClaimAction::Leave) {
+        if (existingBox != -1) {
+            *activeFlags[existingBox] = false;
+        }
+    } else if (existingBox != -1) { // CycleLeft/CycleRight: solo tiene sentido si ya esta adentro
+        CycleLobbyColor(existingBox, msg.action == net::LobbyClaimAction::CycleLeft ? -1 : 1);
+    }
+}
+
+void Game::FreeLobbySlotsOwnedByPeer(int peerSlot) {
+    bool* const activeFlags[4] = {&player1Active_, &player2Active_, &player3Active_, &player4Active_};
+    for (int box = 1; box < 4; ++box) {
+        if (*activeFlags[box] && slotOwnerPeer_[box] == peerSlot) {
+            if (appState_ == AppState::CharacterSelect) {
+                *activeFlags[box] = false; // en el lobby, se libera del todo
+            } else {
+                // Mid-partida (M5): el tanque de ese jugador queda quieto y
+                // fuera de juego (mismo criterio visual que un jugador
+                // eliminado, ver Tank::Eliminate) en vez de desaparecer de
+                // golpe; sigue "activo" para que el resto de la partida no
+                // se rearme solo.
+                if (box == 0) player1_.Eliminate();
+                else if (box == 1) player2_.Eliminate();
+                else if (box == 2) player3_.Eliminate();
+                else player4_.Eliminate();
+            }
+        }
+    }
+}
+
+void Game::ApplyLobbySlotUpdate(const net::LobbySlotUpdateMsg& msg) {
+    bool* const activeFlags[4] = {&player1Active_, &player2Active_, &player3Active_, &player4Active_};
+    for (int i = 0; i < 4; ++i) {
+        *activeFlags[i] = (msg.slots[i].active != 0);
+        playerColorIndex_[i] = msg.slots[i].colorIndex;
+        slotOwnerPeer_[i] = msg.slots[i].ownerPeerSlot;
+        slotOwnerLocalIndex_[i] = msg.slots[i].ownerLocalIndex;
+    }
+}
+
+void Game::BroadcastLobbyState() {
+    net::LobbySlotUpdateMsg msg;
+    const bool active[4] = {player1Active_, player2Active_, player3Active_, player4Active_};
+    for (int i = 0; i < 4; ++i) {
+        msg.slots[i].active = active[i] ? 1 : 0;
+        msg.slots[i].colorIndex = static_cast<std::uint8_t>(playerColorIndex_[i]);
+        msg.slots[i].ownerPeerSlot = static_cast<std::uint8_t>(slotOwnerPeer_[i]);
+        msg.slots[i].ownerLocalIndex = static_cast<std::uint8_t>(slotOwnerLocalIndex_[i]);
+    }
+    const std::vector<std::uint8_t> packet = net::PackMessage(net::MessageType::LobbySlotUpdate, msg);
+    netHost_.Broadcast(packet.data(), packet.size(), /*reliable=*/true);
+}
+
+void Game::BroadcastMatchStart() {
+    const net::MatchStartMsg msg{};
+    const std::vector<std::uint8_t> packet = net::PackMessage(net::MessageType::MatchStart, msg);
+    netHost_.Broadcast(packet.data(), packet.size(), /*reliable=*/true);
+    // El primer TerrainSyncMsg (mapa inicial) sale aparte, una vez que
+    // StartArcadeLocal/ResetState ya cargaron el nivel (ver
+    // Game::StartArcadeLocal, donde se llama TickServerTerrainSync justo
+    // despues).
+}
+
+void Game::HandleRawNetMessage(int fromSlot, const std::vector<std::uint8_t>& data) {
+    if (data.empty()) {
+        return;
+    }
+    const net::MessageType type = static_cast<net::MessageType>(data[0]);
+    if (netHost_.Role() == net::NetRole::Server) {
+        if (type == net::MessageType::LobbyClaim) {
+            net::LobbyClaimMsg msg;
+            if (net::UnpackMessage(data.data(), data.size(), msg)) {
+                HandleLobbyClaimFromPeer(fromSlot, msg);
+            }
+        } else if (type == net::MessageType::PlayerInputBatch) {
+            HandlePlayerInputBatchFromPeer(fromSlot, data.data(), data.size());
+        }
+        return;
+    }
+    if (netHost_.Role() == net::NetRole::Client) {
+        if (type == net::MessageType::LobbySlotUpdate) {
+            net::LobbySlotUpdateMsg msg;
+            if (net::UnpackMessage(data.data(), data.size(), msg)) {
+                ApplyLobbySlotUpdate(msg);
+            }
+        } else if (type == net::MessageType::MatchStart) {
+            matchStartedOverNetwork_ = true;
+            appState_ = AppState::Playing;
+        } else if (type == net::MessageType::WorldSnapshot) {
+            ApplyWorldSnapshot(data.data(), data.size());
+        } else if (type == net::MessageType::TerrainSync) {
+            ApplyTerrainSync(data.data(), data.size());
+            terrainReceivedOverNetwork_ = true;
+        } else if (type == net::MessageType::ServerClosing) {
+            lanStatusMessage_ = "El host cerro la partida.";
+            StopLanActivity();
+            player1Active_ = player2Active_ = player3Active_ = player4Active_ = false;
+            appState_ = AppState::Menu;
+            menuScreen_ = MenuScreen::LanModeChoice;
+        }
+    }
+}
+
+void Game::SendLocalInputBatchToServer() {
+    std::vector<net::WireInputEntry> entries;
+    const bool activeArr[4] = {player1Active_, player2Active_, player3Active_, player4Active_};
+    for (int localSlot = 0; localSlot < net::kMaxLocalSlotsPerPeer; ++localSlot) {
+        bool mine = false;
+        for (int box = 0; box < 4; ++box) {
+            if (activeArr[box] && slotOwnerPeer_[box] == netHost_.MySlot() && slotOwnerLocalIndex_[box] == localSlot) {
+                mine = true;
+                break;
+            }
+        }
+        if (!mine) {
+            continue;
+        }
+        PlayerInput input{};
+        input.moveUp = IsKeyDown(playerBindings_[localSlot].keys[static_cast<int>(InputAction::Up)]);
+        input.moveDown = IsKeyDown(playerBindings_[localSlot].keys[static_cast<int>(InputAction::Down)]);
+        input.moveLeft = IsKeyDown(playerBindings_[localSlot].keys[static_cast<int>(InputAction::Left)]);
+        input.moveRight = IsKeyDown(playerBindings_[localSlot].keys[static_cast<int>(InputAction::Right)]);
+        input.shoot = IsKeyDown(playerBindings_[localSlot].keys[static_cast<int>(InputAction::Shoot)]);
+        input.specialShoot = IsKeyDown(playerBindings_[localSlot].keys[static_cast<int>(InputAction::Special)]);
+        ApplyGamepadInput(input, GamepadIdForSlot(localSlot), localSlot);
+
+        net::WireInputEntry e;
+        e.localSlotIndex = static_cast<std::uint8_t>(localSlot);
+        e.moveUp = input.moveUp;
+        e.moveDown = input.moveDown;
+        e.moveLeft = input.moveLeft;
+        e.moveRight = input.moveRight;
+        e.shoot = input.shoot;
+        e.specialShoot = input.specialShoot;
+        entries.push_back(e);
+    }
+    if (entries.empty()) {
+        return;
+    }
+    const std::vector<std::uint8_t> packet = net::BuildPlayerInputBatchPacket(entries);
+    netHost_.SendToServer(packet.data(), packet.size(), /*reliable=*/false);
+}
+
+void Game::HandlePlayerInputBatchFromPeer(int peerSlot, const std::uint8_t* data, size_t size) {
+    if (size < 2) {
+        return;
+    }
+    const size_t count = data[1];
+    if (size < 2 + count * sizeof(net::WireInputEntry)) {
+        return; // paquete corto/corrupto: se ignora entero
+    }
+    const int peerIndex = peerSlot - 1;
+    if (peerIndex < 0 || peerIndex >= net::kMaxRemoteClients) {
+        return;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        net::WireInputEntry e;
+        std::memcpy(&e, data + 2 + i * sizeof(e), sizeof(e));
+        if (e.localSlotIndex >= net::kMaxLocalSlotsPerPeer) {
+            continue;
+        }
+        PlayerInput& stored = remotePeerLocalInputs_[static_cast<size_t>(peerIndex)][e.localSlotIndex];
+        stored.moveUp = e.moveUp;
+        stored.moveDown = e.moveDown;
+        stored.moveLeft = e.moveLeft;
+        stored.moveRight = e.moveRight;
+        stored.shoot = e.shoot;
+        stored.specialShoot = e.specialShoot;
+    }
+}
+
+void Game::SerializeWorldSnapshot(std::vector<std::uint8_t>& out) const {
+    auto aliveOf = [](const std::vector<Enemy>& list) {
+        std::vector<const Enemy*> alive;
+        alive.reserve(list.size());
+        for (const Enemy& e : list) {
+            if (e.alive) {
+                alive.push_back(&e);
+            }
+        }
+        return alive;
+    };
+    const std::vector<const Enemy*> basicAlive = aliveOf(enemies_.Enemies());
+    const std::vector<const Enemy*> fastAlive = aliveOf(fastEnemies_.Enemies());
+    const std::vector<const Enemy*> armorAlive = aliveOf(armorEnemies_.Enemies());
+    const std::vector<const Enemy*> powerAlive = aliveOf(powerEnemies_.Enemies());
+
+    net::WorldSnapshotHeader header;
+    header.currentLevel = currentLevel_;
+    header.scores[0] = player1Score_;
+    header.scores[1] = player2Score_;
+    header.scores[2] = player3Score_;
+    header.scores[3] = player4Score_;
+    header.highScore = highScore_;
+    header.enemiesKilledThisLevel = enemiesKilledThisLevel_;
+    header.enemiesSpawnedThisLevel = enemiesSpawnedThisLevel_;
+
+    const Tank* tanks[4] = {&player1_, &player2_, &player3_, &player4_};
+    const bool active[4] = {player1Active_, player2Active_, player3Active_, player4Active_};
+    for (int i = 0; i < 4; ++i) {
+        net::WireTankState& w = header.tanks[i];
+        w.x = tanks[i]->X();
+        w.y = tanks[i]->Y();
+        w.facing = static_cast<std::uint8_t>(tanks[i]->Facing());
+        w.animFrame = static_cast<std::uint8_t>(tanks[i]->AnimFrame());
+        w.weaponLevel = static_cast<std::uint8_t>(tanks[i]->WeaponLevel());
+        w.lives = static_cast<std::uint8_t>(std::max(0, tanks[i]->Lives()));
+        w.shieldSeconds = static_cast<float>(tanks[i]->ShieldSecondsRemaining());
+        w.shieldHealth = tanks[i]->ShieldHealthRemaining();
+        w.frozen = tanks[i]->IsFrozen() ? 1 : 0;
+        w.eliminated = tanks[i]->IsEliminated() ? 1 : 0;
+        w.active = active[i] ? 1 : 0;
+    }
+
+    const std::vector<Bullet>& bulletList = bullets_.Bullets();
+    header.bulletCount = static_cast<std::uint16_t>(std::min<size_t>(bulletList.size(), 65535));
+    header.enemyCounts[0] = static_cast<std::uint16_t>(std::min<size_t>(basicAlive.size(), 65535));
+    header.enemyCounts[1] = static_cast<std::uint16_t>(std::min<size_t>(fastAlive.size(), 65535));
+    header.enemyCounts[2] = static_cast<std::uint16_t>(std::min<size_t>(armorAlive.size(), 65535));
+    header.enemyCounts[3] = static_cast<std::uint16_t>(std::min<size_t>(powerAlive.size(), 65535));
+
+    out.clear();
+    out.push_back(static_cast<std::uint8_t>(net::MessageType::WorldSnapshot));
+    const auto appendBytes = [&out](const void* data, size_t size) {
+        const auto* bytes = reinterpret_cast<const std::uint8_t*>(data);
+        out.insert(out.end(), bytes, bytes + size);
+    };
+    appendBytes(&header, sizeof(header));
+
+    for (std::uint16_t i = 0; i < header.bulletCount; ++i) {
+        const Bullet& b = bulletList[i];
+        net::WireBulletEntry w;
+        w.x = b.x;
+        w.y = b.y;
+        w.direction = static_cast<std::uint8_t>(b.direction);
+        w.ownerId = b.ownerId;
+        w.weaponLevel = static_cast<std::uint8_t>(b.weaponLevel);
+        w.isSpecial = b.isSpecial ? 1 : 0;
+        w.health = b.health;
+        appendBytes(&w, sizeof(w));
+    }
+
+    const auto appendEnemies = [&](const std::vector<const Enemy*>& list, std::uint16_t count) {
+        for (std::uint16_t i = 0; i < count; ++i) {
+            const Enemy& e = *list[i];
+            net::WireEnemyEntry w;
+            w.ownerId = e.ownerId;
+            w.x = e.tank.X();
+            w.y = e.tank.Y();
+            w.facing = static_cast<std::uint8_t>(e.tank.Facing());
+            w.animFrame = static_cast<std::uint8_t>(e.tank.AnimFrame());
+            w.hp = e.hp;
+            w.shieldSeconds = static_cast<float>(e.tank.ShieldSecondsRemaining());
+            w.shieldHealth = e.tank.ShieldHealthRemaining();
+            w.frozen = e.tank.IsFrozen() ? 1 : 0;
+            appendBytes(&w, sizeof(w));
+        }
+    };
+    appendEnemies(basicAlive, header.enemyCounts[0]);
+    appendEnemies(fastAlive, header.enemyCounts[1]);
+    appendEnemies(armorAlive, header.enemyCounts[2]);
+    appendEnemies(powerAlive, header.enemyCounts[3]);
+}
+
+void Game::BroadcastWorldSnapshot() {
+    std::vector<std::uint8_t> packet;
+    SerializeWorldSnapshot(packet);
+    netHost_.Broadcast(packet.data(), packet.size(), /*reliable=*/false);
+}
+
+void Game::ApplyWorldSnapshot(const std::uint8_t* data, size_t size) {
+    if (size < 1 + sizeof(net::WorldSnapshotHeader)) {
+        return;
+    }
+    net::WorldSnapshotHeader header;
+    std::memcpy(&header, data + 1, sizeof(header));
+    size_t cursor = 1 + sizeof(header);
+
+    currentLevel_ = header.currentLevel;
+    player1Score_ = header.scores[0];
+    player2Score_ = header.scores[1];
+    player3Score_ = header.scores[2];
+    player4Score_ = header.scores[3];
+    highScore_ = header.highScore;
+    enemiesKilledThisLevel_ = header.enemiesKilledThisLevel;
+    enemiesSpawnedThisLevel_ = header.enemiesSpawnedThisLevel;
+
+    Tank* tanks[4] = {&player1_, &player2_, &player3_, &player4_};
+    bool* activeFlags[4] = {&player1Active_, &player2Active_, &player3Active_, &player4Active_};
+    for (int i = 0; i < 4; ++i) {
+        const net::WireTankState& w = header.tanks[i];
+        *activeFlags[i] = (w.active != 0);
+        tanks[i]->ApplyNetworkState(w.x, w.y, static_cast<Direction>(w.facing), w.animFrame, w.weaponLevel, w.lives, w.shieldSeconds, w.shieldHealth, w.frozen != 0, w.eliminated != 0);
+    }
+
+    std::vector<Bullet> bulletList;
+    bulletList.reserve(header.bulletCount);
+    for (std::uint16_t i = 0; i < header.bulletCount; ++i) {
+        if (cursor + sizeof(net::WireBulletEntry) > size) {
+            break;
+        }
+        net::WireBulletEntry w;
+        std::memcpy(&w, data + cursor, sizeof(w));
+        cursor += sizeof(w);
+        Bullet b;
+        b.x = w.x;
+        b.y = w.y;
+        b.direction = static_cast<Direction>(w.direction);
+        b.ownerId = w.ownerId;
+        b.alive = true;
+        b.weaponLevel = w.weaponLevel;
+        b.isSpecial = (w.isSpecial != 0);
+        b.health = w.health;
+        bulletList.push_back(b);
+    }
+    bullets_.ApplyNetworkSnapshot(std::move(bulletList));
+
+    const auto readEnemies = [&](std::uint16_t count) {
+        std::vector<Enemy> list;
+        list.reserve(count);
+        for (std::uint16_t i = 0; i < count; ++i) {
+            if (cursor + sizeof(net::WireEnemyEntry) > size) {
+                break;
+            }
+            net::WireEnemyEntry w;
+            std::memcpy(&w, data + cursor, sizeof(w));
+            cursor += sizeof(w);
+            Enemy e;
+            e.ownerId = w.ownerId;
+            e.alive = true;
+            e.hp = w.hp;
+            e.tank.ApplyNetworkState(w.x, w.y, static_cast<Direction>(w.facing), w.animFrame, 1, 1, w.shieldSeconds, w.shieldHealth, w.frozen != 0, false);
+            list.push_back(std::move(e));
+        }
+        return list;
+    };
+    enemies_.Enemies() = readEnemies(header.enemyCounts[0]);
+    fastEnemies_.Enemies() = readEnemies(header.enemyCounts[1]);
+    armorEnemies_.Enemies() = readEnemies(header.enemyCounts[2]);
+    powerEnemies_.Enemies() = readEnemies(header.enemyCounts[3]);
+}
+
+std::uint32_t Game::HashTerrain() const {
+    // FNV-1a de baja calidad pero alcanza y sobra (solo se usa para
+    // detectar "algo cambio", no para verificar integridad criptografica):
+    // recorre tipo de celda + vivo/muerto de cada unidad minima de
+    // ladrillo/hierro. Barato (~500 celdas), se llama 1 vez por paso fijo
+    // del lado servidor (ver TickServerTerrainSync).
+    std::uint32_t hash = 2166136261u;
+    const auto mix = [&hash](std::uint8_t byte) {
+        hash ^= byte;
+        hash *= 16777619u;
+    };
+    for (int y = 0; y < map_.Height(); ++y) {
+        for (int x = 0; x < map_.Width(); ++x) {
+            const Cell& cell = map_.At(x, y);
+            mix(static_cast<std::uint8_t>(cell.type));
+            if (cell.type == TileType::Brick) {
+                for (const BrickUnit& unit : cell.brickUnits) {
+                    mix(unit.alive ? 1 : 0);
+                }
+            } else if (cell.type == TileType::Steel) {
+                for (const SteelUnit& unit : cell.steelUnits) {
+                    mix(unit.alive ? 1 : 0);
+                }
+            }
+        }
+    }
+    return hash;
+}
+
+void Game::SerializeTerrain(std::vector<std::uint8_t>& out) const {
+    out.clear();
+    out.push_back(static_cast<std::uint8_t>(net::MessageType::TerrainSync));
+    const auto appendBytes = [&out](const void* data, size_t size) {
+        const auto* bytes = reinterpret_cast<const std::uint8_t*>(data);
+        out.insert(out.end(), bytes, bytes + size);
+    };
+    const std::int32_t width = map_.Width();
+    const std::int32_t height = map_.Height();
+    appendBytes(&width, sizeof(width));
+    appendBytes(&height, sizeof(height));
+    for (int y = 0; y < map_.Height(); ++y) {
+        for (int x = 0; x < map_.Width(); ++x) {
+            const Cell& cell = map_.At(x, y);
+            const std::uint8_t type = static_cast<std::uint8_t>(cell.type);
+            appendBytes(&type, sizeof(type));
+            if (cell.type == TileType::Brick) {
+                // 16 unidades -> 2 bytes de bits (el frame no hace falta
+                // mandarlo, se recalcula solo con BrickUnit::FrameFor).
+                std::uint16_t bits = 0;
+                for (int i = 0; i < kBrickUnitCount; ++i) {
+                    if (cell.brickUnits[static_cast<size_t>(i)].alive) {
+                        bits |= static_cast<std::uint16_t>(1u << i);
+                    }
+                }
+                appendBytes(&bits, sizeof(bits));
+            } else if (cell.type == TileType::Steel) {
+                std::uint8_t bits = 0;
+                for (int i = 0; i < kSteelUnitCount; ++i) {
+                    if (cell.steelUnits[static_cast<size_t>(i)].alive) {
+                        bits |= static_cast<std::uint8_t>(1u << i);
+                    }
+                }
+                appendBytes(&bits, sizeof(bits));
+            }
+        }
+    }
+}
+
+void Game::ApplyTerrainSync(const std::uint8_t* data, size_t size) {
+    size_t cursor = 1;
+    if (cursor + sizeof(std::int32_t) * 2 > size) {
+        return;
+    }
+    std::int32_t width = 0, height = 0;
+    std::memcpy(&width, data + cursor, sizeof(width));
+    cursor += sizeof(width);
+    std::memcpy(&height, data + cursor, sizeof(height));
+    cursor += sizeof(height);
+    if (width != map_.Width() || height != map_.Height()) {
+        return; // no deberia pasar (mismo nivel/mapa fijo de 29x17), pero por las dudas no revienta si algun dia difiere
+    }
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            if (cursor >= size) {
+                return;
+            }
+            Cell& cell = map_.At(x, y);
+            cell.type = static_cast<TileType>(data[cursor]);
+            cursor += 1;
+            if (cell.type == TileType::Brick) {
+                if (cursor + sizeof(std::uint16_t) > size) {
+                    return;
+                }
+                std::uint16_t bits = 0;
+                std::memcpy(&bits, data + cursor, sizeof(bits));
+                cursor += sizeof(bits);
+                for (int i = 0; i < kBrickUnitCount; ++i) {
+                    BrickUnit& unit = cell.brickUnits[static_cast<size_t>(i)];
+                    unit.alive = (bits & (1u << i)) != 0;
+                    unit.frame = BrickUnit::FrameFor(i / kBrickGridSize, i % kBrickGridSize);
+                }
+            } else if (cell.type == TileType::Steel) {
+                if (cursor + sizeof(std::uint8_t) > size) {
+                    return;
+                }
+                const std::uint8_t bits = data[cursor];
+                cursor += 1;
+                for (int i = 0; i < kSteelUnitCount; ++i) {
+                    cell.steelUnits[static_cast<size_t>(i)].alive = (bits & (1u << i)) != 0;
+                }
+            }
+        }
+    }
+}
+
+void Game::TickServerTerrainSync() {
+    const std::uint32_t currentHash = HashTerrain();
+    if (currentHash == lastSentTerrainHash_) {
+        return;
+    }
+    lastSentTerrainHash_ = currentHash;
+    std::vector<std::uint8_t> packet;
+    SerializeTerrain(packet);
+    netHost_.Broadcast(packet.data(), packet.size(), /*reliable=*/true);
+}
+
+// ---------------------------------------------------------------------
+// Modo construccion (editor de niveles integrado, AppState::LevelBuilder).
+// Port directo de tools/level_editor/main.cpp (herramienta standalone,
+// usada para armar los niveles 1-40 de Arcade) a la ventana del juego:
+// misma logica de pintura/paleta/formas y navegador con vista previa,
+// pero guardando en assets/levels/custom/ (nunca se mezcla con Arcade) y
+// reusando las texturas que Game::Init() ya carga en vez de duplicarlas.
+// ---------------------------------------------------------------------
+
+std::string Game::CustomLevelFilePath(int id) const {
+    char buf[64];
+    snprintf(buf, sizeof(buf), "levels/custom/custom_level_%03d.json", id);
+    return std::string(BC_ASSETS_DIR) + buf;
+}
+
+int Game::NextCustomLevelId() const {
+    int maxId = 0;
+    const std::string dir = std::string(BC_ASSETS_DIR) + "levels/custom/";
+    if (std::filesystem::exists(dir)) {
+        for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+            if (!entry.is_regular_file()) {
+                continue;
+            }
+            int id = 0;
+            if (std::sscanf(entry.path().filename().string().c_str(), "custom_level_%d.json", &id) == 1) {
+                maxId = std::max(maxId, id);
+            }
+        }
+    }
+    return maxId + 1;
+}
+
+void Game::RefreshLevelBuilderCustomIds() {
+    levelBuilderCustomIds_.clear();
+    const std::string dir = std::string(BC_ASSETS_DIR) + "levels/custom/";
+    if (std::filesystem::exists(dir)) {
+        for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+            if (!entry.is_regular_file()) {
+                continue;
+            }
+            int id = 0;
+            if (std::sscanf(entry.path().filename().string().c_str(), "custom_level_%d.json", &id) == 1) {
+                levelBuilderCustomIds_.push_back(id);
+            }
+        }
+    }
+    std::sort(levelBuilderCustomIds_.begin(), levelBuilderCustomIds_.end());
+    if (levelBuilderBrowseIndex_ >= static_cast<int>(levelBuilderCustomIds_.size())) {
+        levelBuilderBrowseIndex_ = std::max(0, static_cast<int>(levelBuilderCustomIds_.size()) - 1);
+    }
+}
+
+void Game::RefreshLevelBuilderBrowsePreview() {
+    if (levelBuilderCustomIds_.empty()) {
+        levelBuilderBrowsePreviewValid_ = false;
+        return;
+    }
+    const int id = levelBuilderCustomIds_[static_cast<size_t>(levelBuilderBrowseIndex_)];
+    try {
+        levelBuilderBrowsePreview_ = LoadLevel(CustomLevelFilePath(id));
+        levelBuilderBrowsePreviewValid_ = true;
+    } catch (const std::exception&) {
+        levelBuilderBrowsePreviewValid_ = false;
+    }
+}
+
+void Game::EnterLevelBuilderBrowser() {
+    appState_ = AppState::LevelBuilder;
+    levelBuilderMode_ = LevelBuilderMode::Browser;
+    RefreshLevelBuilderCustomIds();
+    levelBuilderBrowseIndex_ = 0;
+    RefreshLevelBuilderBrowsePreview();
+}
+
+void Game::ResetLevelBuilderCanvas() {
+    // Plantilla: mismo mapa base que usa el editor standalone (ancho/alto,
+    // posicion de base y spawns de jugador quedan fijos, igual criterio
+    // que ahi) — solo cambia el contenido pintado.
+    const LevelData templateLevel = LoadLevel(std::string(BC_ASSETS_DIR) + "levels/test_map.json");
+    levelBuilderWidth_ = templateLevel.width;
+    levelBuilderHeight_ = templateLevel.height;
+    levelBuilderBaseX_ = templateLevel.base_position[0];
+    levelBuilderBaseY_ = templateLevel.base_position[1];
+    levelBuilderPlayerSpawns_ = templateLevel.player_spawns;
+    levelBuilderEnemySpawns_ = templateLevel.enemy_spawns;
+
+    const size_t count = static_cast<size_t>(levelBuilderWidth_) * static_cast<size_t>(levelBuilderHeight_);
+    levelBuilderCells_.assign(count, TileType::Empty);
+    levelBuilderCellShapes_.assign(count, BlockShape::Full);
+
+    const bool baseInBounds = levelBuilderBaseX_ >= 0 && levelBuilderBaseX_ < levelBuilderWidth_
+        && levelBuilderBaseY_ >= 0 && levelBuilderBaseY_ < levelBuilderHeight_;
+    if (baseInBounds) {
+        levelBuilderCells_[static_cast<size_t>(levelBuilderBaseY_) * levelBuilderWidth_ + levelBuilderBaseX_] = TileType::Base;
+    }
+
+    const auto placeRingBrick = [&](int x, int y, BlockShape shape) {
+        if (x >= 0 && x < levelBuilderWidth_ && y >= 0 && y < levelBuilderHeight_) {
+            const size_t idx = static_cast<size_t>(y) * levelBuilderWidth_ + x;
+            levelBuilderCells_[idx] = TileType::Brick;
+            levelBuilderCellShapes_[idx] = shape;
+        }
+    };
+    if (baseInBounds) {
+        // Mismo anillo (ya adelgazado, sin las puntas que sobresalen) que
+        // ResetCanvas() del editor standalone y que se pidio como default.
+        placeRingBrick(levelBuilderBaseX_ - 1, levelBuilderBaseY_ - 1, BlockShape::BottomRight);
+        placeRingBrick(levelBuilderBaseX_,     levelBuilderBaseY_ - 1, BlockShape::Bottom);
+        placeRingBrick(levelBuilderBaseX_ + 1, levelBuilderBaseY_ - 1, BlockShape::BottomLeft);
+        placeRingBrick(levelBuilderBaseX_ - 1, levelBuilderBaseY_,     BlockShape::Right);
+        placeRingBrick(levelBuilderBaseX_ + 1, levelBuilderBaseY_,     BlockShape::Left);
+    }
+
+    levelBuilderEditingId_ = -1;
+    levelBuilderSelectedType_ = TileType::Brick;
+    levelBuilderVertical_ = 0;
+    levelBuilderHorizontal_ = 0;
+    levelBuilderToolActive_ = true;
+    levelBuilderDragKind_ = LevelBuilderDragKind::None;
+    levelBuilderStatusMessage_ = "Clic izq: pintar. Clic der: borrar. Ladrillo/Hierro: flechas para elegir mitad/esquina. Esc: mover un spawn.";
+}
+
+void Game::LoadLevelDataIntoBuilderCanvas(const LevelData& level) {
+    // Se asume que ResetLevelBuilderCanvas() ya dejo el lienzo armado con
+    // el ancho/alto/base de la plantilla (mismo criterio que
+    // LoadLevelIntoCanvas del editor standalone): esto solo pisa el
+    // contenido pintado y los spawns.
+    for (int y = 0; y < levelBuilderHeight_; ++y) {
+        const bool hasRow = y < static_cast<int>(level.tiles.size());
+        for (int x = 0; x < levelBuilderWidth_; ++x) {
+            const size_t idx = static_cast<size_t>(y) * levelBuilderWidth_ + x;
+            const char tileChar = (hasRow && x < static_cast<int>(level.tiles[static_cast<size_t>(y)].size()))
+                ? level.tiles[static_cast<size_t>(y)][static_cast<size_t>(x)] : '.';
+            levelBuilderCells_[idx] = TileTypeFromChar(tileChar);
+            char shapeChar = 'F';
+            if (y < static_cast<int>(level.block_shapes.size()) && x < static_cast<int>(level.block_shapes[static_cast<size_t>(y)].size())) {
+                shapeChar = level.block_shapes[static_cast<size_t>(y)][static_cast<size_t>(x)];
+            }
+            levelBuilderCellShapes_[idx] = BlockShapeFromChar(shapeChar);
+        }
+    }
+    if (!level.player_spawns.empty()) {
+        levelBuilderPlayerSpawns_ = level.player_spawns;
+    }
+    if (!level.enemy_spawns.empty()) {
+        levelBuilderEnemySpawns_ = level.enemy_spawns;
+    }
+    const bool baseInBounds = levelBuilderBaseX_ >= 0 && levelBuilderBaseX_ < levelBuilderWidth_
+        && levelBuilderBaseY_ >= 0 && levelBuilderBaseY_ < levelBuilderHeight_;
+    if (baseInBounds) {
+        levelBuilderCells_[static_cast<size_t>(levelBuilderBaseY_) * levelBuilderWidth_ + levelBuilderBaseX_] = TileType::Base;
+    }
+}
+
+LevelData Game::BuildLevelDataFromBuilderCanvas() const {
+    LevelData data;
+    data.width = levelBuilderWidth_;
+    data.height = levelBuilderHeight_;
+    data.tiles.assign(static_cast<size_t>(levelBuilderHeight_), std::string(static_cast<size_t>(levelBuilderWidth_), '.'));
+    data.block_shapes.assign(static_cast<size_t>(levelBuilderHeight_), std::string(static_cast<size_t>(levelBuilderWidth_), 'F'));
+    for (int y = 0; y < levelBuilderHeight_; ++y) {
+        for (int x = 0; x < levelBuilderWidth_; ++x) {
+            const size_t idx = static_cast<size_t>(y) * levelBuilderWidth_ + x;
+            data.tiles[static_cast<size_t>(y)][static_cast<size_t>(x)] = TileTypeToChar(levelBuilderCells_[idx]);
+            data.block_shapes[static_cast<size_t>(y)][static_cast<size_t>(x)] = BlockShapeToChar(levelBuilderCellShapes_[idx]);
+        }
+    }
+    data.player_spawns = levelBuilderPlayerSpawns_;
+    data.enemy_spawns = levelBuilderEnemySpawns_;
+    data.base_position = {levelBuilderBaseX_, levelBuilderBaseY_};
+    return data;
+}
+
+void Game::SaveLevelBuilderCanvas() {
+    const int id = (levelBuilderEditingId_ >= 1) ? levelBuilderEditingId_ : NextCustomLevelId();
+    std::filesystem::create_directories(std::string(BC_ASSETS_DIR) + "levels/custom/");
+    SaveLevel(CustomLevelFilePath(id), BuildLevelDataFromBuilderCanvas());
+    levelBuilderEditingId_ = id;
+    levelBuilderStatusMessage_ = TextFormat("Nivel personalizado %d guardado.", id);
+    RefreshLevelBuilderCustomIds();
+}
+
+void Game::StartPlayingCustomLevels(int startId) {
+    if (levelBuilderCustomIds_.empty()) {
+        return; // "Jugar" solo esta disponible cuando hay algo resaltado en el navegador
+    }
+    const auto it = std::find(levelBuilderCustomIds_.begin(), levelBuilderCustomIds_.end(), startId);
+    if (it == levelBuilderCustomIds_.end()) {
+        return;
+    }
+    const size_t startIdx = static_cast<size_t>(it - levelBuilderCustomIds_.begin());
+    customLevelPlayOrder_.clear();
+    for (size_t i = 0; i < levelBuilderCustomIds_.size(); ++i) {
+        customLevelPlayOrder_.push_back(levelBuilderCustomIds_[(startIdx + i) % levelBuilderCustomIds_.size()]);
+    }
+    playingCustomLevels_ = true;
+    customLevelPlayIndex_ = 0;
+    EnterCharacterSelect();
+}
+
+BlockShape Game::CombineLevelBuilderShape() const {
+    const bool v = levelBuilderVertical_ != 0;
+    const bool h = levelBuilderHorizontal_ != 0;
+    if (!v && !h) return BlockShape::Full;
+    if (!v) return (levelBuilderHorizontal_ == 1) ? BlockShape::Left : BlockShape::Right;
+    if (!h) return (levelBuilderVertical_ == 1) ? BlockShape::Top : BlockShape::Bottom;
+    if (levelBuilderVertical_ == 1) return (levelBuilderHorizontal_ == 1) ? BlockShape::TopLeft : BlockShape::TopRight;
+    return (levelBuilderHorizontal_ == 1) ? BlockShape::BottomLeft : BlockShape::BottomRight;
+}
+
+bool Game::IsLevelBuilderCellProtected(int x, int y) const {
+    if (x == levelBuilderBaseX_ && y == levelBuilderBaseY_) {
+        return true;
+    }
+    for (const auto& spawn : levelBuilderPlayerSpawns_) {
+        if (spawn[0] == x && spawn[1] == y) return true;
+    }
+    for (const auto& spawn : levelBuilderEnemySpawns_) {
+        if (spawn[0] == x && spawn[1] == y) return true;
+    }
+    return false;
+}
+
+void Game::DrawLevelBuilderTerrainCell(TileType type, BlockShape shape, Vector2 pos, float cellSize, Color tint) const {
+    switch (type) {
+        case TileType::Brick: {
+            const float unitSize = cellSize / kBrickGridSize;
+            for (int row = 0; row < kBrickGridSize; ++row) {
+                for (int col = 0; col < kBrickGridSize; ++col) {
+                    if (!IsUnitAliveForShape(shape, row, col, kBrickGridSize)) continue;
+                    const Texture2D& unitTex = brickUnitTextures_[static_cast<size_t>(BrickUnit::FrameFor(row, col))];
+                    const Rectangle src{0.0f, 0.0f, static_cast<float>(unitTex.width), static_cast<float>(unitTex.height)};
+                    const Rectangle dst{pos.x + col * unitSize, pos.y + row * unitSize, unitSize, unitSize};
+                    DrawTexturePro(unitTex, src, dst, Vector2{0.0f, 0.0f}, 0.0f, tint);
+                }
+            }
+            break;
+        }
+        case TileType::Steel: {
+            const float unitSize = cellSize / kSteelGridSize;
+            const Rectangle src{0.0f, 0.0f, static_cast<float>(steelUnitTexture_.width), static_cast<float>(steelUnitTexture_.height)};
+            for (int row = 0; row < kSteelGridSize; ++row) {
+                for (int col = 0; col < kSteelGridSize; ++col) {
+                    if (!IsUnitAliveForShape(shape, row, col, kSteelGridSize)) continue;
+                    const Rectangle dst{pos.x + col * unitSize, pos.y + row * unitSize, unitSize, unitSize};
+                    DrawTexturePro(steelUnitTexture_, src, dst, Vector2{0.0f, 0.0f}, 0.0f, tint);
+                }
+            }
+            break;
+        }
+        case TileType::Water: {
+            const Texture2D& tex = waterTextures_[0];
+            const Rectangle src{0.0f, 0.0f, static_cast<float>(tex.width), static_cast<float>(tex.height)};
+            DrawTexturePro(tex, src, Rectangle{pos.x, pos.y, cellSize, cellSize}, Vector2{0.0f, 0.0f}, 0.0f, tint);
+            break;
+        }
+        case TileType::Trees: {
+            const Rectangle src{0.0f, 0.0f, static_cast<float>(treesTexture_.width), static_cast<float>(treesTexture_.height)};
+            DrawTexturePro(treesTexture_, src, Rectangle{pos.x, pos.y, cellSize, cellSize}, Vector2{0.0f, 0.0f}, 0.0f, tint);
+            break;
+        }
+        case TileType::Ice: {
+            const Rectangle src{0.0f, 0.0f, static_cast<float>(iceTexture_.width), static_cast<float>(iceTexture_.height)};
+            DrawTexturePro(iceTexture_, src, Rectangle{pos.x, pos.y, cellSize, cellSize}, Vector2{0.0f, 0.0f}, 0.0f, tint);
+            break;
+        }
+        case TileType::Base: {
+            const Rectangle src{0.0f, 0.0f, static_cast<float>(baseEagleTexture_.width), static_cast<float>(baseEagleTexture_.height)};
+            DrawTexturePro(baseEagleTexture_, src, Rectangle{pos.x, pos.y, cellSize, cellSize}, Vector2{0.0f, 0.0f}, 0.0f, tint);
+            break;
+        }
+        default:
+            DrawRectangle(static_cast<int>(pos.x), static_cast<int>(pos.y), static_cast<int>(cellSize), static_cast<int>(cellSize), Color{0x10, 0x10, 0x10, tint.a});
+            break;
+    }
+}
+
+void Game::ProcessLevelBuilderInput() {
+    const Vector2 mouse = GetMousePosition();
+    const auto clicked = [&](Rectangle r) { return CheckCollisionPointRec(mouse, r) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT); };
+
+    if (levelBuilderMode_ == LevelBuilderMode::Browser) {
+        const int count = static_cast<int>(levelBuilderCustomIds_.size());
+        if (count > 0 && IsKeyPressed(KEY_LEFT)) {
+            levelBuilderBrowseIndex_ = (levelBuilderBrowseIndex_ + count - 1) % count;
+            RefreshLevelBuilderBrowsePreview();
+        }
+        if (count > 0 && IsKeyPressed(KEY_RIGHT)) {
+            levelBuilderBrowseIndex_ = (levelBuilderBrowseIndex_ + 1) % count;
+            RefreshLevelBuilderBrowsePreview();
+        }
+        if (IsKeyPressed(KEY_ESCAPE)) {
+            appState_ = AppState::Menu;
+            menuScreen_ = MenuScreen::Main;
+            return;
+        }
+
+        constexpr float kButtonW = 200.0f, kButtonH = 48.0f, kGap = 16.0f;
+        const float totalW = kButtonW * 4 + kGap * 3;
+        const float startX = static_cast<float>(windowWidth_) * 0.5f - totalW * 0.5f;
+        const float buttonY = static_cast<float>(windowHeight_) - 90.0f;
+        const Rectangle newButtonRect{startX, buttonY, kButtonW, kButtonH};
+        const Rectangle playButtonRect{startX + (kButtonW + kGap), buttonY, kButtonW, kButtonH};
+        const Rectangle editButtonRect{startX + (kButtonW + kGap) * 2.0f, buttonY, kButtonW, kButtonH};
+        const Rectangle deleteButtonRect{startX + (kButtonW + kGap) * 3.0f, buttonY, kButtonW, kButtonH};
+
+        if (clicked(newButtonRect)) {
+            ResetLevelBuilderCanvas();
+            levelBuilderMode_ = LevelBuilderMode::Editing;
+            return;
+        }
+        if (count > 0 && clicked(playButtonRect)) {
+            StartPlayingCustomLevels(levelBuilderCustomIds_[static_cast<size_t>(levelBuilderBrowseIndex_)]);
+            return;
+        }
+        if (count > 0 && clicked(editButtonRect)) {
+            const int id = levelBuilderCustomIds_[static_cast<size_t>(levelBuilderBrowseIndex_)];
+            ResetLevelBuilderCanvas();
+            LoadLevelDataIntoBuilderCanvas(levelBuilderBrowsePreview_);
+            levelBuilderEditingId_ = id;
+            levelBuilderStatusMessage_ = TextFormat("Editando el nivel personalizado %d.", id);
+            levelBuilderMode_ = LevelBuilderMode::Editing;
+            return;
+        }
+        if (count > 0 && clicked(deleteButtonRect)) {
+            levelBuilderMode_ = LevelBuilderMode::ConfirmDelete;
+        }
+        return;
+    }
+
+    if (levelBuilderMode_ == LevelBuilderMode::ConfirmDelete) {
+        constexpr int kDialogW = 480, kDialogH = 140;
+        const int dialogX = (windowWidth_ - kDialogW) / 2;
+        const int dialogY = (windowHeight_ - kDialogH) / 2;
+        const Rectangle yesRect{static_cast<float>(dialogX + 60), static_cast<float>(dialogY + 80), 140.0f, 40.0f};
+        const Rectangle noRect{static_cast<float>(dialogX + kDialogW - 200), static_cast<float>(dialogY + 80), 140.0f, 40.0f};
+        const bool yes = IsKeyPressed(KEY_S) || IsKeyPressed(KEY_Y) || clicked(yesRect);
+        const bool no = IsKeyPressed(KEY_N) || IsKeyPressed(KEY_ESCAPE) || clicked(noRect);
+        if (yes && !levelBuilderCustomIds_.empty()) {
+            const int id = levelBuilderCustomIds_[static_cast<size_t>(levelBuilderBrowseIndex_)];
+            std::filesystem::remove(CustomLevelFilePath(id));
+            RefreshLevelBuilderCustomIds();
+            RefreshLevelBuilderBrowsePreview();
+            levelBuilderMode_ = LevelBuilderMode::Browser;
+        } else if (no) {
+            levelBuilderMode_ = LevelBuilderMode::Browser;
+        }
+        return;
+    }
+
+    // --- Editing: geometria del lienzo (identica a RenderLevelBuilder) ---
+    constexpr int kTitleBarHeight = 40;
+    constexpr int kSidebarWidth = 240;
+    constexpr int kBaseTileSize = 16;
+    const int canvasAreaW = windowWidth_ - kSidebarWidth;
+    const int canvasAreaH = windowHeight_ - kTitleBarHeight;
+    const float mapPixelW = static_cast<float>(levelBuilderWidth_ * kBaseTileSize);
+    const float mapPixelH = static_cast<float>(levelBuilderHeight_ * kBaseTileSize);
+    const float scale = std::min(static_cast<float>(canvasAreaW) / mapPixelW, static_cast<float>(canvasAreaH) / mapPixelH);
+    const float tileScreenSize = kBaseTileSize * scale;
+    const float canvasOffsetX = (static_cast<float>(canvasAreaW) - mapPixelW * scale) * 0.5f;
+    const float canvasOffsetY = static_cast<float>(kTitleBarHeight) + (static_cast<float>(canvasAreaH) - mapPixelH * scale) * 0.5f;
+    const auto screenToCell = [&](Vector2 p, int& outX, int& outY) -> bool {
+        const float localX = p.x - canvasOffsetX;
+        const float localY = p.y - canvasOffsetY;
+        if (localX < 0.0f || localY < 0.0f || localX >= mapPixelW * scale || localY >= mapPixelH * scale) return false;
+        outX = static_cast<int>(localX / tileScreenSize);
+        outY = static_cast<int>(localY / tileScreenSize);
+        return true;
+    };
+    const auto spawnScreenCenter = [&](int cx, int cy) {
+        return Vector2{canvasOffsetX + cx * tileScreenSize + tileScreenSize * 0.5f, canvasOffsetY + cy * tileScreenSize + tileScreenSize * 0.5f};
+    };
+
+    constexpr TileType kPaletteTypes[] = {TileType::Empty, TileType::Brick, TileType::Steel, TileType::Water, TileType::Trees, TileType::Ice};
+    constexpr int kPaletteCount = 6;
+    constexpr float kPaletteButtonH = 56.0f, kPaletteMargin = 10.0f;
+    const float paletteX = static_cast<float>(canvasAreaW) + kPaletteMargin;
+    const float paletteW = static_cast<float>(kSidebarWidth) - kPaletteMargin * 2.0f;
+    Rectangle paletteRects[kPaletteCount];
+    for (int i = 0; i < kPaletteCount; ++i) {
+        const float by = static_cast<float>(kTitleBarHeight) + kPaletteMargin + static_cast<float>(i) * (kPaletteButtonH + kPaletteMargin);
+        paletteRects[i] = Rectangle{paletteX, by, paletteW, kPaletteButtonH};
+    }
+    const float saveButtonY = static_cast<float>(kTitleBarHeight) + kPaletteMargin + static_cast<float>(kPaletteCount) * (kPaletteButtonH + kPaletteMargin) + 30.0f;
+    const Rectangle saveButtonRect{paletteX, saveButtonY, paletteW, 44.0f};
+    const Rectangle listButtonRect{paletteX, saveButtonY + 54.0f, paletteW, 44.0f};
+
+    for (int i = 0; i < kPaletteCount; ++i) {
+        if (clicked(paletteRects[i])) {
+            levelBuilderSelectedType_ = kPaletteTypes[i];
+            levelBuilderVertical_ = 0;
+            levelBuilderHorizontal_ = 0;
+            levelBuilderToolActive_ = true;
+        }
+    }
+
+    if (IsKeyPressed(KEY_ESCAPE)) {
+        levelBuilderToolActive_ = false;
+        levelBuilderDragKind_ = LevelBuilderDragKind::None;
+        levelBuilderStatusMessage_ = "Herramienta desactivada: arrastra un punto de spawn. Clic en la paleta para volver a pintar.";
+    }
+
+    const bool typeHasShapes = (levelBuilderSelectedType_ == TileType::Brick || levelBuilderSelectedType_ == TileType::Steel);
+    if (levelBuilderToolActive_) {
+        if (typeHasShapes) {
+            if (IsKeyPressed(KEY_LEFT))  levelBuilderHorizontal_ = (levelBuilderHorizontal_ == 1) ? 0 : 1;
+            if (IsKeyPressed(KEY_RIGHT)) levelBuilderHorizontal_ = (levelBuilderHorizontal_ == 2) ? 0 : 2;
+            if (IsKeyPressed(KEY_UP))    levelBuilderVertical_   = (levelBuilderVertical_   == 1) ? 0 : 1;
+            if (IsKeyPressed(KEY_DOWN))  levelBuilderVertical_   = (levelBuilderVertical_   == 2) ? 0 : 2;
+        }
+        int cellX = 0, cellY = 0;
+        if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && screenToCell(mouse, cellX, cellY) && !IsLevelBuilderCellProtected(cellX, cellY)) {
+            const size_t idx = static_cast<size_t>(cellY) * levelBuilderWidth_ + cellX;
+            levelBuilderCells_[idx] = levelBuilderSelectedType_;
+            levelBuilderCellShapes_[idx] = typeHasShapes ? CombineLevelBuilderShape() : BlockShape::Full;
+        }
+    } else {
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && levelBuilderDragKind_ == LevelBuilderDragKind::None) {
+            for (size_t i = 0; i < levelBuilderPlayerSpawns_.size() && levelBuilderDragKind_ == LevelBuilderDragKind::None; ++i) {
+                if (CheckCollisionPointCircle(mouse, spawnScreenCenter(levelBuilderPlayerSpawns_[i][0], levelBuilderPlayerSpawns_[i][1]), tileScreenSize * 0.35f)) {
+                    levelBuilderDragKind_ = LevelBuilderDragKind::Player;
+                    levelBuilderDragIndex_ = i;
+                }
+            }
+            for (size_t i = 0; i < levelBuilderEnemySpawns_.size() && levelBuilderDragKind_ == LevelBuilderDragKind::None; ++i) {
+                if (CheckCollisionPointCircle(mouse, spawnScreenCenter(levelBuilderEnemySpawns_[i][0], levelBuilderEnemySpawns_[i][1]), tileScreenSize * 0.35f)) {
+                    levelBuilderDragKind_ = LevelBuilderDragKind::Enemy;
+                    levelBuilderDragIndex_ = i;
+                }
+            }
+        }
+        if (levelBuilderDragKind_ != LevelBuilderDragKind::None) {
+            int cellX = 0, cellY = 0;
+            if (screenToCell(mouse, cellX, cellY)) {
+                std::array<int, 2>& spawn = (levelBuilderDragKind_ == LevelBuilderDragKind::Player)
+                    ? levelBuilderPlayerSpawns_[levelBuilderDragIndex_]
+                    : levelBuilderEnemySpawns_[levelBuilderDragIndex_];
+                spawn[0] = cellX;
+                spawn[1] = cellY;
+                if (!(cellX == levelBuilderBaseX_ && cellY == levelBuilderBaseY_)) {
+                    const size_t idx = static_cast<size_t>(cellY) * levelBuilderWidth_ + cellX;
+                    levelBuilderCells_[idx] = TileType::Empty;
+                    levelBuilderCellShapes_[idx] = BlockShape::Full;
+                }
+            }
+            if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+                levelBuilderDragKind_ = LevelBuilderDragKind::None;
+            }
+        }
+    }
+
+    int eraseCellX = 0, eraseCellY = 0;
+    if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT) && screenToCell(mouse, eraseCellX, eraseCellY) && !IsLevelBuilderCellProtected(eraseCellX, eraseCellY)) {
+        const size_t idx = static_cast<size_t>(eraseCellY) * levelBuilderWidth_ + eraseCellX;
+        levelBuilderCells_[idx] = TileType::Empty;
+        levelBuilderCellShapes_[idx] = BlockShape::Full;
+    }
+
+    if (clicked(saveButtonRect)) {
+        SaveLevelBuilderCanvas();
+    }
+    if (clicked(listButtonRect)) {
+        levelBuilderMode_ = LevelBuilderMode::Browser;
+        RefreshLevelBuilderCustomIds();
+        RefreshLevelBuilderBrowsePreview();
+    }
+}
+
+void Game::RenderLevelBuilder() {
+    BeginDrawing();
+    ClearBackground(Color{0x30, 0x30, 0x34, 0xFF});
+    const Vector2 mouse = GetMousePosition();
+
+    if (levelBuilderMode_ == LevelBuilderMode::Browser || levelBuilderMode_ == LevelBuilderMode::ConfirmDelete) {
+        const char* title = "MIS NIVELES";
+        DrawText(title, windowWidth_ / 2 - MeasureText(title, 32) / 2, 40, 32, YELLOW);
+
+        constexpr int kPreviewW = 640, kPreviewH = 420;
+        const int previewX = windowWidth_ / 2 - kPreviewW / 2;
+        const int previewY = 110;
+        DrawRectangle(previewX, previewY, kPreviewW, kPreviewH, Color{0x10, 0x10, 0x10, 0xFF});
+        DrawRectangleLines(previewX, previewY, kPreviewW, kPreviewH, GRAY);
+
+        const int count = static_cast<int>(levelBuilderCustomIds_.size());
+        if (count == 0) {
+            const char* empty = "Todavia no creaste ningun nivel. Elegi \"Nuevo nivel\" para empezar.";
+            DrawText(empty, windowWidth_ / 2 - MeasureText(empty, 18) / 2, previewY + kPreviewH / 2 - 9, 18, GRAY);
+        } else if (levelBuilderBrowsePreviewValid_) {
+            const LevelData& lvl = levelBuilderBrowsePreview_;
+            const float previewScale = std::min(static_cast<float>(kPreviewW) / (static_cast<float>(lvl.width) * 16.0f), static_cast<float>(kPreviewH) / (static_cast<float>(lvl.height) * 16.0f));
+            const float previewTileSize = 16.0f * previewScale;
+            const float offX = static_cast<float>(previewX) + (static_cast<float>(kPreviewW) - static_cast<float>(lvl.width) * previewTileSize) * 0.5f;
+            const float offY = static_cast<float>(previewY) + (static_cast<float>(kPreviewH) - static_cast<float>(lvl.height) * previewTileSize) * 0.5f;
+            for (int y = 0; y < lvl.height; ++y) {
+                const bool hasRow = y < static_cast<int>(lvl.tiles.size());
+                for (int x = 0; x < lvl.width; ++x) {
+                    const char tileChar = (hasRow && x < static_cast<int>(lvl.tiles[static_cast<size_t>(y)].size()))
+                        ? lvl.tiles[static_cast<size_t>(y)][static_cast<size_t>(x)] : '.';
+                    const TileType type = TileTypeFromChar(tileChar);
+                    if (type == TileType::Empty) continue;
+                    char shapeChar = 'F';
+                    if (y < static_cast<int>(lvl.block_shapes.size()) && x < static_cast<int>(lvl.block_shapes[static_cast<size_t>(y)].size())) {
+                        shapeChar = lvl.block_shapes[static_cast<size_t>(y)][static_cast<size_t>(x)];
+                    }
+                    DrawLevelBuilderTerrainCell(type, BlockShapeFromChar(shapeChar), Vector2{offX + static_cast<float>(x) * previewTileSize, offY + static_cast<float>(y) * previewTileSize}, previewTileSize, WHITE);
+                }
+            }
+            const char* counter = TextFormat("Nivel personalizado %d  (%d/%d)", levelBuilderCustomIds_[static_cast<size_t>(levelBuilderBrowseIndex_)], levelBuilderBrowseIndex_ + 1, count);
+            DrawText(counter, windowWidth_ / 2 - MeasureText(counter, 20) / 2, previewY - 34, 20, RAYWHITE);
+        }
+        if (count > 1) {
+            const char* navHint = "Flechas izq/der: cambiar de nivel";
+            DrawText(navHint, windowWidth_ / 2 - MeasureText(navHint, 16) / 2, previewY + kPreviewH + 10, 16, GRAY);
+        }
+
+        constexpr float kButtonW = 200.0f, kButtonH = 48.0f, kGap = 16.0f;
+        const float totalW = kButtonW * 4 + kGap * 3;
+        const float startX = static_cast<float>(windowWidth_) * 0.5f - totalW * 0.5f;
+        const float buttonY = static_cast<float>(windowHeight_) - 90.0f;
+        const Rectangle newButtonRect{startX, buttonY, kButtonW, kButtonH};
+        const Rectangle playButtonRect{startX + (kButtonW + kGap), buttonY, kButtonW, kButtonH};
+        const Rectangle editButtonRect{startX + (kButtonW + kGap) * 2.0f, buttonY, kButtonW, kButtonH};
+        const Rectangle deleteButtonRect{startX + (kButtonW + kGap) * 3.0f, buttonY, kButtonW, kButtonH};
+
+        const auto drawButton = [&](Rectangle r, const char* label, Color accent, bool enabled) {
+            const bool hovered = enabled && CheckCollisionPointRec(mouse, r);
+            const Color base = !enabled ? Color{0x30, 0x30, 0x30, 0xFF}
+                : (hovered ? Color{static_cast<unsigned char>(accent.r / 2 + 40), static_cast<unsigned char>(accent.g / 2 + 40), static_cast<unsigned char>(accent.b / 2 + 40), 0xFF}
+                           : Color{0x24, 0x24, 0x28, 0xFF});
+            DrawRectangleRec(r, base);
+            DrawRectangleLinesEx(r, 1.0f, enabled ? accent : GRAY);
+            DrawText(label, static_cast<int>(r.x + r.width * 0.5f - static_cast<float>(MeasureText(label, 18)) * 0.5f), static_cast<int>(r.y + 14.0f), 18, enabled ? RAYWHITE : GRAY);
+        };
+        drawButton(newButtonRect, "NUEVO NIVEL", SKYBLUE, true);
+        drawButton(playButtonRect, "JUGAR", GREEN, count > 0);
+        drawButton(editButtonRect, "EDITAR", YELLOW, count > 0);
+        drawButton(deleteButtonRect, "BORRAR", RED, count > 0);
+
+        const char* backHint = "Esc: volver al menu principal";
+        DrawText(backHint, windowWidth_ / 2 - MeasureText(backHint, 16) / 2, windowHeight_ - 26, 16, GRAY);
+
+        if (levelBuilderMode_ == LevelBuilderMode::ConfirmDelete) {
+            constexpr int kDialogW = 480, kDialogH = 140;
+            const int dialogX = (windowWidth_ - kDialogW) / 2;
+            const int dialogY = (windowHeight_ - kDialogH) / 2;
+            DrawRectangle(0, 0, windowWidth_, windowHeight_, Color{0, 0, 0, 150});
+            DrawRectangle(dialogX, dialogY, kDialogW, kDialogH, Color{0x24, 0x24, 0x28, 0xFF});
+            DrawRectangleLinesEx(Rectangle{static_cast<float>(dialogX), static_cast<float>(dialogY), static_cast<float>(kDialogW), static_cast<float>(kDialogH)}, 2.0f, RED);
+            const int id = levelBuilderCustomIds_.empty() ? 0 : levelBuilderCustomIds_[static_cast<size_t>(levelBuilderBrowseIndex_)];
+            const char* confirmText = TextFormat("Borrar el nivel personalizado %d? No se puede deshacer.", id);
+            DrawText(confirmText, dialogX + 20, dialogY + 20, 16, RAYWHITE);
+            const Rectangle yesRect{static_cast<float>(dialogX + 60), static_cast<float>(dialogY + 80), 140.0f, 40.0f};
+            const Rectangle noRect{static_cast<float>(dialogX + kDialogW - 200), static_cast<float>(dialogY + 80), 140.0f, 40.0f};
+            DrawRectangleRec(yesRect, CheckCollisionPointRec(mouse, yesRect) ? Color{0x30, 0x70, 0x30, 0xFF} : Color{0x24, 0x50, 0x24, 0xFF});
+            DrawRectangleLinesEx(yesRect, 1.0f, GREEN);
+            DrawText("Si (S)", static_cast<int>(yesRect.x + 30.0f), static_cast<int>(yesRect.y + 10.0f), 20, RAYWHITE);
+            DrawRectangleRec(noRect, CheckCollisionPointRec(mouse, noRect) ? Color{0x70, 0x30, 0x30, 0xFF} : Color{0x50, 0x24, 0x24, 0xFF});
+            DrawRectangleLinesEx(noRect, 1.0f, RED);
+            DrawText("No (N)", static_cast<int>(noRect.x + 30.0f), static_cast<int>(noRect.y + 10.0f), 20, RAYWHITE);
+        }
+        EndDrawing();
+        return;
+    }
+
+    // --- Editing: misma geometria que ProcessLevelBuilderInput ---
+    constexpr int kTitleBarHeight = 40;
+    constexpr int kSidebarWidth = 240;
+    constexpr int kBaseTileSize = 16;
+    const int canvasAreaW = windowWidth_ - kSidebarWidth;
+    const int canvasAreaH = windowHeight_ - kTitleBarHeight;
+    const float mapPixelW = static_cast<float>(levelBuilderWidth_ * kBaseTileSize);
+    const float mapPixelH = static_cast<float>(levelBuilderHeight_ * kBaseTileSize);
+    const float scale = std::min(static_cast<float>(canvasAreaW) / mapPixelW, static_cast<float>(canvasAreaH) / mapPixelH);
+    const float tileScreenSize = kBaseTileSize * scale;
+    const float canvasOffsetX = (static_cast<float>(canvasAreaW) - mapPixelW * scale) * 0.5f;
+    const float canvasOffsetY = static_cast<float>(kTitleBarHeight) + (static_cast<float>(canvasAreaH) - mapPixelH * scale) * 0.5f;
+    const auto cellToScreen = [&](int cx, int cy) { return Vector2{canvasOffsetX + static_cast<float>(cx) * tileScreenSize, canvasOffsetY + static_cast<float>(cy) * tileScreenSize}; };
+    const auto screenToCell = [&](Vector2 p, int& outX, int& outY) -> bool {
+        const float localX = p.x - canvasOffsetX;
+        const float localY = p.y - canvasOffsetY;
+        if (localX < 0.0f || localY < 0.0f || localX >= mapPixelW * scale || localY >= mapPixelH * scale) return false;
+        outX = static_cast<int>(localX / tileScreenSize);
+        outY = static_cast<int>(localY / tileScreenSize);
+        return true;
+    };
+    const auto spawnScreenCenter = [&](int cx, int cy) {
+        const Vector2 p = cellToScreen(cx, cy);
+        return Vector2{p.x + tileScreenSize * 0.5f, p.y + tileScreenSize * 0.5f};
+    };
+
+    DrawRectangle(0, 0, windowWidth_, kTitleBarHeight, Color{0x20, 0x20, 0x24, 0xFF});
+    DrawText("Editor de niveles", 10, 8, 20, RAYWHITE);
+
+    DrawRectangle(static_cast<int>(canvasOffsetX), static_cast<int>(canvasOffsetY), static_cast<int>(mapPixelW * scale), static_cast<int>(mapPixelH * scale), Color{0x10, 0x10, 0x10, 0xFF});
+    for (int y = 0; y < levelBuilderHeight_; ++y) {
+        for (int x = 0; x < levelBuilderWidth_; ++x) {
+            const size_t idx = static_cast<size_t>(y) * levelBuilderWidth_ + x;
+            if (levelBuilderCells_[idx] == TileType::Empty) continue;
+            DrawLevelBuilderTerrainCell(levelBuilderCells_[idx], levelBuilderCellShapes_[idx], cellToScreen(x, y), tileScreenSize, WHITE);
+        }
+    }
+    for (size_t i = 0; i < levelBuilderPlayerSpawns_.size(); ++i) {
+        const Vector2 center = spawnScreenCenter(levelBuilderPlayerSpawns_[i][0], levelBuilderPlayerSpawns_[i][1]);
+        const bool dragging = (levelBuilderDragKind_ == LevelBuilderDragKind::Player && levelBuilderDragIndex_ == i);
+        DrawCircleV(center, tileScreenSize * 0.35f, Color{0x30, 0xA0, 0xE0, 0xC0});
+        if (dragging) DrawCircleLinesV(center, tileScreenSize * 0.4f, YELLOW);
+        const char* label = TextFormat("P%d", static_cast<int>(i) + 1);
+        DrawText(label, static_cast<int>(center.x) - MeasureText(label, 10) / 2, static_cast<int>(center.y) - 5, 10, BLACK);
+    }
+    for (size_t i = 0; i < levelBuilderEnemySpawns_.size(); ++i) {
+        const Vector2 center = spawnScreenCenter(levelBuilderEnemySpawns_[i][0], levelBuilderEnemySpawns_[i][1]);
+        const bool dragging = (levelBuilderDragKind_ == LevelBuilderDragKind::Enemy && levelBuilderDragIndex_ == i);
+        DrawCircleV(center, tileScreenSize * 0.35f, Color{0xE0, 0x50, 0x20, 0xC0});
+        if (dragging) DrawCircleLinesV(center, tileScreenSize * 0.4f, YELLOW);
+        DrawText("E", static_cast<int>(center.x) - MeasureText("E", 10) / 2, static_cast<int>(center.y) - 5, 10, BLACK);
+    }
+    for (int x = 0; x <= levelBuilderWidth_; ++x) {
+        const float lx = canvasOffsetX + static_cast<float>(x) * tileScreenSize;
+        DrawLine(static_cast<int>(lx), static_cast<int>(canvasOffsetY), static_cast<int>(lx), static_cast<int>(canvasOffsetY + mapPixelH * scale), Color{255, 255, 255, 40});
+    }
+    for (int y = 0; y <= levelBuilderHeight_; ++y) {
+        const float ly = canvasOffsetY + static_cast<float>(y) * tileScreenSize;
+        DrawLine(static_cast<int>(canvasOffsetX), static_cast<int>(ly), static_cast<int>(canvasOffsetX + mapPixelW * scale), static_cast<int>(ly), Color{255, 255, 255, 40});
+    }
+    int hoverX = 0, hoverY = 0;
+    if (screenToCell(mouse, hoverX, hoverY)) {
+        const Vector2 p = cellToScreen(hoverX, hoverY);
+        const bool typeHasShapes = (levelBuilderSelectedType_ == TileType::Brick || levelBuilderSelectedType_ == TileType::Steel);
+        if (levelBuilderToolActive_ && !IsLevelBuilderCellProtected(hoverX, hoverY)) {
+            DrawLevelBuilderTerrainCell(levelBuilderSelectedType_, typeHasShapes ? CombineLevelBuilderShape() : BlockShape::Full, p, tileScreenSize, Color{255, 255, 255, 140});
+        }
+        DrawRectangleLines(static_cast<int>(p.x), static_cast<int>(p.y), static_cast<int>(tileScreenSize), static_cast<int>(tileScreenSize), YELLOW);
+    }
+
+    constexpr TileType kPaletteTypes[] = {TileType::Empty, TileType::Brick, TileType::Steel, TileType::Water, TileType::Trees, TileType::Ice};
+    constexpr const char* kPaletteLabels[] = {"Vacio", "Ladrillo", "Hierro", "Agua", "Arbusto", "Hielo"};
+    constexpr int kPaletteCount = 6;
+    constexpr float kPaletteButtonH = 56.0f, kPaletteMargin = 10.0f;
+    const float paletteX = static_cast<float>(canvasAreaW) + kPaletteMargin;
+    const float paletteW = static_cast<float>(kSidebarWidth) - kPaletteMargin * 2.0f;
+    DrawRectangle(canvasAreaW, kTitleBarHeight, kSidebarWidth, windowHeight_ - kTitleBarHeight, Color{0x24, 0x24, 0x28, 0xFF});
+    for (int i = 0; i < kPaletteCount; ++i) {
+        const float by = static_cast<float>(kTitleBarHeight) + kPaletteMargin + static_cast<float>(i) * (kPaletteButtonH + kPaletteMargin);
+        const Rectangle r{paletteX, by, paletteW, kPaletteButtonH};
+        const bool selected = (kPaletteTypes[i] == levelBuilderSelectedType_);
+        const bool hovered = CheckCollisionPointRec(mouse, r);
+        DrawRectangleRec(r, selected ? Color{0x50, 0x50, 0x20, 0xFF} : (hovered ? Color{0x38, 0x38, 0x3C, 0xFF} : Color{0x2C, 0x2C, 0x30, 0xFF}));
+        DrawRectangleLinesEx(r, selected ? 2.0f : 1.0f, selected ? YELLOW : GRAY);
+        constexpr float kIconSize = 36.0f;
+        DrawLevelBuilderTerrainCell(kPaletteTypes[i], BlockShape::Full, Vector2{r.x + 8.0f, r.y + (r.height - kIconSize) * 0.5f}, kIconSize, WHITE);
+        DrawText(kPaletteLabels[i], static_cast<int>(r.x + 8.0f + kIconSize + 8.0f), static_cast<int>(r.y + r.height * 0.5f - 8.0f), 16, RAYWHITE);
+    }
+    const float saveButtonY = static_cast<float>(kTitleBarHeight) + kPaletteMargin + static_cast<float>(kPaletteCount) * (kPaletteButtonH + kPaletteMargin) + 30.0f;
+    const Rectangle saveButtonRect{paletteX, saveButtonY, paletteW, 44.0f};
+    const Rectangle listButtonRect{paletteX, saveButtonY + 54.0f, paletteW, 44.0f};
+    const bool saveHovered = CheckCollisionPointRec(mouse, saveButtonRect);
+    DrawRectangleRec(saveButtonRect, saveHovered ? Color{0x30, 0x70, 0x30, 0xFF} : Color{0x24, 0x50, 0x24, 0xFF});
+    DrawRectangleLinesEx(saveButtonRect, 1.0f, GREEN);
+    DrawText("Guardar", static_cast<int>(saveButtonRect.x + saveButtonRect.width * 0.5f - static_cast<float>(MeasureText("Guardar", 18)) * 0.5f), static_cast<int>(saveButtonRect.y + 13.0f), 18, RAYWHITE);
+    const bool listHovered = CheckCollisionPointRec(mouse, listButtonRect);
+    DrawRectangleRec(listButtonRect, listHovered ? Color{0x30, 0x50, 0x70, 0xFF} : Color{0x24, 0x38, 0x50, 0xFF});
+    DrawRectangleLinesEx(listButtonRect, 1.0f, SKYBLUE);
+    DrawText("Mis niveles", static_cast<int>(listButtonRect.x + listButtonRect.width * 0.5f - static_cast<float>(MeasureText("Mis niveles", 16)) * 0.5f), static_cast<int>(listButtonRect.y + 14.0f), 16, RAYWHITE);
+
+    if (levelBuilderSelectedType_ == TileType::Brick || levelBuilderSelectedType_ == TileType::Steel) {
+        const char* shapeLabel = "Completo";
+        switch (CombineLevelBuilderShape()) {
+            case BlockShape::Left: shapeLabel = "Izquierda"; break;
+            case BlockShape::Right: shapeLabel = "Derecha"; break;
+            case BlockShape::Top: shapeLabel = "Arriba"; break;
+            case BlockShape::Bottom: shapeLabel = "Abajo"; break;
+            case BlockShape::TopLeft: shapeLabel = "Esquina arriba-izq."; break;
+            case BlockShape::TopRight: shapeLabel = "Esquina arriba-der."; break;
+            case BlockShape::BottomLeft: shapeLabel = "Esquina abajo-izq."; break;
+            case BlockShape::BottomRight: shapeLabel = "Esquina abajo-der."; break;
+            default: break;
+        }
+        DrawText(TextFormat("Forma: %s (flechas)", shapeLabel), static_cast<int>(paletteX), static_cast<int>(saveButtonY - 24.0f), 14, YELLOW);
+    }
+
+    DrawRectangle(0, windowHeight_ - 30, windowWidth_, 30, Color{0x20, 0x20, 0x24, 0xFF});
+    DrawText(levelBuilderStatusMessage_.c_str(), 10, windowHeight_ - 24, 16, RAYWHITE);
+
+    EndDrawing();
 }
 
 void Game::DrawBrickBorder(Rectangle box, float tileSize, int thickness) {
@@ -1436,6 +2783,105 @@ void Game::RenderCharacterSelect() {
     EndDrawing();
 }
 
+void Game::EnterLanModeChoice() {
+    StopLanActivity(); // por si quedaba algo de una vuelta anterior sin cerrar bien
+    lanModeChoiceIndex_ = 0;
+    menuScreen_ = MenuScreen::LanModeChoice;
+}
+
+void Game::StopLanActivity() {
+    if (netHost_.Role() == net::NetRole::Server && netHost_.ConnectedCount() > 1) {
+        // Avisa antes de cerrar (confiable, para que llegue aunque se
+        // cierre el socket 1 frame despues): asi los clientes vuelven
+        // prolijo al menu en vez de solo detectar el corte de golpe (ver
+        // HandleRawNetMessage, MessageType::ServerClosing).
+        const net::MatchStartMsg dummy{}; // ServerClosing no lleva payload; PackMessage necesita un tipo igual
+        const std::vector<std::uint8_t> packet = net::PackMessage(net::MessageType::ServerClosing, dummy);
+        netHost_.Broadcast(packet.data(), packet.size(), /*reliable=*/true);
+        netHost_.Flush();
+    }
+    netHost_.Shutdown();
+    lanAnnouncer_.Stop();
+    lanBrowser_.Stop();
+    lanStatusMessage_.clear();
+    lanClientAccepted_ = false;
+    lanIpEntry_.clear();
+    matchStartedOverNetwork_ = false;
+    terrainReceivedOverNetwork_ = false;
+}
+
+void Game::TickLanNetworking(double dt) {
+    if (netHost_.IsActive()) {
+        for (const bc::net::NetEvent& event : netHost_.Update()) {
+            switch (event.type) {
+                case bc::net::NetEventType::Accepted:
+                    lanClientAccepted_ = true;
+                    lanStatusMessage_ = TextFormat("Conectado como Jugador %d (partida de %s)", event.slot + 1, event.peerName.c_str());
+                    // Pedido explicitamente: apenas se acepta la conexion,
+                    // el cliente ya entra al mismo lobby de seleccion de
+                    // personaje que ve el host (nadie se auto-une: ver
+                    // EnterCharacterSelectAsClient), esperando el primer
+                    // LobbySlotUpdateMsg para pintar el estado real.
+                    EnterCharacterSelectAsClient();
+                    break;
+                case bc::net::NetEventType::Rejected: {
+                    const char* reasonText = (event.rejectReason == bc::net::JoinRejectReason::ServerFull)
+                        ? "la partida esta llena"
+                        : "las versiones del juego no coinciden";
+                    lanStatusMessage_ = TextFormat("La partida rechazo la conexion: %s.", reasonText);
+                    netHost_.Shutdown();
+                    break;
+                }
+                case bc::net::NetEventType::Disconnected:
+                    if (!lanClientAccepted_) {
+                        lanStatusMessage_ = "No se pudo conectar (revisa la IP y que la partida siga abierta).";
+                    } else {
+                        lanStatusMessage_ = "Se perdio la conexion con la partida.";
+                    }
+                    lanClientAccepted_ = false;
+                    netHost_.Shutdown();
+                    if (appState_ == AppState::CharacterSelect || (appState_ == AppState::Playing && matchStartedOverNetwork_)) {
+                        // Se corto en pleno lobby o en plena partida: vuelve
+                        // al menu de LAN en vez de dejarlo colgado en una
+                        // pantalla que ya no tiene con quien hablar.
+                        player1Active_ = player2Active_ = player3Active_ = player4Active_ = false;
+                        matchStartedOverNetwork_ = false;
+                        appState_ = AppState::Menu;
+                        menuScreen_ = MenuScreen::LanModeChoice;
+                    }
+                    break;
+                case bc::net::NetEventType::ClientLeft:
+                    FreeLobbySlotsOwnedByPeer(event.slot);
+                    break;
+                case bc::net::NetEventType::RawMessage:
+                    HandleRawNetMessage(event.slot, event.rawData);
+                    break;
+                case bc::net::NetEventType::ClientJoined:
+                case bc::net::NetEventType::ClientRejected:
+                case bc::net::NetEventType::Connected:
+                default:
+                    // Servidor: los slots conectados ya quedan reflejados
+                    // solos en netHost_.Slot(i), que es lo unico que lee
+                    // RenderMenuScreenBody para MenuScreen::LanHosting — no
+                    // hace falta duplicar ese estado aca.
+                    break;
+            }
+        }
+    }
+    if (lanAnnouncer_.IsActive()) {
+        lanAnnouncer_.Update(dt, netHost_.ConnectedCount(), 1 + net::kMaxRemoteClients);
+    }
+    if (lanBrowser_.IsActive()) {
+        lanBrowser_.Update(GetTime());
+    }
+    // Servidor: mientras se esta en el lobby, se rebroadcastea el estado
+    // entero cada paso fijo (barato, ver BroadcastLobbyState) para que
+    // ningun cliente quede desincronizado si se perdio algun paquete.
+    if (netHost_.Role() == net::NetRole::Server && appState_ == AppState::CharacterSelect) {
+        BroadcastLobbyState();
+    }
+}
+
 void Game::ProcessMenuInput() {
     // El mando tambien puede manejar el menu (pedido explicitamente): el
     // primer mando conectado (se recalcula cada frame, asi que un mando
@@ -1506,10 +2952,9 @@ void Game::ProcessMenuInput() {
             } else if (mainMenuIndex_ == 5) { // Salir: pide confirmacion antes de cerrar (pedido explicitamente)
                 mainConfirmExitIndex_ = 1; // arranca en "No" cada vez, por seguridad
                 menuScreen_ = MenuScreen::MainConfirmExit;
+            } else if (mainMenuIndex_ == 3) { // Modo construccion: navegador de niveles personalizados
+                EnterLevelBuilderBrowser();
             }
-            // mainMenuIndex_ == 3 (Modo construccion): todavia no
-            // seleccionable, Enter no hace nada (ver RenderMenu para el
-            // aviso en pantalla).
         }
     } else if (menuScreen_ == MenuScreen::MainConfirmExit) {
         constexpr int kItemCount = 2; // Si/No
@@ -1529,16 +2974,118 @@ void Game::ProcessMenuInput() {
         constexpr int kItemCount = 2; // Local/Lan ("Opciones" solo esta en la pantalla principal)
         if (up)   modeSubmenuIndex_ = (modeSubmenuIndex_ + kItemCount - 1) % kItemCount;
         if (down) modeSubmenuIndex_ = (modeSubmenuIndex_ + 1) % kItemCount;
-        if (confirm && modeSubmenuIndex_ == 0 && selectedMainModeIndex_ == 0) {
-            // Arcade > Local: el unico modo con partida real por ahora.
-            // Local en Supervivencia/Versus, y Lan en cualquier modo:
-            // todavia no implementados, Enter no hace nada. Pedido
-            // explicitamente: ya no arranca directo, primero pasa por la
-            // pantalla de seleccion de personaje (ver EnterCharacterSelect).
-            EnterCharacterSelect();
+        if (confirm && selectedMainModeIndex_ == 0) {
+            // Arcade > Local o Arcade > Lan: los unicos con partida real
+            // por ahora (Local/Lan en Supervivencia/Versus: todavia no
+            // implementados, Enter no hace nada). Local ya no arranca
+            // directo, primero pasa por la pantalla de seleccion de
+            // personaje (ver EnterCharacterSelect); Lan (fundacion de red,
+            // Fase 7) pasa por su propia pantalla de hostear/buscar/
+            // conectar (ver EnterLanModeChoice) — todavia no hay gameplay
+            // real en red, solo la conexion.
+            if (modeSubmenuIndex_ == 0) {
+                EnterCharacterSelect();
+            } else {
+                EnterLanModeChoice();
+            }
         }
         if (back) {
             menuScreen_ = MenuScreen::Main;
+        }
+    } else if (menuScreen_ == MenuScreen::LanModeChoice) {
+        constexpr int kItemCount = 3; // Hostear/Buscar/Conectar por IP
+        if (up)   lanModeChoiceIndex_ = (lanModeChoiceIndex_ + kItemCount - 1) % kItemCount;
+        if (down) lanModeChoiceIndex_ = (lanModeChoiceIndex_ + 1) % kItemCount;
+        if (confirm) {
+            if (lanModeChoiceIndex_ == 0) { // Hostear partida
+                // Nombre fijo por ahora (fundacion de red nada mas, ver el
+                // plan de la Fase 7): elegir nombre de partida/jugador
+                // queda para el tramo que enchufe el gameplay real.
+                const std::string hostName = "Partida de Battle City";
+                if (netHost_.StartServer(hostName)) {
+                    lanAnnouncer_.Start(hostName, net::kDefaultGamePort);
+                    menuScreen_ = MenuScreen::LanHosting;
+                } else {
+                    lanStatusMessage_ = "No se pudo abrir el puerto para hostear.";
+                }
+            } else if (lanModeChoiceIndex_ == 1) { // Buscar partidas
+                lanBrowsingIndex_ = 0;
+                lanBrowser_.Start();
+                menuScreen_ = MenuScreen::LanBrowsing;
+            } else { // Conectar por IP
+                lanIpEntry_.clear();
+                menuScreen_ = MenuScreen::LanConnectIp;
+            }
+        }
+        if (back) {
+            StopLanActivity();
+            menuScreen_ = MenuScreen::ModeSubmenu;
+        }
+    } else if (menuScreen_ == MenuScreen::LanHosting) {
+        // Enter pasa al lobby de seleccion de personaje de siempre
+        // (EnterCharacterSelect), ahora consciente de la red (ver
+        // ProcessCharacterSelectInput): ahi es donde se suman los demas
+        // jugadores (locales del host o de cualquier cliente conectado) y
+        // recien ahi, con el minimo de jugadores pedido, se confirma el
+        // arranque de verdad (ver el chequeo de ConnectedCount() en el
+        // confirm de CharacterSelect).
+        if (confirm) {
+            lanAnnouncer_.Stop(); // deja de anunciarse: el lobby ya se ve andando
+            EnterCharacterSelect();
+        }
+        if (back) {
+            StopLanActivity();
+            menuScreen_ = MenuScreen::LanModeChoice;
+        }
+    } else if (menuScreen_ == MenuScreen::LanBrowsing) {
+        const int hostCount = static_cast<int>(lanBrowser_.Hosts().size());
+        if (hostCount > 0) {
+            if (up)   lanBrowsingIndex_ = (lanBrowsingIndex_ + hostCount - 1) % hostCount;
+            if (down) lanBrowsingIndex_ = (lanBrowsingIndex_ + 1) % hostCount;
+            if (confirm) {
+                const bc::net::DiscoveredHost chosen = lanBrowser_.Hosts()[static_cast<size_t>(lanBrowsingIndex_)]; // copia: lanBrowser_.Stop() de abajo vacia Hosts()
+                lanBrowser_.Stop();
+                lanClientAccepted_ = false;
+                if (netHost_.Connect(chosen.address, "Jugador", chosen.gamePort)) {
+                    lanStatusMessage_ = "Conectando a " + chosen.hostName + "...";
+                    menuScreen_ = MenuScreen::LanConnecting;
+                } else {
+                    lanStatusMessage_ = "No se pudo iniciar la conexion.";
+                }
+            }
+        }
+        if (back) {
+            StopLanActivity();
+            menuScreen_ = MenuScreen::LanModeChoice;
+        }
+    } else if (menuScreen_ == MenuScreen::LanConnectIp) {
+        constexpr size_t kLanIpMaxLen = 45; // de sobra para una IPv4 o un hostname de LAN
+        int pressed = GetCharPressed();
+        while (pressed != 0) {
+            if (pressed >= 32 && pressed < 127 && lanIpEntry_.size() < kLanIpMaxLen) {
+                lanIpEntry_.push_back(static_cast<char>(pressed));
+            }
+            pressed = GetCharPressed();
+        }
+        if (IsKeyPressed(KEY_BACKSPACE) && !lanIpEntry_.empty()) {
+            lanIpEntry_.pop_back();
+        }
+        if (confirm && !lanIpEntry_.empty()) {
+            lanClientAccepted_ = false;
+            if (netHost_.Connect(lanIpEntry_, "Jugador", net::kDefaultGamePort)) {
+                lanStatusMessage_ = "Conectando a " + lanIpEntry_ + "...";
+                menuScreen_ = MenuScreen::LanConnecting;
+            } else {
+                lanStatusMessage_ = "IP invalida, no se pudo iniciar la conexion.";
+            }
+        }
+        if (back) {
+            menuScreen_ = MenuScreen::LanModeChoice;
+        }
+    } else if (menuScreen_ == MenuScreen::LanConnecting) {
+        if (back) {
+            StopLanActivity();
+            menuScreen_ = MenuScreen::LanModeChoice;
         }
     } else if (menuScreen_ == MenuScreen::Options) {
         constexpr int kItemCount = 3; // Fuego amigo/Pantalla/Mapeo de controles
@@ -2225,6 +3772,43 @@ void Game::ConfirmGameOverNameEntry() {
 
 void Game::FinishGameOverSequence() {
     gameOverPhase_ = GameOverPhase::None;
+
+    if (playingCustomLevels_) {
+        // Modo construccion: "Va al siguiente nivel creado. Una vez que
+        // recorre todos los creados, vuelve al menu de construccion" —
+        // pedido explicitamente para AMBOS casos, ganar o perder (game
+        // over). A diferencia de AdvanceToNextLevel (que solo se llama
+        // al ganar y deja vidas/puntaje como estan), aca hay que arrancar
+        // de cero: si hubo game over es porque no quedan vidas, asi que
+        // el siguiente nivel de la lista necesita un ResetState()
+        // completo para poder jugarse.
+        ++customLevelPlayIndex_;
+        if (customLevelPlayIndex_ >= static_cast<int>(customLevelPlayOrder_.size())) {
+            playingCustomLevels_ = false;
+            EnterLevelBuilderBrowser();
+            return;
+        }
+
+        ResetState(); // carga el mapa "viejo" de una (ver comentario en JumpToLevel); se pisa abajo
+        LoadCurrentLevelMap();
+        if (player1Active_) RespawnPlayer1();
+        if (player2Active_) RespawnPlayer2();
+        if (player3Active_) RespawnPlayer3();
+        if (player4Active_) RespawnPlayer4();
+        enemies_ = EnemySystem{};
+        fastEnemies_ = FastEnemySystem{};
+        armorEnemies_ = ArmorEnemySystem{};
+        powerEnemies_ = PowerEnemySystem{};
+        enemiesSpawnedThisLevel_ = 0;
+        enemiesKilledThisLevel_ = 0;
+        playerLevelStats_ = {};
+        ApplyAggressivenessForCurrentLevel();
+        BuildEnemyTypeSequenceForLevel();
+        BeginLevelTransition();
+        appState_ = AppState::Playing;
+        return;
+    }
+
     appState_ = AppState::Menu;
     menuScreen_ = MenuScreen::Main;
 }
@@ -2435,7 +4019,18 @@ void Game::CheckLevelCompletion(double dt) {
 }
 
 void Game::AdvanceToNextLevel() {
-    if (currentLevel_ < kMaxGameLevel) {
+    if (playingCustomLevels_) {
+        ++customLevelPlayIndex_;
+        if (customLevelPlayIndex_ >= static_cast<int>(customLevelPlayOrder_.size())) {
+            // Se recorrieron todos los niveles personalizados: vuelve al
+            // navegador de construccion en vez de armar un nivel nuevo
+            // (pedido explicitamente: "una vez que recorre todos los
+            // creados, vuelve al menu de construccion").
+            playingCustomLevels_ = false;
+            EnterLevelBuilderBrowser();
+            return;
+        }
+    } else if (currentLevel_ < kMaxGameLevel) {
         ++currentLevel_;
     }
 
@@ -2934,6 +4529,34 @@ void Game::Update(double fixedDt) {
         return; // en el menu no hay simulacion a paso fijo, solo se dibuja (ver RenderMenu)
     }
 
+    if (netHost_.Role() == net::NetRole::Client) {
+        // El cliente en red no simula nada (seccion 11.1 del diseno: "no
+        // hace falta prediccion/reconciliacion... alcanza con
+        // interpolacion simple"): ya aplico el ultimo WorldSnapshotMsg
+        // recibido a estas mismas variables (ver ApplyWorldSnapshot,
+        // llamado desde TickLanNetworking en ProcessInput() de este mismo
+        // paso fijo, que corre antes que este Update()). Render() lee
+        // directo lo que ese snapshot acaba de dejar, sin cambios.
+        //
+        // Excepcion: el destello de aparicion (SpawnFlash) de cada jugador
+        // es puramente visual y vive en el cliente (no llega por red, ver
+        // WireTankState: no tiene ese campo). Lo arranca ResetState/
+        // RespawnPlayerN, que SI corren en el cliente (StartArcadeLocal se
+        // llama en los dos roles al confirmar personajes) — pero lo unico
+        // que lo hace AVANZAR es UpdatePlayer, y eso nunca corre aca
+        // (retorna arriba). Sin este tick quedaba trabado para siempre en
+        // el primer frame (bug reportado: el tanque nunca se llegaba a ver,
+        // solo sus disparos, que vienen del snapshot y no dependen de
+        // esto). No hace falta que coincida cuadro a cuadro con el
+        // servidor: es cosmetico, el servidor es quien decide de verdad si
+        // se lo puede danar (ver Enemy::spawn/UpdatePlayer del lado server).
+        if (player1Spawn_.IsActive()) player1Spawn_.Update(fixedDt);
+        if (player2Spawn_.IsActive()) player2Spawn_.Update(fixedDt);
+        if (player3Spawn_.IsActive()) player3Spawn_.Update(fixedDt);
+        if (player4Spawn_.IsActive()) player4Spawn_.Update(fixedDt);
+        return;
+    }
+
     // Menu de pausa (ver paused_): todo el juego queda congelado del todo
     // mientras este abierto, ni siquiera se tickean animaciones/timers (a
     // diferencia de la transicion de nivel o la pantalla de puntuacion, que
@@ -2989,6 +4612,25 @@ void Game::Update(double fixedDt) {
         screenShakeTimer_ = std::max(0.0, screenShakeTimer_ - fixedDt);
     }
     TickBaseFortification(fixedDt);
+
+    // Servidor con clientes conectados: para cada casillero que le
+    // pertenece a un cliente remoto (ver slotOwnerPeer_), pisa el input
+    // local de siempre con el ultimo que mando ese cliente (ver
+    // HandlePlayerInputBatchFromPeer) — si ese paso fijo no trajo paquete
+    // nuevo de ese cliente, reusa el ultimo conocido (nunca "sin apretar
+    // nada de golpe" por 1 paquete perdido, ver remotePeerLocalInputs_).
+    if (netHost_.Role() == net::NetRole::Server) {
+        PlayerInput* const inputs[4] = {&input1_, &input2_, &input3_, &input4_};
+        for (int box = 0; box < 4; ++box) {
+            if (slotOwnerPeer_[box] != 0) {
+                const int peerIndex = slotOwnerPeer_[box] - 1;
+                const int localIndex = slotOwnerLocalIndex_[box];
+                if (peerIndex >= 0 && peerIndex < net::kMaxRemoteClients && localIndex >= 0 && localIndex < net::kMaxLocalSlotsPerPeer) {
+                    *inputs[box] = remotePeerLocalInputs_[peerIndex][localIndex];
+                }
+            }
+        }
+    }
 
     // Jugadores congelados durante la secuencia de fin de partida (ver
     // gameOver_ arriba): no se mueven, no disparan, no agarran power-ups.
@@ -3083,16 +4725,16 @@ void Game::Update(double fixedDt) {
     // un choque directo del disparo especial (ver TankCombatState).
     std::vector<TankCombatState> tanks;
     tanks.reserve(4);
-    struct ActivePlayerRef { int ownerId; Tank* tank; bool active; };
+    struct ActivePlayerRef { int ownerId; Tank* tank; bool active; const SpawnFlash* spawn; };
     const ActivePlayerRef activePlayers[4] = {
-        {kPlayer1Id, &player1_, player1Active_},
-        {kPlayer2Id, &player2_, player2Active_},
-        {kPlayer3Id, &player3_, player3Active_},
-        {kPlayer4Id, &player4_, player4Active_},
+        {kPlayer1Id, &player1_, player1Active_, &player1Spawn_},
+        {kPlayer2Id, &player2_, player2Active_, &player2Spawn_},
+        {kPlayer3Id, &player3_, player3Active_, &player3Spawn_},
+        {kPlayer4Id, &player4_, player4Active_, &player4Spawn_},
     };
     for (const ActivePlayerRef& ref : activePlayers) {
-        if (!ref.active || ref.tank->IsEliminated()) {
-            continue; // ausente o fuera de la partida: no es un blanco valido
+        if (!ref.active || ref.tank->IsEliminated() || ref.spawn->IsActive()) {
+            continue; // ausente, fuera de partida o destellando: no es un blanco valido
         }
         TankCombatState state;
         state.ownerId = ref.ownerId;
@@ -3106,8 +4748,8 @@ void Game::Update(double fixedDt) {
     // pasa de largo si weaponLevel != 4), asi el especial revienta contra
     // el en vez de seguir de largo como con los demas.
     for (Enemy& enemy : powerEnemies_.Enemies()) {
-        if (!enemy.alive) {
-            continue;
+        if (!enemy.alive || enemy.spawn.IsActive()) {
+            continue; // destellando: fantasma, ni el especial le hace nada (pedido explicitamente)
         }
         TankCombatState state;
         state.ownerId = enemy.ownerId;
@@ -3126,7 +4768,7 @@ void Game::Update(double fixedDt) {
     // aplicar cuando corresponda; el escudo real decide cual de las 2 ramas
     // toma (ver BulletSystem::Update).
     for (Enemy& enemy : enemies_.Enemies()) {
-        if (enemy.alive) {
+        if (enemy.alive && !enemy.spawn.IsActive()) {
             TankCombatState state;
             state.ownerId = enemy.ownerId;
             enemy.tank.GetBounds(state.left, state.right, state.top, state.bottom);
@@ -3136,7 +4778,7 @@ void Game::Update(double fixedDt) {
         }
     }
     for (Enemy& enemy : fastEnemies_.Enemies()) {
-        if (enemy.alive) {
+        if (enemy.alive && !enemy.spawn.IsActive()) {
             TankCombatState state;
             state.ownerId = enemy.ownerId;
             enemy.tank.GetBounds(state.left, state.right, state.top, state.bottom);
@@ -3146,7 +4788,7 @@ void Game::Update(double fixedDt) {
         }
     }
     for (Enemy& enemy : armorEnemies_.Enemies()) {
-        if (enemy.alive) {
+        if (enemy.alive && !enemy.spawn.IsActive()) {
             TankCombatState state;
             state.ownerId = enemy.ownerId;
             enemy.tank.GetBounds(state.left, state.right, state.top, state.bottom);
@@ -3214,8 +4856,8 @@ void Game::Update(double fixedDt) {
     // mientras enemigos/balas/power-ups de arriba y abajo siguen andando.
     if (!gameOver_) {
         for (const ActivePlayerRef& ref : activePlayers) {
-            if (!ref.active) {
-                continue;
+            if (!ref.active || ref.spawn->IsActive()) {
+                continue; // destellando: fantasma, tampoco le pega el fuego amigo
             }
             if (ApplyFriendlyFire(*ref.tank, ref.ownerId)) {
                 HandlePlayerDeath(*ref.tank, ref.ownerId);
@@ -3226,9 +4868,12 @@ void Game::Update(double fixedDt) {
         // del modo de fuego amigo, que es solo entre jugadores), con la
         // potencia real del tipo de enemigo que disparo (ver ResolveTankHit
         // y kBulletPowerByLevel — antes se procesaba siempre como si fuera
-        // potencia 1 sin importar el tipo, ya corregido).
+        // potencia 1 sin importar el tipo, ya corregido). Mientras dura el
+        // destello de aparicion tampoco es un blanco valido (pedido
+        // explicitamente: ni enemigos ni jugadores pueden recibir dano
+        // mientras estan destellando).
         for (const ActivePlayerRef& ref : activePlayers) {
-            if (!ref.active || ref.tank->IsEliminated()) {
+            if (!ref.active || ref.tank->IsEliminated() || ref.spawn->IsActive()) {
                 continue;
             }
             float left = 0.0f, right = 0.0f, top = 0.0f, bottom = 0.0f;
@@ -3285,8 +4930,8 @@ void Game::Update(double fixedDt) {
     // proposito, es el riesgo de usar el disparo especial).
     if (!gameOver_) {
         for (const ActivePlayerRef& ref : activePlayers) {
-            if (!ref.active) {
-                continue;
+            if (!ref.active || ref.spawn->IsActive()) {
+                continue; // destellando: fantasma, tampoco lo alcanza la explosion
             }
             if (ApplyExplosionSelfDamage(*ref.tank, ref.ownerId)) {
                 HandlePlayerDeath(*ref.tank, ref.ownerId);
@@ -3313,6 +4958,17 @@ void Game::Update(double fixedDt) {
 
     if (!gameOver_) {
         CheckLevelCompletion(fixedDt);
+    }
+
+    // Servidor: con la simulacion de este paso fijo ya terminada, le manda
+    // a cada cliente conectado el terreno (si cambio, ver
+    // TickServerTerrainSync) y el snapshot del mundo entero (siempre, ver
+    // BroadcastWorldSnapshot) — en ese orden, para que si los dos cambiaron
+    // este mismo paso el cliente ya tenga el terreno nuevo cuando le llegue
+    // el snapshot que lo asume.
+    if (netHost_.Role() == net::NetRole::Server && netHost_.ConnectedCount() > 1) {
+        TickServerTerrainSync();
+        BroadcastWorldSnapshot();
     }
 }
 
@@ -3540,6 +5196,10 @@ void Game::Render(double /*interpolationAlpha*/) {
 
     if (appState_ == AppState::CharacterSelect) {
         RenderCharacterSelect();
+        return;
+    }
+    if (appState_ == AppState::LevelBuilder) {
+        RenderLevelBuilder();
         return;
     }
     if (appState_ != AppState::Playing) {
@@ -4182,7 +5842,7 @@ void Game::RenderMenuScreenBody(float listTop, std::string& hintText) {
         // seleccionado) y el cuadro de confirmacion encima, en RenderMenuFooter
         // (mismo criterio que CapturingKey sobre PlayerActions).
         static const char* kItems[] = {"ARCADE", "SUPERVIVENCIA", "VERSUS", "MODO CONSTRUCCION", "OPCIONES", "SALIR"};
-        static const bool kEnabled[] = {true, true, true, false, true, true};
+        static const bool kEnabled[] = {true, true, true, true, true, true};
         for (int i = 0; i < 6; ++i) {
             DrawMenuLine(kItems[i], listTop + static_cast<float>(i) * kLineHeight, i == mainMenuIndex_, kEnabled[i]);
         }
@@ -4196,13 +5856,69 @@ void Game::RenderMenuScreenBody(float listTop, std::string& hintText) {
 
         static const char* kItems[] = {"LOCAL", "LAN"};
         const bool modeHasGameplay = (selectedMainModeIndex_ == 0); // solo Arcade tiene partida real por ahora
-        const bool enabled[2] = {modeHasGameplay, false};
+        const bool enabled[2] = {modeHasGameplay, modeHasGameplay};
         for (int i = 0; i < 2; ++i) {
             DrawMenuLine(kItems[i], listTop + kLineHeight + static_cast<float>(i) * kLineHeight, i == modeSubmenuIndex_, enabled[i]);
         }
         if (!enabled[modeSubmenuIndex_]) {
-            hintText = (modeSubmenuIndex_ == 1) ? "Juego en red: todavia no disponible." : "Este modo todavia no tiene partida implementada.";
+            hintText = "Este modo todavia no tiene partida implementada.";
+        } else if (modeSubmenuIndex_ == 1) {
+            hintText = "Todavia solo conecta jugadores, sin partida real en red (Fase 7 en progreso).";
         }
+    } else if (menuScreen_ == MenuScreen::LanModeChoice) {
+        const char* title = "JUEGO EN RED (LAN)";
+        DrawText(title, centerX - MeasureText(title, 24) / 2, static_cast<int>(listTop), 24, SKYBLUE);
+
+        static const char* kItems[] = {"HOSTEAR PARTIDA", "BUSCAR PARTIDAS", "CONECTAR POR IP"};
+        for (int i = 0; i < 3; ++i) {
+            DrawMenuLine(kItems[i], listTop + kLineHeight + static_cast<float>(i) * kLineHeight, i == lanModeChoiceIndex_, true);
+        }
+        hintText = lanStatusMessage_.empty() ? "Todavia es solo la conexion: sin partida jugable en red por ahora." : lanStatusMessage_;
+    } else if (menuScreen_ == MenuScreen::LanHosting) {
+        const char* title = "HOSTEANDO PARTIDA";
+        DrawText(title, centerX - MeasureText(title, 24) / 2, static_cast<int>(listTop), 24, SKYBLUE);
+
+        const char* you = "JUGADOR 1 (VOS)";
+        DrawMenuLine(you, listTop + kLineHeight, false, true);
+        for (int i = 0; i < net::kMaxRemoteClients; ++i) {
+            const bc::net::NetHost::RemoteSlot& slot = netHost_.Slot(i);
+            const char* line = slot.connected
+                ? TextFormat("JUGADOR %d - %s", i + 2, slot.name.c_str())
+                : TextFormat("JUGADOR %d - esperando...", i + 2);
+            DrawMenuLine(line, listTop + kLineHeight * static_cast<float>(i + 2), false, slot.connected);
+        }
+        hintText = "Enter: elegir personajes y arrancar. Esc: cancelar.";
+    } else if (menuScreen_ == MenuScreen::LanBrowsing) {
+        const char* title = "BUSCAR PARTIDAS";
+        DrawText(title, centerX - MeasureText(title, 24) / 2, static_cast<int>(listTop), 24, SKYBLUE);
+
+        const std::vector<bc::net::DiscoveredHost>& hosts = lanBrowser_.Hosts();
+        if (hosts.empty()) {
+            const char* empty = "Buscando partidas en la red...";
+            DrawText(empty, centerX - MeasureText(empty, 20) / 2, static_cast<int>(listTop + kLineHeight), 20, GRAY);
+        } else {
+            for (size_t i = 0; i < hosts.size(); ++i) {
+                const bc::net::DiscoveredHost& host = hosts[i];
+                const char* line = TextFormat("%s (%d/%d)", host.hostName.c_str(), host.connectedCount, host.maxCount);
+                DrawMenuLine(line, listTop + kLineHeight * static_cast<float>(i + 1), static_cast<int>(i) == lanBrowsingIndex_, true);
+            }
+        }
+        hintText = "Enter: conectarse. Esc: volver.";
+    } else if (menuScreen_ == MenuScreen::LanConnectIp) {
+        const char* title = "CONECTAR POR IP";
+        DrawText(title, centerX - MeasureText(title, 24) / 2, static_cast<int>(listTop), 24, SKYBLUE);
+
+        const bool cursorOn = static_cast<int>(GetTime() / kHudTextBlinkInterval) % 2 == 0;
+        const std::string ipDisplay = lanIpEntry_ + (cursorOn ? "_" : "");
+        DrawText(ipDisplay.c_str(), centerX - MeasureText(ipDisplay.c_str(), 22) / 2, static_cast<int>(listTop + kLineHeight), 22, YELLOW);
+        hintText = "Enter: conectar. Esc: volver.";
+    } else if (menuScreen_ == MenuScreen::LanConnecting) {
+        const char* title = "CONECTANDO...";
+        DrawText(title, centerX - MeasureText(title, 24) / 2, static_cast<int>(listTop), 24, SKYBLUE);
+        if (!lanStatusMessage_.empty()) {
+            DrawText(lanStatusMessage_.c_str(), centerX - MeasureText(lanStatusMessage_.c_str(), 20) / 2, static_cast<int>(listTop + kLineHeight), 20, RAYWHITE);
+        }
+        hintText = "Esc: cancelar/volver.";
     } else if (menuScreen_ == MenuScreen::Options) {
         const char* items[3] = {
             TextFormat("FUEGO AMIGO: %s", FriendlyFireLabel(friendlyFireMode_)),
@@ -4507,6 +6223,7 @@ void Game::RenderGameOverOverlay() {
 }
 
 void Game::Shutdown() {
+    StopLanActivity(); // cierra el ENetHost/sockets de descubrimiento si habia algo activo (ver src/net/)
     UnloadTexture(titleLogoTexture_);
     UnloadTexture(menuSelectorTexture_);
     UnloadTexture(gameOverTexture_);

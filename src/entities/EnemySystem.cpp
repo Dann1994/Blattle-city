@@ -319,6 +319,16 @@ void EnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, BulletI
         enemy.tank.TickFreeze(dt);
         enemy.tank.TickShield(dt);
 
+        if (enemy.spawn.IsActive()) {
+            // Mientras dura el destello de aparicion es un "fantasma": ni
+            // siquiera puede recibir dano (pedido explicitamente: no se
+            // podia destruir de antes, pero SI se lo podia matar de un tiro
+            // mientras todavia estaba destellando). El chequeo de bala va
+            // DESPUES de este return, no antes.
+            enemy.spawn.Update(dt);
+            continue;
+        }
+
         // Muere de un solo impacto de bala de JUGADOR, sin importar el
         // nivel (misma animacion chica de explosion que Game::DestroyTank
         // usa para los jugadores), salvo que tenga el escudo activo (item
@@ -360,11 +370,6 @@ void EnemySystem::Update(double dt, TileMap& map, BulletSystem& bullets, BulletI
             // El escudo absorbio el impacto: sigue en pie (pedido
             // explicitamente: sonido de impacto no letal, igual que Power).
             PlaySound(hitNonLethalSound);
-        }
-
-        if (enemy.spawn.IsActive()) {
-            enemy.spawn.Update(dt);
-            continue;
         }
 
         if (enemy.tank.IsFrozen()) {

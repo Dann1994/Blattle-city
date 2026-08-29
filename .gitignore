@@ -7,3 +7,10 @@ CMakeUserPresets.json
 launch_check.log
 screenshot*.png
 battlecity_log.txt
+battlecity_debug_log.txt
+battlecity_main_log.txt
+level_editor_log.txt
+
+# Referencia de audio original (NES), no es parte del proyecto en si.
+Documentaciones/NES - Battle City (JPN) - Miscellaneous - Sound Effects.zip
+Documentaciones/NES - Battle City (JPN) - Miscellaneous - Sound Effects/

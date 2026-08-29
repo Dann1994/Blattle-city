@@ -29,7 +29,22 @@ FetchContent_Declare(
     GIT_SHALLOW TRUE
 )
 
-FetchContent_MakeAvailable(raylib json)
+# Red LAN (Fase 7, seccion 11 del documento de diseno): UDP con canales
+# confiables/no confiables, liviano, pensado para juegos en tiempo real.
+set(ENET_STATIC ON CACHE BOOL "" FORCE)
+set(ENET_BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(ENET_INSTALL OFF CACHE BOOL "" FORCE)
+set(ENET_INSTALL_HEADERS OFF CACHE BOOL "" FORCE)
+set(ENET_INSTALL_LIB OFF CACHE BOOL "" FORCE)
+set(ENET_INSTALL_PKGCONFIG OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    enet
+    GIT_REPOSITORY https://github.com/lsalzman/enet.git
+    GIT_TAG v1.3.18
+    GIT_SHALLOW TRUE
+)
+
+FetchContent_MakeAvailable(raylib json enet)
 
 file(GLOB_RECURSE BC_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/src/*.cpp
@@ -54,7 +69,16 @@ target_include_directories(battlecity PRIVATE
     ${CMAKE_SOURCE_DIR}/shared
 )
 
-target_link_libraries(battlecity PRIVATE raylib nlohmann_json::nlohmann_json)
+target_link_libraries(battlecity PRIVATE raylib nlohmann_json::nlohmann_json enet)
+# ENet usa include_directories() a la vieja usanza en su propio CMakeLists
+# (no target_include_directories), asi que no propaga solo via
+# target_link_libraries como raylib/json: hay que sumarlo a mano.
+target_include_directories(battlecity PRIVATE ${enet_SOURCE_DIR}/include)
+if (WIN32)
+    # ENet en Windows necesita Winsock + winmm (timeGetTime) directo, aparte
+    # de las libs de sistema que ya se linkeaban.
+    target_link_libraries(battlecity PRIVATE ws2_32 winmm)
+endif()
 
 target_compile_definitions(battlecity PRIVATE
     BC_ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets/"
@@ -96,7 +120,11 @@ target_include_directories(battlecity_debug PRIVATE
     ${CMAKE_SOURCE_DIR}/shared
 )
 
-target_link_libraries(battlecity_debug PRIVATE raylib nlohmann_json::nlohmann_json)
+target_link_libraries(battlecity_debug PRIVATE raylib nlohmann_json::nlohmann_json enet)
+target_include_directories(battlecity_debug PRIVATE ${enet_SOURCE_DIR}/include)
+if (WIN32)
+    target_link_libraries(battlecity_debug PRIVATE ws2_32 winmm)
+endif()
 
 target_compile_definitions(battlecity_debug PRIVATE
     BC_ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets/"
