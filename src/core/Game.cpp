@@ -714,6 +714,37 @@ void Game::RespawnByOwnerId(int ownerId) {
     }
 }
 
+void Game::TryStealLife(int requesterSlot) {
+    Tank* const tanks[4] = {&player1_, &player2_, &player3_, &player4_};
+    const bool active[4] = {player1Active_, player2Active_, player3Active_, player4Active_};
+    int* const scores[4] = {&player1Score_, &player2Score_, &player3Score_, &player4Score_};
+    const int ownerIds[4] = {kPlayer1Id, kPlayer2Id, kPlayer3Id, kPlayer4Id};
+
+    // Busca al donante: el jugador activo (que no sea quien pide) con MAS
+    // vidas, siempre que le quede al menos 1 despues de ceder una (2+
+    // antes); en caso de empate en la cantidad de vidas, el de mayor
+    // puntaje de esos.
+    int donorSlot = -1;
+    for (int i = 0; i < 4; ++i) {
+        if (i == requesterSlot || !active[i] || tanks[i]->Lives() < 2) {
+            continue;
+        }
+        if (donorSlot == -1 ||
+            tanks[i]->Lives() > tanks[donorSlot]->Lives() ||
+            (tanks[i]->Lives() == tanks[donorSlot]->Lives() && *scores[i] > *scores[donorSlot])) {
+            donorSlot = i;
+        }
+    }
+    if (donorSlot == -1) {
+        return; // nadie tiene vidas de sobra para donar
+    }
+
+    tanks[donorSlot]->LoseLife();
+    tanks[requesterSlot]->AddLife();
+    tanks[requesterSlot]->Revive();
+    RespawnByOwnerId(ownerIds[requesterSlot]);
+}
+
 void Game::SetPlayerActive(bool& activeFlag, Tank& tank, SpawnFlash& spawn, float spawnX, float spawnY, bool active, int slotIndex) {
     activeFlag = active;
     if (!active) {
@@ -989,6 +1020,23 @@ void Game::ProcessInput() {
     }
     if (!player4Active_ && IsSlotShootPressed(3)) {
         SetPlayerActive(player4Active_, player4_, player4Spawn_, player4SpawnX_, player4SpawnY_, true, 3);
+    }
+
+    // Pedido explicitamente: un jugador activo pero sin vidas (eliminado)
+    // puede volver a la partida robandole 1 vida al que mas vidas tenga,
+    // tambien apretando Disparar (ver Game::TryStealLife para el criterio
+    // de a quien se la saca).
+    if (player1Active_ && player1_.IsEliminated() && IsSlotShootPressed(0)) {
+        TryStealLife(0);
+    }
+    if (player2Active_ && player2_.IsEliminated() && IsSlotShootPressed(1)) {
+        TryStealLife(1);
+    }
+    if (player3Active_ && player3_.IsEliminated() && IsSlotShootPressed(2)) {
+        TryStealLife(2);
+    }
+    if (player4Active_ && player4_.IsEliminated() && IsSlotShootPressed(3)) {
+        TryStealLife(3);
     }
 
     // Boton de prueba: repite el respawn en el punto de spawn inicial, para
@@ -3408,8 +3456,12 @@ void Game::RenderPlayerHud(const Tank& tank, const char* label, int centerX, int
     // temperatura junto con su texto) se centra en centerX, en vez de
     // arrancar de un borde fijo.
     if (tank.IsEliminated()) {
-        const char* text = TextFormat("%s - SIN VIDAS  Puntaje: %d", label, score);
-        DrawText(text, centerX - MeasureText(text, 20) / 2, y, 20, RED);
+        // Pedido explicitamente: el puntaje va en su propia linea, debajo
+        // de "GAME OVER" (antes las dos iban juntas en una sola linea).
+        const char* line1 = TextFormat("%s - GAME OVER", label);
+        const char* line2 = TextFormat("Puntaje: %d", score);
+        DrawText(line1, centerX - MeasureText(line1, 20) / 2, y, 20, RED);
+        DrawText(line2, centerX - MeasureText(line2, 20) / 2, y + 24, 20, RED);
         return;
     }
 

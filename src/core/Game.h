@@ -390,6 +390,18 @@ private:
     void RespawnPlayer4();
     void RespawnByOwnerId(int ownerId);
 
+    // Pedido explicitamente: un jugador activo pero sin vidas (Eliminate()d)
+    // puede volver a la partida robandole 1 vida al jugador con MAS vidas,
+    // con solo apretar Disparar (ver el chequeo en ProcessInput). El
+    // donante tiene que quedarse con al menos 1 vida despues de cederla (o
+    // sea, necesita 2 o mas antes); si hay empate entre varios en la
+    // cantidad maxima de vidas, se la saca al de mayor puntaje de esos. Si
+    // no hay ningun donante valido (nadie tiene 2+ vidas), no hace nada. Al
+    // robar: el donante pierde 1 vida, el que pidio recupera 1 (queda en 1),
+    // deja de estar eliminado y respawnea como cualquier otro (mismo
+    // destello + escudo de siempre, ver RespawnByOwnerId).
+    void TryStealLife(int requesterSlot);
+
     // Activa o desactiva un jugador (teclas 1/2/3, seccion de prueba): al
     // activarlo, reinicia su tanque de cero y lo respawnea; al desactivarlo,
     // el flag pasa a false y Update()/Render() simplemente dejan de tocar a

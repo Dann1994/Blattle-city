@@ -165,6 +165,35 @@ int main() {
         if (baseX >= 0 && baseX < gridWidth && baseY >= 0 && baseY < gridHeight) {
             cells[static_cast<size_t>(baseY) * gridWidth + baseX] = TileType::Base;
         }
+        // Anillo de ladrillo por defecto, pegado al aguila (pedido
+        // explicitamente: "siempre que hago un nivel acomodo eso" -antes el
+        // lienzo nuevo arrancaba sin nada, habia que pintar esto a mano cada
+        // vez): 3 arriba (izq/centro/der) y 1 a cada costado, igual al que
+        // ya se usa en los niveles 1-9, ya recortado a la mitad pegada al
+        // aguila (pedido explicitamente: "quitale una capa"), con el mismo
+        // BlockShape que el juego le aplicaria solo al cargar el nivel (ver
+        // Game::LoadCurrentLevelMap/ThinBrickCellVertical/Horizontal) — asi
+        // lo que se ve en el editor ya coincide con lo que se va a ver en
+        // el juego. Las 2 esquinas (arriba-izq/arriba-der) usan encima solo
+        // un cuarto (BottomRight/BottomLeft) en vez de la mitad entera
+        // (Bottom): la mitad completa incluia tambien el cuarto de MAS
+        // AFUERA, que sobresalia hacia el costado en vez de quedar
+        // pegado/alineado con la columna de al lado (pedido explicitamente:
+        // "quita los dos pedazos que sobresalen").
+        auto PlaceRingBrick = [&](int x, int y, BlockShape shape) {
+            if (x >= 0 && x < gridWidth && y >= 0 && y < gridHeight) {
+                const size_t idx = static_cast<size_t>(y) * gridWidth + x;
+                cells[idx] = TileType::Brick;
+                cellShapes[idx] = shape;
+            }
+        };
+        if (baseX >= 0 && baseX < gridWidth && baseY >= 0 && baseY < gridHeight) {
+            PlaceRingBrick(baseX - 1, baseY - 1, BlockShape::BottomRight);
+            PlaceRingBrick(baseX, baseY - 1, BlockShape::Bottom);
+            PlaceRingBrick(baseX + 1, baseY - 1, BlockShape::BottomLeft);
+            PlaceRingBrick(baseX - 1, baseY, BlockShape::Right);
+            PlaceRingBrick(baseX + 1, baseY, BlockShape::Left);
+        }
         playerSpawns = templateLevel.player_spawns;
         enemySpawns = templateLevel.enemy_spawns;
     };

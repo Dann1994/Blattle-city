@@ -885,7 +885,12 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
             // pegadas (ver DestroyBrickUnitAndNeighbors; aplica igual a
             // balas de jugador y enemigo, ver el chequeo de ownerId mas
             // abajo que solo afecta al sonido), suena el sonido ya definido
-            // (solo balas de jugador) y la bala se frena ahi.
+            // (solo balas de jugador) en cada impacto que rompe algo. La
+            // bala se frena ahi salvo que le quede salud (pedido
+            // explicitamente: nivel 4 -jugador o enemigo- resiste 1 impacto
+            // contra ladrillo y recien se destruye al segundo, rompiendo 2
+            // capas; niveles 1-3 siguen muriendo del primero, ya que
+            // BulletHealthForLevel les da salud 1 igual que antes).
             int unitCellX = 0, unitCellY = 0, unitRow = 0, unitCol = 0;
             float unitX = 0.0f, unitY = 0.0f;
             if (FindAliveBrickUnit(map, hitX, hitY, bullet.direction, unitCellX, unitCellY, unitRow, unitCol, unitX, unitY)) {
@@ -899,9 +904,15 @@ void BulletSystem::Update(double dt, TileMap& map, BulletImpactSystem& impacts, 
                 if (bullet.ownerId < kEnemyOwnerIdBase) {
                     PlaySound(brickBreakSound); // pedido explicitamente: solo bala de jugador
                 }
-                impacts.Spawn(hitX, hitY, bullet.weaponLevel == 4);
-                bullet.alive = false;
-                break;
+                --bullet.health;
+                if (bullet.health <= 0) {
+                    impacts.Spawn(hitX, hitY, bullet.weaponLevel == 4);
+                    bullet.alive = false;
+                    break;
+                }
+                bullet.x = newX;
+                bullet.y = newY;
+                continue;
             }
             // No hay ninguna unidad viva ni en el punto exacto ni en el margen del sprite: la bala sigue de largo.
             bullet.x = newX;

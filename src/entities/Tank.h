@@ -155,10 +155,16 @@ public:
     bool IsOutOfLives() const { return lives_ <= 0; }
 
     // Fuera de la partida (se quedo sin vidas): no se mueve, no dispara, no
-    // se dibuja. No hay forma de volver de este estado (habria que arrancar
-    // partida de nuevo, ver Game::ResetState).
+    // se dibuja. Por si sola no hay forma de volver de este estado (habria
+    // que arrancar partida de nuevo, ver Game::ResetState) — pero ver
+    // Revive(): pedido explicitamente, un jugador eliminado puede volver si
+    // otro jugador le "presta" una vida (ver Game::TryStealLife).
     void Eliminate() { eliminated_ = true; }
     bool IsEliminated() const { return eliminated_; }
+
+    // Contrario de Eliminate(): vuelve a la partida (ver Game::TryStealLife,
+    // quien llama a esto ya se aseguro de darle al menos 1 vida antes).
+    void Revive() { eliminated_ = false; }
 
 private:
     bool IsPositionBlocked(float newX, float newY, const TileMap& map, const std::vector<Tank*>& others) const;
