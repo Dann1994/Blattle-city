@@ -12,9 +12,12 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <iphlpapi.h>
 using SockLen = int;
 #else
 #include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -232,6 +235,56 @@ std::string LocalAddress() {
         }
     }
     closesocket(s);
+    return out;
+}
+
+std::vector<IfaceAddr> LocalInterfaces() {
+    EnsureSockets();
+    std::vector<IfaceAddr> out;
+    auto add = [&](uint32_t ip, uint32_t mask) {                      // ip y mascara en orden de host
+        if ((ip >> 24) == 127 || (ip >> 16) == 0xA9FE || mask == 0) return;     // ni loopback ni 169.254.x.x (sin DHCP)
+        const uint32_t bc = ip | ~mask;
+        in_addr a{}, b{};
+        a.s_addr = htonl(ip);
+        b.s_addr = htonl(bc);
+        char t1[32] = {}, t2[32] = {};
+        inet_ntop(AF_INET, &a, t1, sizeof t1);
+        inet_ntop(AF_INET, &b, t2, sizeof t2);
+        for (const auto& o : out) if (o.ip == t1) return;
+        out.push_back({t1, t2});
+    };
+#ifdef _WIN32
+    ULONG size = 16000;
+    std::vector<uint8_t> buf(size);
+    ULONG r = GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, nullptr,
+                                   reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.data()), &size);
+    if (r == ERROR_BUFFER_OVERFLOW) {
+        buf.resize(size);
+        r = GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, nullptr,
+                                 reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.data()), &size);
+    }
+    if (r == NO_ERROR) {
+        for (IP_ADAPTER_ADDRESSES* a = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.data()); a; a = a->Next) {
+            if (a->OperStatus != IfOperStatusUp || a->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
+            for (IP_ADAPTER_UNICAST_ADDRESS* u = a->FirstUnicastAddress; u; u = u->Next) {
+                if (!u->Address.lpSockaddr || u->Address.lpSockaddr->sa_family != AF_INET) continue;
+                const sockaddr_in* sa = reinterpret_cast<const sockaddr_in*>(u->Address.lpSockaddr);
+                const unsigned prefix = u->OnLinkPrefixLength;
+                add(ntohl(sa->sin_addr.s_addr), prefix == 0 ? 0u : (prefix >= 32 ? 0xFFFFFFFFu : ~0u << (32 - prefix)));
+            }
+        }
+    }
+#else
+    ifaddrs* list = nullptr;
+    if (getifaddrs(&list) == 0) {
+        for (ifaddrs* a = list; a; a = a->ifa_next) {
+            if (!a->ifa_addr || !a->ifa_netmask || a->ifa_addr->sa_family != AF_INET) continue;
+            if (!(a->ifa_flags & IFF_UP) || (a->ifa_flags & IFF_LOOPBACK)) continue;
+            add(ntohl(reinterpret_cast<sockaddr_in*>(a->ifa_addr)->sin_addr.s_addr), ntohl(reinterpret_cast<sockaddr_in*>(a->ifa_netmask)->sin_addr.s_addr));
+        }
+        freeifaddrs(list);
+    }
+#endif
     return out;
 }
 

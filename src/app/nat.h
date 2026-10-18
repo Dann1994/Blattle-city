@@ -45,6 +45,14 @@ void UpnpCloseUdp(uint16_t port);
 // IPv4 de este equipo en la red local (la de la salida a internet); vacia si no se puede saber.
 std::string LocalAddress();
 
+// Todas las redes IPv4 de este equipo (wifi, cable, virtuales...): su IP y su direccion de difusion. Con mas de una red hay que avisar
+// y buscar por cada una (la difusion general solo sale por una).
+struct IfaceAddr {
+    std::string ip;
+    std::string broadcast;
+};
+std::vector<IfaceAddr> LocalInterfaces();
+
 // ---- codigo de sala: IP publica + puerto -> 12 caracteres ("ABCD-EFGH-JKLM") ----
 std::string MakeRoomCode(const std::string& ip, uint16_t port);
 bool ParseRoomCode(const std::string& code, std::string& ip, uint16_t& port);   // acepta minusculas, espacios y guiones

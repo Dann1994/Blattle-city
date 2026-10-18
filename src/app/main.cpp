@@ -1350,8 +1350,9 @@ public:
                 using Net = app::Lan::Internet;
                 const Net net = lan_.InternetState();
                 lv.hint = "SOS EL ANFITRIÓN: EMPEZÁ CUANDO QUIERAS";
-                if (!lan_.LanCode().empty()) {                                      // por si la busqueda no la encuentra: entrar con el codigo
-                    lv.hint = "CÓDIGO DE ESTA RED: " + lan_.LanCode();
+                if (!lan_.LanCodes().empty()) {                                     // por si la busqueda no la encuentra: entrar con el codigo
+                    const auto& lc = lan_.LanCodes()[static_cast<size_t>((menuTick_ / 150) % static_cast<int>(lan_.LanCodes().size()))];   // una por red, rotando
+                    lv.hint = lan_.LanCodes().size() > 1 ? "CÓDIGO EN " + lc.first + ": " + lc.second : "CÓDIGO DE ESTA RED: " + lc.second;
                     lv.addHint = touch_ ? "SI NO LA ENCUENTRAN: ONLINE > UNIRSE CON CÓDIGO" : "SI NO LA VEN: ONLINE > CÓDIGO   I: ABRIR A INTERNET";
                 }
                 std::string waiting = lan_.NumPlayers() < 2 ? "ESPERANDO JUGADORES..." : (notReady > 0 ? "TODAVÍA HAY JUGADORES SIN ESTAR LISTOS" : "");
