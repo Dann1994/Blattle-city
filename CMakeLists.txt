@@ -36,7 +36,7 @@ target_link_libraries(nes_render PUBLIC nes_core)
 add_library(nes_audio STATIC src/app/apu.cpp)
 
 # Modo LAN (sockets UDP; en Windows usa Winsock)
-add_library(nes_lan STATIC src/app/lan.cpp)
+add_library(nes_lan STATIC src/app/lan.cpp src/app/nat.cpp)
 if (WIN32)
     target_link_libraries(nes_lan PUBLIC ws2_32)
 endif()

@@ -3,6 +3,8 @@
 // en tests/rom_oracle_tests.cpp (cuando existe).
 
 #include <algorithm>
+#include <cctype>
+#include <cstring>
 #include <chrono>
 #include <cstdio>
 #include <thread>
@@ -14,6 +16,7 @@
 #include "../src/app/arena.h"
 #include "../src/app/flow.h"
 #include "../src/app/lan.h"
+#include "../src/app/nat.h"
 #include "../src/app/levels.h"
 #include "../src/app/lobby.h"
 #include "../src/nes/battle.h"
@@ -1502,6 +1505,224 @@ void TestLanLockstep() {
     CHECK(a.fx->battle->TankX(0) != 88 || a.fx->battle->TankY(0) != 0xE8 + 16 || stalls >= 0);
 }
 
+void TestLanSeveralPlayersPerPc() {
+    std::printf("[lan] varios jugadores por PC (2+2, 1+3): se suman a la sala, tienen color propio y juegan sincronizados\n");
+    const uint16_t port = 47933;
+    app::Lan host(port), guest(port), third(port);
+    CHECK(host.Host("Ana"));
+    CHECK(guest.Search());
+    CHECK(SpinLan({&host, &guest}, [&] { return !guest.Games().empty(); }));
+    CHECK(guest.Join(guest.Games()[0], "Beto"));
+    CHECK(SpinLan({&host, &guest}, [&] { return guest.state() == app::Lan::State::Joined && guest.Players().size() == 1 + 1; }));
+    // 2 jugadores en la PC del anfitrion y 2 en la del cliente
+    CHECK(host.AddLocalPlayer());
+    CHECK(guest.AddLocalPlayer());
+    CHECK(SpinLan({&host, &guest}, [&] { return host.NumPlayers() == 4 && guest.NumPlayers() == 4 && guest.LocalCount() == 2; }));
+    CHECK_EQ(host.LocalCount(), 2);
+    CHECK(!host.AddLocalPlayer());                                      // sala llena (4)
+    CHECK(!guest.AddLocalPlayer());
+    CHECK(host.Owners().size() == 4);
+    int hostOwn = 0, guestOwn = 0;
+    for (int o : host.Owners()) (o == 0 ? hostOwn : guestOwn)++;
+    CHECK_EQ(hostOwn, 2);
+    CHECK_EQ(guestOwn, 2);
+    CHECK(SpinLan({&host, &guest}, [&] { return guest.Players() == host.Players() && guest.Colors() == host.Colors(); }));
+    for (size_t i = 0; i < host.Colors().size(); ++i)
+        for (size_t j = i + 1; j < host.Colors().size(); ++j) CHECK(host.Colors()[i] != host.Colors()[j]);
+    // nombres distintos ("ANA", "ANA 2", "BETO", "BETO 2")
+    for (size_t i = 0; i < host.Players().size(); ++i)
+        for (size_t j = i + 1; j < host.Players().size(); ++j) CHECK(host.Players()[i] != host.Players()[j]);
+    // una tercera PC ya no entra (cuatro jugadores)
+    CHECK(third.Search());
+    CHECK(SpinLan({&host, &third}, [&] { return !third.Games().empty(); }));
+    CHECK(third.Join(third.Games()[0], "Cata"));
+    CHECK(SpinLan({&host, &third}, [&] { return third.state() == app::Lan::State::Full; }));
+    // el segundo jugador de la PC del cliente elige color y esta listo: lo ve el anfitrion
+    const int p2 = guest.MyPlayers()[1];
+    guest.CycleColor(1, +1);
+    guest.ToggleReady(1);
+    CHECK(SpinLan({&host, &guest}, [&] { return host.Ready()[static_cast<size_t>(p2)] && host.Colors()[static_cast<size_t>(p2)] == guest.Colors()[static_cast<size_t>(p2)]; }));
+    // se baja y vuelve a subir
+    guest.RemoveLocalPlayer(1);
+    CHECK(SpinLan({&host, &guest}, [&] { return host.NumPlayers() == 3 && guest.NumPlayers() == 3; }));
+    CHECK(guest.AddLocalPlayer());
+    CHECK(SpinLan({&host, &guest}, [&] { return host.NumPlayers() == 4 && guest.LocalCount() == 2; }));
+    // partida 2 + 2: mismos botones -> mismo estado
+    CHECK(host.StartGame(1));
+    CHECK(SpinLan({&host, &guest}, [&] { return guest.Started(); }));
+    NetSide a, b;
+    a.fx = MakeFlow(10, 4);
+    b.fx = MakeFlow(10, 4);
+    auto script = [](int player, int frame) -> u8 {
+        const int phase = (frame / 17 + player * 3) % 8;
+        u8 v = 0;
+        if (phase == 0 || phase == 1) v |= nes::con_btn_Up;
+        if (phase == 2 || phase == 3) v |= nes::con_btn_Left;
+        if (phase == 4 || phase == 5) v |= nes::con_btn_Right;
+        if (phase == 6) v |= nes::con_btn_Down;
+        if ((frame + player) % 13 < 4) v |= nes::con_btn_A;
+        return v;
+    };
+    constexpr int kFrames = 600;
+    bool hashesMatch = true;
+    const auto t0 = std::chrono::steady_clock::now();
+    while ((a.frame < kFrames || b.frame < kFrames) && std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() < 20.0) {
+        host.Update();
+        guest.Update();
+        auto step = [&](NetSide& side, app::Lan& lan) {
+            if (side.frame >= kFrames) return;
+            u8 local[4] = {0, 0, 0, 0};
+            const int n = lan.LocalCount();
+            for (int k = 0; k < n; ++k) local[k] = script(lan.MyPlayers()[static_cast<size_t>(k)], side.frame);
+            lan.SubmitLocal(side.frame, local, n);
+            if (!lan.FrameReady(side.frame)) return;
+            u8 in[4];
+            lan.FrameInputs(side.frame, in);
+            for (int i = 0; i < 4; ++i) side.fx->battle->SetButtons(i, static_cast<u8>(in[i] & ~nes::con_btn_Start));
+            side.fx->flow->Step();
+            ++side.frame;
+            if (side.frame % 60 == 0) lan.ReportHash(side.frame, side.fx->battle->StateHash());
+        };
+        step(a, host);
+        step(b, guest);
+        if (a.frame == b.frame && a.frame % 60 == 0 && a.frame > 0) hashesMatch = hashesMatch && a.fx->battle->StateHash() == b.fx->battle->StateHash();
+    }
+    CHECK_EQ(a.frame, kFrames);
+    CHECK_EQ(b.frame, kFrames);
+    CHECK(hashesMatch);
+    CHECK_EQ(a.fx->battle->StateHash(), b.fx->battle->StateHash());
+    CHECK(!host.Desynced());
+    CHECK(!guest.Desynced());
+    // los cuatro jugadores se movieron (cada uno con sus botones)
+    int moved = 0;
+    for (int p = 0; p < 4; ++p) moved += a.fx->battle->TankX(p) != 0;
+    CHECK(moved == 4);
+    // 1 + 3: otra sala
+    app::Lan h2(port + 1), g2(port + 1);
+    CHECK(h2.Host("Dora"));
+    CHECK(g2.Search());
+    CHECK(SpinLan({&h2, &g2}, [&] { return !g2.Games().empty(); }));
+    CHECK(g2.Join(g2.Games()[0], "Eva"));
+    CHECK(SpinLan({&h2, &g2}, [&] { return g2.state() == app::Lan::State::Joined && g2.NumPlayers() == 2; }));
+    CHECK(g2.AddLocalPlayer());
+    CHECK(g2.AddLocalPlayer());
+    CHECK(SpinLan({&h2, &g2}, [&] { return h2.NumPlayers() == 4 && g2.LocalCount() == 3; }));
+    CHECK_EQ(h2.LocalCount(), 1);
+}
+
+void TestOnlineCodeAndHybridRoom() {
+    std::printf("[online] codigo de sala (IP publica + puerto), STUN, y una sala con jugadores de la red local y de internet a la vez\n");
+    // codigo: ida y vuelta, tolerante a minusculas y espacios, y detecta errores de tipeo
+    const std::string code = app::MakeRoomCode("203.0.113.45", 47800);
+    CHECK_EQ(static_cast<int>(code.size()), 14);                         // XXXX-XXXX-XXXX
+    CHECK(code[4] == '-' && code[9] == '-');
+    std::string ip;
+    uint16_t port = 0;
+    CHECK(app::ParseRoomCode(code, ip, port));
+    CHECK(ip == "203.0.113.45" && port == 47800);
+    std::string lower = code;
+    for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    CHECK(app::ParseRoomCode("  " + lower + " ", ip, port) && ip == "203.0.113.45");
+    CHECK(app::ParseRoomCode(code.substr(0, 4) + code.substr(5, 4) + code.substr(10), ip, port));   // sin guiones
+    std::string bad = code;
+    bad[2] = bad[2] == 'A' ? 'B' : 'A';
+    CHECK(!app::ParseRoomCode(bad, ip, port));                           // un caracter cambiado: el control lo rechaza
+    CHECK(!app::ParseRoomCode("ABCD-EFGH", ip, port));
+    CHECK(!app::ParseRoomCode("1111-1111-1111", ip, port));              // el 1 y el 0 no existen en el alfabeto
+    for (uint16_t pt : {1, 47800, 47801, 65535}) {                       // varios puertos
+        CHECK(app::ParseRoomCode(app::MakeRoomCode("8.8.4.4", pt), ip, port) && ip == "8.8.4.4" && port == pt);
+    }
+    // STUN: respuesta armada a mano (XOR-MAPPED-ADDRESS 198.51.100.7:54321)
+    const uint8_t tid[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    const std::string req = app::StunRequest(tid);
+    CHECK_EQ(static_cast<int>(req.size()), 20);
+    uint8_t resp[32] = {0x01, 0x01, 0x00, 0x0C, 0x21, 0x12, 0xA4, 0x42};
+    std::memcpy(resp + 8, tid, 12);
+    resp[20] = 0x00; resp[21] = 0x20; resp[22] = 0x00; resp[23] = 0x08; resp[24] = 0x00; resp[25] = 0x01;
+    const uint16_t xp = static_cast<uint16_t>(54321 ^ 0x2112);
+    resp[26] = static_cast<uint8_t>(xp >> 8); resp[27] = static_cast<uint8_t>(xp & 0xFF);
+    resp[28] = 198 ^ 0x21; resp[29] = 51 ^ 0x12; resp[30] = 100 ^ 0xA4; resp[31] = 7 ^ 0x42;
+    app::PublicEndpoint pe;
+    CHECK(app::StunParse(reinterpret_cast<const char*>(resp), 32, tid, pe));
+    CHECK(pe.ok && pe.ip == "198.51.100.7" && pe.port == 54321);
+    const uint8_t other[12] = {9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9};
+    CHECK(!app::StunParse(reinterpret_cast<const char*>(resp), 32, other, pe));   // respuesta a otro pedido: se ignora
+
+    // sala hibrida: el anfitrion abre su sala a internet (simulado) y entran uno por la red local y otro con el codigo
+    const uint16_t lport = 47935;
+    app::Lan host(lport), lanGuest(lport), netGuest(lport);
+    CHECK(host.Host("Ana"));
+    CHECK(host.InternetState() == app::Lan::Internet::Off);
+    CHECK_EQ(host.InputDelay(), app::Lan::kInputDelay);
+    host.OpenToInternet(true);
+    CHECK(host.InternetState() == app::Lan::Internet::Ready);
+    CHECK(!host.RoomCode().empty());
+    CHECK(!netGuest.JoinCode("XXXX-XXXX-XXXX", "Cata"));                // codigo invalido
+    CHECK(lanGuest.Search());
+    CHECK(SpinLan({&host, &lanGuest}, [&] { return !lanGuest.Games().empty(); }));
+    CHECK(lanGuest.Join(lanGuest.Games()[0], "Beto"));
+    CHECK(netGuest.JoinCode(host.RoomCode(), "Cata"));                  // el de "afuera": entra con el codigo
+    CHECK(SpinLan({&host, &lanGuest, &netGuest}, [&] {
+        return lanGuest.state() == app::Lan::State::Joined && netGuest.state() == app::Lan::State::Joined && host.NumPlayers() == 3;
+    }));
+    CHECK(SpinLan({&host, &lanGuest, &netGuest}, [&] { return lanGuest.NumPlayers() == 3 && netGuest.NumPlayers() == 3; }));
+    CHECK(host.Players() == lanGuest.Players() && host.Players() == netGuest.Players());
+    CHECK(host.Colors() == netGuest.Colors());
+    CHECK(netGuest.HostName() == "ANA");
+    // empiezan: por haber abierto la sala a internet todos usan el retraso de internet
+    CHECK(host.StartGame(1));
+    CHECK(SpinLan({&host, &lanGuest, &netGuest}, [&] { return lanGuest.Started() && netGuest.Started(); }));
+    CHECK_EQ(host.InputDelay(), app::Lan::kOnlineInputDelay);
+    CHECK_EQ(lanGuest.InputDelay(), app::Lan::kOnlineInputDelay);
+    CHECK_EQ(netGuest.InputDelay(), app::Lan::kOnlineInputDelay);
+    NetSide s0, s1, s2;
+    s0.fx = MakeFlow(10, 3);
+    s1.fx = MakeFlow(10, 3);
+    s2.fx = MakeFlow(10, 3);
+    auto script = [](int player, int frame) -> u8 {
+        const int phase = (frame / 19 + player * 3) % 8;
+        u8 v = 0;
+        if (phase == 0 || phase == 1) v |= nes::con_btn_Up;
+        if (phase == 2 || phase == 3) v |= nes::con_btn_Left;
+        if (phase == 4 || phase == 5) v |= nes::con_btn_Right;
+        if (phase == 6) v |= nes::con_btn_Down;
+        if ((frame + player) % 11 < 4) v |= nes::con_btn_A;
+        return v;
+    };
+    constexpr int kFrames = 400;
+    bool match = true;
+    const auto t0 = std::chrono::steady_clock::now();
+    while ((s0.frame < kFrames || s1.frame < kFrames || s2.frame < kFrames) &&
+           std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() < 20.0) {
+        host.Update();
+        lanGuest.Update();
+        netGuest.Update();
+        auto step = [&](NetSide& side, app::Lan& lan) {
+            if (side.frame >= kFrames) return;
+            lan.SubmitLocal(side.frame, script(lan.MyPlayers()[0], side.frame));
+            if (!lan.FrameReady(side.frame)) return;
+            u8 in[4];
+            lan.FrameInputs(side.frame, in);
+            for (int i = 0; i < 4; ++i) side.fx->battle->SetButtons(i, static_cast<u8>(in[i] & ~nes::con_btn_Start));
+            side.fx->flow->Step();
+            ++side.frame;
+        };
+        step(s0, host);
+        step(s1, lanGuest);
+        step(s2, netGuest);
+        if (s0.frame == s1.frame && s1.frame == s2.frame && s0.frame % 50 == 0 && s0.frame > 0) {
+            const uint32_t h = s0.fx->battle->StateHash();
+            match = match && h == s1.fx->battle->StateHash() && h == s2.fx->battle->StateHash();
+        }
+    }
+    CHECK_EQ(s0.frame, kFrames);
+    CHECK_EQ(s1.frame, kFrames);
+    CHECK_EQ(s2.frame, kFrames);
+    CHECK(match);
+    CHECK_EQ(s0.fx->battle->StateHash(), s1.fx->battle->StateHash());
+    CHECK_EQ(s0.fx->battle->StateHash(), s2.fx->battle->StateHash());
+}
+
 void TestGameOverScreen() {
     std::printf("[pantallas] sin base o sin jugadores aparece GAME OVER, luego HI-SCORE si hay record y vuelve al titulo\n");
     auto fx = MakeFlow(1, 2);
@@ -1695,6 +1916,8 @@ int main() {
     TestBossEnemiesGuard();
     TestLanLobby();
     TestLanLockstep();
+    TestLanSeveralPlayersPerPc();
+    TestOnlineCodeAndHybridRoom();
     TestBossSpawnPointsAnyPlayerCount();
     TestBossDifficultyScaling();
     TestEnemyItemsAndShield();

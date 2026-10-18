@@ -58,9 +58,10 @@ struct LobbyView {
     bool net = false;
     std::string name[4];
     bool ready[4] = {false, false, false, false};
-    int me = -1;
+    bool mine[4] = {false, false, false, false};    // jugadores de esta PC
     std::string note;
-    std::string meLine2;                    // segunda linea de ayuda en mi casilla (por ejemplo "F LISTO")
+    std::string meLine2[4];                 // segunda linea de ayuda en cada casilla propia (por ejemplo "F LISTO")
+    std::string addHint;                    // como sumar otro jugador de esta PC
 };
 
 class Renderer {

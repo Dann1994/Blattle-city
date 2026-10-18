@@ -267,7 +267,7 @@ std::string PadButtonName(int b) {
 class TestScreen {
 public:
     enum class Scene { Title, PlayMenu, Lobby, Settings, KeysPlayer, KeysList, PadSettings, Construction, Pause, Game,
-                       LanMenu, NameEntry, LanHost, LanSearch, LanJoined };
+                       LanMenu, NameEntry, LanHost, LanSearch, LanJoined, OnlineMenu, CodeEntry };
     enum class Capture { None, Key, Pad };
     struct Rumble { int slot; float left, right, seconds; float delay = 0.0f; };   // delay: segundos hasta empezar
     enum class Ev { Up, Down, Left, Right, Accept, Back, Fire, Start };
@@ -398,8 +398,8 @@ public:
     void CollectRumble() {
         if (flow_->mode() != app::GameFlow::Mode::Playing) return;
         for (int i = 0; i < battle_->Players(); ++i) {
-            if (netGame_ && i != lan_.MySlot()) continue;               // en red solo vibra el mando del jugador local
-            const int slot = netGame_ ? 0 : slotOf_[i];
+            if (netGame_ && !lan_.IsMine(i)) continue;                  // en red solo vibran los mandos de los jugadores de esta PC
+            const int slot = netGame_ ? lan_.LocalIndexOf(i) : slotOf_[i];
             const u8 flags = battle_->TankFlags(i);
             const bool alive = (flags & 0x80) != 0 && flags < 0xE0;
             const bool exploding = (flags >> 4) >= 1 && (flags >> 4) <= 7;
@@ -519,6 +519,7 @@ public:
             case Scene::PadSettings: return 6;
             case Scene::Pause: return 3;
             case Scene::LanMenu: return 4;
+            case Scene::OnlineMenu: return 4;
             case Scene::LanSearch: return lan_.Games().empty() ? 1 : static_cast<int>(lan_.Games().size());
             default: return 0;
         }
@@ -534,13 +535,17 @@ public:
             case Scene::Pause: scene_ = Scene::Game; break;                    // Cancelar en la pausa = continuar
             case Scene::Construction: ReturnToTitle(); break;
             case Scene::LanMenu: scene_ = Scene::PlayMenu; menuIndex_ = 1; break;
-            case Scene::NameEntry:
-                if (g_cfg.playerName.empty()) { scene_ = Scene::PlayMenu; menuIndex_ = 1; }      // sin nombre no se puede entrar a LAN
-                else { scene_ = Scene::LanMenu; menuIndex_ = 2; }
+            case Scene::OnlineMenu: scene_ = Scene::PlayMenu; menuIndex_ = 2; break;
+            case Scene::NameEntry: {
+                const bool online = nameNext_ == Scene::OnlineMenu;
+                if (g_cfg.playerName.empty()) { scene_ = Scene::PlayMenu; menuIndex_ = online ? 2 : 1; }      // sin nombre no se puede entrar a LAN / online
+                else { scene_ = online ? Scene::OnlineMenu : Scene::LanMenu; menuIndex_ = 2; }
                 break;
+            }
+            case Scene::CodeEntry: scene_ = Scene::OnlineMenu; menuIndex_ = 1; break;
             case Scene::LanHost: case Scene::LanSearch: case Scene::LanJoined:
-                lan_.Leave();                                                  // se sale de la sala (avisa a los demas)
-                scene_ = Scene::LanMenu;
+                lan_.Leave();                                                  // se sale de la sala (avisa a los demas y cierra el puerto)
+                scene_ = roomFrom_;
                 menuIndex_ = 0;
                 break;
             default: break;
@@ -549,15 +554,55 @@ public:
 
     // ---- modo LAN ----
     std::string PlayerName() const { return g_cfg.playerName; }
-    bool TextEntry() const { return scene_ == Scene::NameEntry; }
+    bool TextEntry() const { return scene_ == Scene::NameEntry || scene_ == Scene::CodeEntry; }
+    bool InHostRoom() const { return scene_ == Scene::LanHost; }
     bool NetGame() const { return netGame_; }
     void TypeChar(int cp) {
         if (cp < 32 || cp > 126) return;
+        if (scene_ == Scene::CodeEntry) {                                      // el codigo: letras y numeros, hasta 12
+            const char c = static_cast<char>(std::toupper(cp));
+            if (std::isalnum(static_cast<unsigned char>(c)) && codeBuf_.size() < 12) codeBuf_.push_back(c);
+            return;
+        }
         const std::string t = nameBuf_ + static_cast<char>(cp);
         const std::string clean = app::Lan::CleanName(t);
         if (clean.size() == t.size()) nameBuf_ = clean;
     }
-    void EraseChar() { if (!nameBuf_.empty()) nameBuf_.pop_back(); }
+    void EraseChar() {
+        std::string& b = scene_ == Scene::CodeEntry ? codeBuf_ : nameBuf_;
+        if (!b.empty()) b.pop_back();
+    }
+    void PasteText(const char* text) {                                         // Ctrl+V en el codigo
+        if (scene_ != Scene::CodeEntry || !text) return;
+        for (const char* p = text; *p; ++p) TypeChar(static_cast<unsigned char>(*p));
+    }
+    void BeginCodeEntry() {
+        codeBuf_.clear();
+        lanNote_.clear();
+        scene_ = Scene::CodeEntry;
+        menuIndex_ = 0;
+    }
+    void AcceptCode() {
+        if (lan_.JoinCode(codeBuf_, g_cfg.playerName)) {
+            lanNote_.clear();
+            roomFrom_ = Scene::OnlineMenu;
+            scene_ = Scene::LanJoined;
+            menuIndex_ = 0;
+        } else {
+            lanNote_ = lan_.Error().empty() ? "CÓDIGO INVÁLIDO" : lan_.Error();
+        }
+    }
+    // Sala del anfitrion: I abre/cierra la sala a internet, C copia el codigo.
+    void ToggleInternet() {
+        if (scene_ != Scene::LanHost) return;
+        if (lan_.InternetState() == app::Lan::Internet::Off || lan_.InternetState() == app::Lan::Internet::Failed) {
+            if (lan_.InternetState() == app::Lan::Internet::Failed) lan_.CloseInternet();
+            lan_.OpenToInternet();
+        } else {
+            lan_.CloseInternet();
+        }
+    }
+    const std::string& RoomCodeText() const { return lan_.RoomCode(); }
     void BeginNameEntry(Scene next) {
         nameNext_ = next;
         nameForced_ = g_cfg.playerName.empty();
@@ -570,19 +615,35 @@ public:
         if (name.empty()) name = "JUGADOR";
         g_cfg.playerName = name;
         SaveConfig();
-        if (nameNext_ == Scene::LanHost) StartHost();
+        const int then = nameThen_;
+        nameThen_ = 0;
+        if (nameNext_ == Scene::LanHost) StartHost(false);
         else if (nameNext_ == Scene::LanSearch) StartSearch();
+        else if (nameNext_ == Scene::OnlineMenu) {
+            if (then == 1) StartHost(true);
+            else if (then == 2) BeginCodeEntry();
+            else { scene_ = Scene::OnlineMenu; menuIndex_ = nameForced_ ? 0 : 2; }
+        }
         else { scene_ = Scene::LanMenu; menuIndex_ = nameForced_ ? 0 : 2; }
     }
-    void StartHost() {
+    void StartHost(bool online) {
         lanNote_.clear();
-        if (lan_.Host(g_cfg.playerName)) { scene_ = Scene::LanHost; menuIndex_ = 0; }
-        else { lanNote_ = lan_.Error(); scene_ = Scene::LanMenu; menuIndex_ = 0; }
+        roomFrom_ = online ? Scene::OnlineMenu : Scene::LanMenu;
+        if (lan_.Host(g_cfg.playerName)) {
+            scene_ = Scene::LanHost;
+            menuIndex_ = 0;
+            if (online) lan_.OpenToInternet();                                 // codigo para los de afuera (la red local la encuentra igual)
+        } else {
+            lanNote_ = lan_.Error();
+            scene_ = roomFrom_;
+            menuIndex_ = 0;
+        }
     }
     void StartSearch() {
         lanNote_.clear();
         if (lan_.Search()) { scene_ = Scene::LanSearch; menuIndex_ = 0; }
         else { lanNote_ = lan_.Error(); scene_ = Scene::LanMenu; menuIndex_ = 1; }
+        roomFrom_ = Scene::LanMenu;
     }
     void JoinSelected() {
         if (lan_.Games().empty()) return;
@@ -615,6 +676,24 @@ public:
     }
     // Prueba automatica por red (sin ventana): arma o busca la partida, la empieza y avanza solo.
     int MySlot() const { return lan_.MySlot(); }
+    const std::vector<int>& LocalPlayers() const { return lan_.MyPlayers(); }
+    void SetAutoLan(int local, int expect) { autoLocal_ = local; autoExpect_ = expect; }
+    // Pruebas: entra a una sala por internet con un codigo (sin pasar por los menus).
+    bool AutoJoinCode(const std::string& code) {
+        BeginCodeEntry();
+        codeBuf_.clear();
+        for (char c : code) TypeChar(static_cast<unsigned char>(c));
+        AcceptCode();
+        return scene_ == Scene::LanJoined;
+    }
+    std::string LanStatusText() const {
+        return std::string("estado=") + std::to_string(static_cast<int>(lan_.state())) + " internet=" + std::to_string(static_cast<int>(lan_.InternetState())) +
+               " codigo=" + lan_.RoomCode() + " nota=" + lan_.InternetNote() + " error=" + lan_.Error();
+    }
+    bool LanFailed() const { const auto st = lan_.state(); return st == app::Lan::State::Failed || st == app::Lan::State::Full || st == app::Lan::State::Closed; }
+    const std::string& RoomCodeValue() const { return lan_.RoomCode(); }
+    bool RoomInternetReady() const { return lan_.InternetState() == app::Lan::Internet::Ready; }
+    bool RoomInternetFailed() const { return lan_.InternetState() == app::Lan::Internet::Failed; }
     int NetFrame() const { return netFrame_; }
     // Sala lista para la captura: el cliente ya eligio color y esta "listo" (lo ve el anfitrion).
     bool LanLobbyReady() const {
@@ -622,12 +701,15 @@ public:
                lan_.NumPlayers() >= 2 && lan_.Ready().size() >= 2 && lan_.Ready()[1];
     }
     void LanAutoDrive(bool host, bool holdStart) {
-        if (host && scene_ == Scene::LanHost && lan_.NumPlayers() >= 2 && !holdStart) TryStartLan();
+        const bool inRoom = scene_ == Scene::LanHost || (scene_ == Scene::LanJoined && lan_.state() == app::Lan::State::Joined);
+        if (inRoom) {
+            while (lan_.LocalCount() < autoLocal_ && lan_.AddLocalPlayer()) {}        // suma los jugadores de esta PC
+        }
+        if (host && scene_ == Scene::LanHost && lan_.NumPlayers() >= autoExpect_ && lan_.LocalCount() >= autoLocal_ && !holdStart) TryStartLan();
         if (!host && scene_ == Scene::LanSearch && !lan_.Games().empty()) JoinSelected();
-        if (!host && scene_ == Scene::LanJoined && lan_.state() == app::Lan::State::Joined && !autoPicked_) {
+        if (!host && inRoom && !autoPicked_ && lan_.LocalCount() >= autoLocal_) {
             autoPicked_ = true;
-            lan_.CycleMyColor(+1);                        // elige un color y marca "listo"
-            lan_.ToggleMyReady();
+            for (int k = 0; k < lan_.LocalCount(); ++k) { lan_.CycleColor(k, +1); lan_.ToggleReady(k); }    // elige color y marca "listo"
         }
     }
     // Termina la partida en red y vuelve al menu LAN con un aviso.
@@ -635,7 +717,7 @@ public:
         netGame_ = false;
         lan_.Leave();
         lanNote_ = note;
-        scene_ = Scene::LanMenu;
+        scene_ = roomFrom_;
         menuIndex_ = 0;
         showHelp_ = false;
     }
@@ -643,14 +725,19 @@ public:
     void StepNet() {
         lan_.Update();
         if (lan_.Lost()) { EndNet(lan_.Error().empty() ? "SE PERDIÓ LA CONEXIÓN" : lan_.Error()); return; }
-        u8 local = pad_[0];                                       // en red, cada uno juega con los controles del jugador 1
-        if (g_cfg.turbo && (local & nes::con_btns_AB)) {
-            if ((fireHeld_[0]++ % 6) >= 3) local = static_cast<u8>(local & ~nes::con_btns_AB);
-        } else {
-            fireHeld_[0] = 0;
+        // los jugadores de esta PC usan los controles de las ranuras 1, 2, ... (como en la partida local)
+        u8 local[4] = {0, 0, 0, 0};
+        const int nLocal = std::min(4, lan_.LocalCount());
+        for (int k = 0; k < nLocal; ++k) {
+            u8 b = pad_[k];
+            if (g_cfg.turbo && (b & nes::con_btns_AB)) {
+                if ((fireHeld_[k]++ % 6) >= 3) b = static_cast<u8>(b & ~nes::con_btns_AB);
+            } else {
+                fireHeld_[k] = 0;
+            }
+            local[k] = static_cast<u8>(b & ~(nes::con_btn_Start | nes::con_btn_Select));    // sin pausa en red
         }
-        local = static_cast<u8>(local & ~(nes::con_btn_Start | nes::con_btn_Select));       // sin pausa en red
-        lan_.SubmitLocal(netFrame_, local);
+        lan_.SubmitLocal(netFrame_, local, nLocal);
         if (!lan_.FrameReady(netFrame_)) { ++netStall_; return; }                           // faltan botones de alguien: espera
         netStall_ = 0;
         u8 in[4];
@@ -663,7 +750,7 @@ public:
         if (netFrame_ % 60 == 0) lan_.ReportHash(netFrame_, battle_->StateHash());
         if (pendingTitle_) {
             pendingTitle_ = false;
-            lastScore_ = battle_->Score(lan_.MySlot());
+            lastScore_ = battle_->Score(lan_.MyPlayers().empty() ? 0 : lan_.MyPlayers()[0]);
             EndNet("");
         }
     }
@@ -678,17 +765,23 @@ public:
             if (ev == Ev::Back) capture_ = Capture::None;
             return;
         }
-        if (scene_ == Scene::NameEntry) {
+        if (scene_ == Scene::NameEntry || scene_ == Scene::CodeEntry) {
             if (ev == Ev::Back) GoBack();
-            else if (ev == Ev::Accept || ev == Ev::Start || ev == Ev::Fire) AcceptName();
+            else if (ev == Ev::Accept || ev == Ev::Start || ev == Ev::Fire) { if (scene_ == Scene::NameEntry) AcceptName(); else AcceptCode(); }
             return;
         }
         if (scene_ == Scene::LanHost || (scene_ == Scene::LanJoined && lan_.state() == app::Lan::State::Joined)) {
             // sala de espera: arriba/abajo elige mi color, disparo marca "listo"; el anfitrion empieza con Start
+            // `slot` = el control que se uso (1 a 4): cada jugador de esta PC se maneja con el control de su numero
+            const int k = ev == Ev::Accept ? 0 : slot;
             if (ev == Ev::Back) GoBack();
-            else if (ev == Ev::Up) lan_.CycleMyColor(-1);
-            else if (ev == Ev::Down) lan_.CycleMyColor(+1);
-            else if (ev == Ev::Fire || ev == Ev::Accept) lan_.ToggleMyReady();
+            else if (ev == Ev::Up) lan_.CycleColor(k, -1);
+            else if (ev == Ev::Down) lan_.CycleColor(k, +1);
+            else if (ev == Ev::Left) lan_.RemoveLocalPlayer(k);                      // izquierda: ese jugador se baja (el 1 no)
+            else if (ev == Ev::Fire || ev == Ev::Accept) {
+                if (k < lan_.LocalCount()) lan_.ToggleReady(k);                      // disparo: "listo"
+                else if (k == lan_.LocalCount()) lan_.AddLocalPlayer();              // disparo de un control libre: se suma otro jugador
+            }
             else if (ev == Ev::Start && scene_ == Scene::LanHost) TryStartLan();
             return;
         }
@@ -753,13 +846,28 @@ public:
                         scene_ = Scene::LanMenu;                               // LAN: crear partida / unirse
                         menuIndex_ = 0;
                     }
-                }                                                              // online: todavia no existe
+                } else if (index == 2) {
+                    lanNote_.clear();
+                    if (g_cfg.playerName.empty()) {
+                        BeginNameEntry(Scene::OnlineMenu);                     // el nombre es obligatorio tambien para jugar online
+                    } else {
+                        scene_ = Scene::OnlineMenu;
+                        menuIndex_ = 0;
+                    }
+                }
+                break;
+            case Scene::OnlineMenu:
+                lanNote_.clear();
+                if (index == 0) { if (g_cfg.playerName.empty()) { nameThen_ = 1; BeginNameEntry(Scene::OnlineMenu); } else StartHost(true); }
+                else if (index == 1) { if (g_cfg.playerName.empty()) { nameThen_ = 2; BeginNameEntry(Scene::OnlineMenu); } else BeginCodeEntry(); }
+                else if (index == 2) { nameThen_ = 0; BeginNameEntry(Scene::OnlineMenu); }
+                else GoBack();
                 break;
             case Scene::LanMenu:
                 lanNote_.clear();
-                if (index == 0) { if (g_cfg.playerName.empty()) BeginNameEntry(Scene::LanHost); else StartHost(); }
+                if (index == 0) { if (g_cfg.playerName.empty()) BeginNameEntry(Scene::LanHost); else StartHost(false); }
                 else if (index == 1) { if (g_cfg.playerName.empty()) BeginNameEntry(Scene::LanSearch); else StartSearch(); }
-                else if (index == 2) BeginNameEntry(Scene::LanMenu);
+                else if (index == 2) { nameThen_ = 0; BeginNameEntry(Scene::LanMenu); }
                 else GoBack();
                 break;
             case Scene::Settings:
@@ -864,22 +972,45 @@ public:
         if (scene_ == Scene::LanHost || (scene_ == Scene::LanJoined && lan_.state() == app::Lan::State::Joined)) {
             app::LobbyView lv;                                                       // sala de espera: como la seleccion de color
             lv.net = true;
-            lv.me = lan_.MySlot();
             for (size_t i = 0; i < 4 && i < lan_.Players().size(); ++i) {
                 lv.joined[i] = true;
                 lv.name[i] = lan_.Players()[i];
                 lv.color[i] = lan_.Colors()[i];
                 lv.ready[i] = lan_.Ready()[i];
+                lv.mine[i] = lan_.IsMine(static_cast<int>(i));
+                const int k = lan_.LocalIndexOf(static_cast<int>(i));
+                if (k >= 0) {                                                        // la tecla (o boton) de disparo de ese jugador local
+                    lv.meLine2[i] = ((usingPad_ && g_padOfSlot[k] >= 0) ? PadButtonName(g_cfg.padFire) : KeyName(g_cfg.key[k][app::Config::Fire])) + " LISTO";
+                }
             }
             lv.upDownText = "ELEGÍ COLOR";
-            lv.meLine2 = (usingPad_ ? PadButtonName(g_cfg.padFire) : std::string("F")) + " LISTO";
+            if (lan_.NumPlayers() < 4 && lan_.LocalCount() < 4) {
+                const int next = lan_.LocalCount();
+                lv.addHint = "OTRO JUGADOR EN ESTA PC: DISPARO J" + std::to_string(next + 1) + " (" +
+                             ((usingPad_ && g_padOfSlot[next] >= 0) ? PadButtonName(g_cfg.padFire) : KeyName(g_cfg.key[next][app::Config::Fire])) + ")";
+            }
             const bool host = scene_ == Scene::LanHost;
             int notReady = 0;
             for (int i = 0; i < lan_.NumPlayers(); ++i) notReady += lan_.Ready()[static_cast<size_t>(i)] ? 0 : 1;
-            const std::string readyKey = usingPad_ ? PadButtonName(g_cfg.padFire) : std::string("F");
+            const std::string readyKey = usingPad_ ? PadButtonName(g_cfg.padFire) : KeyName(g_cfg.key[0][app::Config::Fire]);
             if (host) {
+                using Net = app::Lan::Internet;
+                const Net net = lan_.InternetState();
                 lv.hint = "SOS EL ANFITRIÓN: EMPEZÁ CUANDO QUIERAS";
-                lv.note = !lanNote_.empty() ? lanNote_ : (lan_.NumPlayers() < 2 ? "ESPERANDO JUGADORES EN LA RED LOCAL..." : (notReady > 0 ? "TODAVÍA HAY JUGADORES SIN ESTAR LISTOS" : ""));
+                std::string waiting = lan_.NumPlayers() < 2 ? "ESPERANDO JUGADORES..." : (notReady > 0 ? "TODAVÍA HAY JUGADORES SIN ESTAR LISTOS" : "");
+                if (net == Net::Ready) {
+                    lv.hint = "CÓDIGO PARA JUGAR POR INTERNET: " + lan_.RoomCode();
+                    lv.addHint = "C: COPIAR EL CÓDIGO   I: CERRAR INTERNET";
+                    if (lan_.InternetNote().compare(0, 8, "SIN UPNP") == 0) waiting = lan_.InternetNote();      // hay que abrir el puerto a mano
+                } else if (net == Net::Working) {
+                    lv.addHint = lan_.InternetNote();
+                } else if (net == Net::Failed) {
+                    lv.addHint = "NO SE PUDO ABRIR A INTERNET. I: REINTENTAR";
+                    waiting = lan_.InternetNote();
+                } else if (lv.addHint.empty()) {
+                    lv.addHint = "I: ABRIR LA SALA A INTERNET (CÓDIGO PARA LOS DE AFUERA)";
+                }
+                lv.note = !lanNote_.empty() ? lanNote_ : waiting;
                 lv.startText = (usingPad_ ? PadButtonName(g_cfg.padStart) : std::string("ENTER")) + " EMPEZAR  " + readyKey + " LISTO";
             } else {
                 lv.hint = "SALA DE " + lan_.HostName();
@@ -902,8 +1033,7 @@ public:
             case Scene::PlayMenu:
                 v.title = "JUGAR";
                 v.items = {"LOCAL", "LAN", "ONLINE"};
-                v.enabled = {true, true, false};
-                if (menuIndex_ > 1) v.note = "PRÓXIMAMENTE";
+                v.enabled = {true, true, true};
                 v.footer = BackHint();
                 break;
             case Scene::LanMenu:
@@ -912,6 +1042,25 @@ public:
                 v.note = lanNote_;
                 v.footer = NavHint();
                 break;
+            case Scene::OnlineMenu:
+                v.title = "ONLINE";
+                v.items = {"CREAR PARTIDA", "UNIRSE CON CÓDIGO", "NOMBRE: " + (g_cfg.playerName.empty() ? std::string("(SIN NOMBRE)") : g_cfg.playerName), "VOLVER"};
+                v.note = lanNote_;
+                v.footer = NavHint();
+                break;
+            case Scene::CodeEntry: {
+                v.title = "CÓDIGO DE LA SALA";
+                std::string shown;
+                for (size_t i = 0; i < codeBuf_.size(); ++i) {
+                    if (i == 4 || i == 8) shown.push_back('-');
+                    shown.push_back(codeBuf_[i]);
+                }
+                v.items = {shown + (((menuTick_ / 30) & 1) ? " " : "_")};
+                v.selected = -1;
+                v.note = lanNote_.empty() ? "ESCRIBÍ O PEGÁ (CTRL+V) EL CÓDIGO DEL ANFITRIÓN" : lanNote_;
+                v.footer = BackHint() + "  ENTER UNIRSE";
+                break;
+            }
             case Scene::NameEntry:
                 v.title = "TU NOMBRE EN LA RED";
                 v.items = {nameBuf_ + (((menuTick_ / 30) & 1) ? " " : "_")};
@@ -1207,7 +1356,11 @@ private:
     std::string nameBuf_, lanNote_;
     Scene nameNext_ = Scene::LanMenu;
     bool nameForced_ = false;
-    bool autoPicked_ = false;                      // cuadros que lleva apretado el disparo (turbo)
+    int nameThen_ = 0;                                    // despues de pedir el nombre en ONLINE: 1 crear sala, 2 pedir codigo
+    std::string codeBuf_;
+    Scene roomFrom_ = Scene::LanMenu;                     // menu al que se vuelve al salir de una sala
+    bool autoPicked_ = false;
+    int autoLocal_ = 1, autoExpect_ = 2;                  // pruebas por red: jugadores de esta PC y total que espera el anfitrion                      // cuadros que lleva apretado el disparo (turbo)
     bool autoWave_ = false;
     bool pendingRestart_ = false;
     bool pendingTitle_ = false;
@@ -1442,8 +1595,12 @@ int RunWindow(TestScreen& screen, double selfTestSeconds, const std::string& ass
             if (screen.TextEntry()) {                                          // escribiendo el nombre de red
                 for (int cp = GetCharPressed(); cp > 0; cp = GetCharPressed()) screen.TypeChar(cp);
                 if (IsKeyPressed(KEY_BACKSPACE) || IsKeyPressedRepeat(KEY_BACKSPACE)) screen.EraseChar();
+                if ((IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) && IsKeyPressed(KEY_V)) screen.PasteText(GetClipboardText());
                 if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || AnyPadPressed(g_cfg.padFire) || AnyPadPressed(g_cfg.padStart)) screen.MenuEvent(TestScreen::Ev::Accept, 0);
                 else if (IsKeyPressed(KEY_ESCAPE) || AnyPadPressed(g_cfg.padCancel)) screen.MenuEvent(TestScreen::Ev::Back, 0);
+            } else if (screen.InHostRoom() && (IsKeyPressed(KEY_I) || IsKeyPressed(KEY_C))) {
+                if (IsKeyPressed(KEY_I)) screen.ToggleInternet();
+                if (IsKeyPressed(KEY_C) && !screen.RoomCodeText().empty()) SetClipboardText(screen.RoomCodeText().c_str());
             } else if (screen.Capturing()) {
                 if (screen.CapturingPad()) {
                     if (const int newPad = NewPadButton()) screen.CapturePad(newPad);
@@ -1612,9 +1769,14 @@ extern "C" __declspec(dllimport) int __stdcall AttachConsole(unsigned long proce
 
 // Prueba por red entre dos procesos (el mismo ejecutable, uno con --lan-host y otro con --lan-join): arman la partida por
 // los sockets, juegan N cuadros con botones de mentira y escriben el hash del estado final; tienen que dar el mismo.
-int RunLanAuto(TestScreen& screen, bool host, const std::string& name, int frames, const std::string& outFile, const std::string& shotFile) {
+int RunLanAuto(TestScreen& screen, bool host, const std::string& name, int frames, const std::string& outFile, const std::string& shotFile, int local, int expect,
+               bool online, const std::string& codeOut, const std::string& codeIn) {
+    screen.SetAutoLan(local, expect);
+    screen.StartInMenu();                                  // sin esto la pantalla arranca en la partida de prueba
     g_cfg.playerName = name;
-    if (host) screen.StartHost(); else screen.StartSearch();
+    bool codeWritten = false, joinedByCode = false;
+    if (host) screen.StartHost(online);
+    else if (codeIn.empty()) screen.StartSearch();
     auto script = [](int player, int frame) -> u8 {
         const int phase = (frame / 20 + player * 3) % 8;
         u8 v = 0;
@@ -1629,9 +1791,29 @@ int RunLanAuto(TestScreen& screen, bool host, const std::string& name, int frame
     std::string result = "TIMEOUT";
     int code = 2;
     bool shotTaken = false;
-    while (std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() < 90.0) {
+    while (std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() < 40.0) {
         if (!screen.InGame()) {
             screen.TickMenu();
+            if (host && online && !codeOut.empty() && !codeWritten && (screen.RoomInternetReady() || screen.RoomInternetFailed())) {
+                codeWritten = true;                                              // el anfitrion publica su codigo para el otro proceso
+                if (FILE* f = std::fopen(codeOut.c_str(), "w")) {
+                    std::fprintf(f, "%s\n%s\n", screen.RoomCodeValue().c_str(), screen.LanStatusText().c_str());
+                    std::fclose(f);
+                }
+                std::printf("%s\n", screen.LanStatusText().c_str());
+            }
+            if (!host && !codeIn.empty() && !joinedByCode) {                     // el cliente espera el codigo y entra con el
+                if (FILE* f = std::fopen(codeIn.c_str(), "r")) {
+                    char line[128] = {};
+                    if (std::fgets(line, sizeof line, f) && std::strlen(line) >= 12) {
+                        std::string code(line);
+                        while (!code.empty() && (code.back() == '\n' || code.back() == '\r')) code.pop_back();
+                        joinedByCode = true;
+                        screen.AutoJoinCode(code);
+                    }
+                    std::fclose(f);
+                }
+            }
             static int shotWait = 0;
             const bool wantShot = !shotFile.empty() && !shotTaken;
             if (wantShot && screen.LanLobbyReady() && ++shotWait > 60) {        // captura de la sala con "LISTO" ya visible
@@ -1643,20 +1825,28 @@ int RunLanAuto(TestScreen& screen, bool host, const std::string& name, int frame
             }
             screen.LanAutoDrive(host, wantShot);
             if (screen.CurrentScene() == TestScreen::Scene::LanMenu) { result = "SALIO DEL LAN"; break; }
+            if (screen.CurrentScene() == TestScreen::Scene::LanJoined && screen.LanFailed()) { result = "NO SE PUDO ENTRAR: " + screen.LanStatusText(); break; }
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         } else {
-            screen.SetPad(0, script(screen.MySlot(), screen.NetFrame()));
+            for (size_t k = 0; k < screen.LocalPlayers().size() && k < 4; ++k) screen.SetPad(static_cast<int>(k), script(screen.LocalPlayers()[k], screen.NetFrame()));
             screen.Step();
-            if (!screen.NetGame()) { result = "SE CORTO LA PARTIDA"; break; }
+            if (!screen.NetGame()) { result = "SE CORTO LA PARTIDA (" + screen.LanStatusText() + ")"; break; }
             if (screen.NetFrame() >= frames) {
                 char buf[128];
-                std::snprintf(buf, sizeof buf, "OK slot=%d frames=%d hash=%u", screen.MySlot(), screen.NetFrame(), screen.Battle().StateHash());
+                std::snprintf(buf, sizeof buf, "OK pc=%d locales=%d frames=%d hash=%u", screen.MySlot(), static_cast<int>(screen.LocalPlayers().size()), screen.NetFrame(), screen.Battle().StateHash());
                 result = buf;
                 code = 0;
+                // sigue unos segundos para que los demas puedan terminar los ultimos cuadros
+                const auto tEnd = std::chrono::steady_clock::now();
+                while (std::chrono::duration<double>(std::chrono::steady_clock::now() - tEnd).count() < 4.0 && screen.NetGame()) {
+                    screen.Step();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                }
                 break;
             }
         }
     }
+    if (result == "TIMEOUT") result += " (" + screen.LanStatusText() + ", frame=" + std::to_string(screen.NetFrame()) + ")";
     if (!outFile.empty()) {
         if (FILE* f = std::fopen(outFile.c_str(), "w")) {
             std::fprintf(f, "%s\n", result.c_str());
@@ -1689,7 +1879,9 @@ int main(int argc, char** argv) {
     int scale = 1;
     std::string lanName, lanOut;                          // pruebas por red entre dos procesos
     std::string lanShot;
-    int lanRole = 0, lanFrames = 600;                     // 1 anfitrion, 2 se une
+    std::string lanCodeOut, lanCodeIn;
+    bool lanOnline = false;
+    int lanRole = 0, lanFrames = 600, lanLocal = 1, lanExpect = 2;                     // 1 anfitrion, 2 se une
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--shot" && i + 1 < argc) shotFile = argv[++i];
@@ -1706,6 +1898,11 @@ int main(int argc, char** argv) {
         else if (a == "--lan-frames" && i + 1 < argc) lanFrames = std::atoi(argv[++i]);
         else if (a == "--lan-out" && i + 1 < argc) lanOut = argv[++i];
         else if (a == "--lan-shot" && i + 1 < argc) lanShot = argv[++i];
+        else if (a == "--lan-local" && i + 1 < argc) lanLocal = std::atoi(argv[++i]);
+        else if (a == "--lan-online") lanOnline = true;
+        else if (a == "--lan-code-out" && i + 1 < argc) lanCodeOut = argv[++i];
+        else if (a == "--lan-code-in" && i + 1 < argc) lanCodeIn = argv[++i];
+        else if (a == "--lan-expect" && i + 1 < argc) lanExpect = std::atoi(argv[++i]);
         else if (a == "--level" && i + 1 < argc) { level = std::atoi(argv[++i]); direct = true; }
     }
 
@@ -1731,7 +1928,8 @@ int main(int argc, char** argv) {
         return 2;
     }
     screen.Reset(players);
-    if (lanRole != 0) return RunLanAuto(screen, lanRole == 1, lanName, lanFrames, lanOut, lanShot);
+    if (lanRole != 0 && !lanCodeIn.empty() && lanRole == 1) lanRole = 1;
+    if (lanRole != 0) return RunLanAuto(screen, lanRole == 1, lanName, lanFrames, lanOut, lanShot, lanLocal, lanExpect, lanOnline, lanCodeOut, lanCodeIn);
     const bool headless = !wavFile.empty() || !shotFile.empty();
     if (wantMenu || (!direct && !headless)) screen.StartInMenu();       // sin argumentos: pantalla de titulo
 

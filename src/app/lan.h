@@ -1,20 +1,25 @@
 #pragma once
 
 // Modo LAN: crear una partida en la red local, unirse (con busqueda automatica) y jugar en red.
+// Cada PC puede traer mas de un jugador (por ejemplo 2 + 2, o 1 + 3): en total hasta 4 jugadores.
+// La sala puede abrirse ademas a internet (p2p, sin servidor): el anfitrion averigua su direccion publica (STUN), abre el puerto
+// del router (UPnP) y muestra un CODIGO corto; los de afuera entran con el codigo y los de la red local la encuentran buscando.
+// Los dos tipos de jugadores conviven en la misma sala.
 //
 // Protocolo sencillo sobre UDP, puerto 47800 (mensajes de texto separados por '|'):
 //   buscar:     cliente -> broadcast        "BCNES1?"
 //   anuncio:    anfitrion -> cliente        "BCNES1!|nombre|jugadores|maximo|version"
-//   unirse:     cliente -> anfitrion        "BCNES1J|nombre|version"
-//   respuesta:  anfitrion -> cliente        "BCNES1W|ranura"  /  "BCNES1F" (llena o ya empezo)  /  "BCNES1V" (version distinta)
-//   sala:       anfitrion -> miembros       "BCNES1L|empezo|fuegoamigo|n|nombre0|color0|listo0|nombre1|color1|listo1|..."  (cada medio segundo)
-//   mi color:   miembro -> anfitrion        "BCNES1P|color|listo"   (el anfitrion valida que el color no lo use otro)
-//   latido:     miembro -> anfitrion        "BCNES1H"  (cada segundo; 6 s sin latidos = se fue)
+//   unirse:     cliente -> anfitrion        "BCNES1J|nombre|version"        (crea el primer jugador de esa PC)
+//   respuesta:  anfitrion -> cliente        "BCNES1W|id"  /  "BCNES1F" (llena o ya empezo)  /  "BCNES1V" (version distinta)
+//   sala:       anfitrion -> miembros       "BCNES1L|empezo|fuegoamigo|retraso|n|nombre|color|listo|dueno|..."  (cada medio segundo)
+//   mis jugadores: miembro -> anfitrion     "BCNES1P|k|color|listo"   (k = mi jugador local 0..3; si k es el siguiente, lo crea)
+//                                           "BCNES1R|k"               (quita mi jugador local k, salvo el primero)
+//   latido:     miembro -> anfitrion        "BCNES1H"  (cada segundo; sin latidos 6 s = se fue)
 //   salir:      miembro -> anfitrion "BCNES1X"  /  anfitrion -> miembros "BCNES1C" (partida cerrada)
-// Partida: pasos sincronizados ("lockstep"). Cada jugador manda sus botones del cuadro f + RETRASO al anfitrion; cuando el
-// anfitrion tiene los de todos para un cuadro, manda los botones de todos y cada equipo simula ese cuadro. Como el motor del
-// juego es determinista, todos ven lo mismo.
-//   entradas:   miembro -> anfitrion        "BCNES1I|recibidos|f0|hex..."   (4 hex por cuadro: botones de ese jugador)
+// Partida: pasos sincronizados ("lockstep"). Cada PC manda los botones de sus jugadores del cuadro f + RETRASO al anfitrion;
+// cuando el anfitrion tiene los de todas las PC para un cuadro, manda los botones de los 4 jugadores y cada equipo simula ese
+// cuadro. Como el motor del juego es determinista, todos ven lo mismo.
+//   entradas:   miembro -> anfitrion        "BCNES1I|recibidos|f0|hex..."   (2 hex por jugador local y cuadro)
 //   cuadros:    anfitrion -> miembro        "BCNES1G|f0|n|hex..."           (8 hex por cuadro: botones de los 4 jugadores)
 //   control:    miembro -> anfitrion        "BCNES1K|cuadro|hash"           (comprobacion de sincronia)
 //               anfitrion -> miembros       "BCNES1D"                       (se detecto una desincronizacion)
@@ -43,7 +48,8 @@ public:
     static constexpr int kMaxPlayers = 4;
     static constexpr int kMaxName = 12;
     static constexpr int kColorCount = 7;               // colores de tanque disponibles (los mismos que la seleccion local)
-    static constexpr int kInputDelay = 4;               // cuadros de retraso de los botones (unos 66 ms)
+    static constexpr int kInputDelay = 4;               // cuadros de retraso de los botones en LAN (unos 66 ms)
+    static constexpr int kOnlineInputDelay = 8;         // si la sala esta abierta a internet (unos 133 ms)
 
     // port = 0 usa el puerto por defecto (las pruebas usan otro).
     explicit Lan(uint16_t port = 0);
@@ -61,22 +67,47 @@ public:
     bool Host(const std::string& myName);               // crear una partida: abre el puerto y responde a las busquedas
     bool Search();                                      // buscar partidas en la red local
     bool Join(const LanGame& game, const std::string& myName);   // unirse a una de las partidas encontradas
+    // Unirse por internet con el codigo de la sala ("ABCD-EFGH-JKLM"). Devuelve false si el codigo es invalido.
+    bool JoinCode(const std::string& code, const std::string& myName);
     void Leave();                                       // cierra todo (avisa a los demas)
     void Update();                                      // una vez por cuadro: recibe y envia
 
     State state() const { return state_; }
     const std::vector<LanGame>& Games() const { return games_; }
-    const std::vector<std::string>& Players() const { return players_; }    // nombres en la sala (el anfitrion primero)
+    const std::vector<std::string>& Players() const { return players_; }    // nombres de los jugadores de la sala
     const std::vector<int>& Colors() const { return colors_; }               // color de cada jugador (0..6, sin repetir)
     const std::vector<bool>& Ready() const { return ready_; }                // quienes ya eligieron y apretaron "listo"
-    // Mi color: pasa al siguiente (+1) o anterior (-1) que no use otro, y vuelvo a no estar listo.
-    void CycleMyColor(int direction);
-    // Marca / desmarca "listo" (con el color que tengo).
-    void ToggleMyReady();
+    const std::vector<int>& Owners() const { return owners_; }               // a que PC pertenece cada jugador (0 = anfitrion)
     const std::string& HostName() const { return hostName_; }
-    int MySlot() const { return mySlot_; }               // 0 = anfitrion
+    int MyId() const { return myId_; }                   // esta PC en la sala (0 = anfitrion)
+    int MySlot() const { return myId_; }
+    const std::vector<int>& MyPlayers() const { return mine_; }             // indices de los jugadores de esta PC, en orden local
+    int LocalCount() const { return static_cast<int>(mine_.size()); }
+    bool IsMine(int player) const;
+    int LocalIndexOf(int player) const;                  // jugador local k de ese jugador (-1 si no es de esta PC)
     bool IsHost() const { return state_ == State::Hosting; }
     const std::string& Error() const { return error_; }
+
+    // Jugadores locales (varios por PC, hasta 4 en total en la sala). k = jugador local 0..LocalCount()-1.
+    bool AddLocalPlayer();                              // suma otro jugador de esta PC (si hay lugar)
+    void RemoveLocalPlayer(int k);                      // lo quita (el primero no se puede quitar)
+    // Color: pasa al siguiente (+1) o anterior (-1) que no use otro, y deja de estar listo.
+    void CycleColor(int k, int direction);
+    // Marca / desmarca "listo" (con el color que tiene).
+    void ToggleReady(int k);
+    void CycleMyColor(int direction) { CycleColor(0, direction); }
+    void ToggleMyReady() { ToggleReady(0); }
+
+    // ---- internet (solo anfitrion) ----
+    enum class Internet { Off, Working, Ready, Failed };
+    // Abre la sala a jugadores de afuera: averigua la direccion publica y abre el puerto del router; con `simulate` solo arma un
+    // codigo para 127.0.0.1 (pruebas, sin tocar la red).
+    void OpenToInternet(bool simulate = false);
+    void CloseInternet();
+    Internet InternetState() const { return internet_; }
+    const std::string& RoomCode() const { return roomCode_; }
+    const std::string& InternetNote() const { return internetNote_; }
+    int InputDelay() const { return inputDelay_; }
 
     // ---- partida ----
     bool StartGame(int friendlyFire);                   // solo el anfitrion: empieza la partida para todos
@@ -86,8 +117,9 @@ public:
     // El juego pide el cuadro `f`: se puede simular cuando ya llegaron los botones de todos.
     bool FrameReady(int f) const;
     void FrameInputs(int f, uint8_t out[4]) const;      // botones de los 4 jugadores en el cuadro f
-    // Botones locales: se piden hasta el cuadro simulado + retraso (se llama una vez por cuadro del juego).
-    void SubmitLocal(int simFrame, uint8_t buttons);
+    // Botones locales (uno por jugador de esta PC): se piden hasta el cuadro simulado + retraso (una vez por cuadro del juego).
+    void SubmitLocal(int simFrame, const uint8_t* buttons, int count);
+    void SubmitLocal(int simFrame, uint8_t buttons) { SubmitLocal(simFrame, &buttons, 1); }
     // Comprobacion de sincronia (cada tanto, con el hash del estado del juego en ese cuadro).
     void ReportHash(int frame, uint32_t hash);
     bool Desynced() const { return desync_; }
@@ -95,8 +127,16 @@ public:
 
 private:
     std::string LobbyMessage(bool started) const;
-    void SendMyChoice();
-    bool ColorUsedByOther(int color, int exceptSlot) const;
+    void SendChoice(int k);
+    void RecomputeMine();
+    bool ColorUsedByOther(int color, int exceptPlayer) const;
+    int FirstFreeColor() const;
+    std::string UniqueName(const std::string& base) const;
+    int AddPlayerFor(int ownerId, const std::string& base, int k);    // anfitrion: crea un jugador; -1 si no hay lugar
+    std::vector<int> PlayersOf(int ownerId) const;
+    void RemovePlayerAt(int index);
+    void RemovePlayersOf(int ownerId);
+    void UpdateInternet();
     struct Impl;
     Impl* impl_;
     State state_ = State::Idle;
@@ -104,8 +144,14 @@ private:
     std::vector<std::string> players_;
     std::vector<int> colors_;
     std::vector<bool> ready_;
-    std::string hostName_, myName_, error_;
-    int mySlot_ = 0;
+    std::vector<int> owners_;
+    std::vector<int> mine_;
+    std::string hostName_, myName_, error_, roomCode_, internetNote_;
+    Internet internet_ = Internet::Off;
+    bool internetWanted_ = false;                       // la sala se abrio a internet (aunque todavia no haya codigo)
+    int inputDelay_ = kInputDelay;
+    double joinTimeout_ = 5.0;
+    int myId_ = 0;
     bool started_ = false;
     int friendly_ = 0;
     bool desync_ = false;

@@ -989,6 +989,7 @@ void Renderer::RenderLobby(const LobbyView& l, std::vector<uint8_t>& rgba) const
     const std::string title = l.net ? "SALA DE ESPERA" : "SELECCIÓN DE JUGADORES";
     DrawText(canvas, kScreenW, (kScreenW - TextWidth(title)) / 2, 14, title, 0xFCA044);
     DrawText(canvas, kScreenW, (kScreenW - TextWidth(l.hint)) / 2, 30, l.hint, 0x7C7C7C);
+    if (!l.addHint.empty()) DrawText(canvas, kScreenW, (kScreenW - TextWidth(l.addHint)) / 2, 42, l.addHint, 0x58A8F8);
     for (int s = 0; s < 4; ++s) {
         const int x0 = 22 + s * 100;
         const int y0 = 56;
@@ -999,7 +1000,7 @@ void Renderer::RenderLobby(const LobbyView& l, std::vector<uint8_t>& rgba) const
         FillRect(canvas, kScreenW, x0 + 90, y0, x0 + 92, y0 + 128, frame);
         std::string name = "JUGADOR " + std::to_string(s + 1);
         if (l.net && l.joined[s]) name = l.name[s].substr(0, 11);
-        DrawText(canvas, kScreenW, x0 + (l.net ? (92 - TextWidth(name)) / 2 : 10), y0 + 10, name, l.joined[s] ? (s == l.me ? 0xF8D878 : 0xFCFCFC) : 0x7C7C7C);
+        DrawText(canvas, kScreenW, x0 + (l.net ? (92 - TextWidth(name)) / 2 : 10), y0 + 10, name, l.joined[s] ? (l.mine[s] ? 0xF8D878 : 0xFCFCFC) : 0x7C7C7C);
         if (l.joined[s]) {
             const int pal = kPaletteOf[l.color[s] % 7];
             DrawSprite16(canvas, kScreenW, x0 + 22, y0 + 34, 0x00, pal, 3);          // el tanque en su color
@@ -1010,9 +1011,9 @@ void Renderer::RenderLobby(const LobbyView& l, std::vector<uint8_t>& rgba) const
                 if (l.ready[s]) {
                     const std::string ok = "LISTO";
                     DrawText(canvas, kScreenW, x0 + (92 - TextWidth(ok)) / 2, y0 + 108, ok, 0x58D854);
-                } else if (s == l.me) {
+                } else if (l.mine[s]) {
                     DrawText(canvas, kScreenW, x0 + (92 - TextWidth(l.upDownText)) / 2, y0 + 104, l.upDownText, 0x7C7C7C);
-                    DrawText(canvas, kScreenW, x0 + (92 - TextWidth(l.meLine2)) / 2, y0 + 114, l.meLine2, 0x7C7C7C);
+                    DrawText(canvas, kScreenW, x0 + (92 - TextWidth(l.meLine2[s])) / 2, y0 + 114, l.meLine2[s], 0x7C7C7C);
                 } else {
                     DrawText(canvas, kScreenW, x0 + (92 - TextWidth("ELIGIENDO")) / 2, y0 + 108, "ELIGIENDO", 0x7C7C7C);
                 }
