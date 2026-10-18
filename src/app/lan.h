@@ -109,6 +109,9 @@ public:
     const std::string& RoomCode() const { return roomCode_; }
     const std::string& InternetNote() const { return internetNote_; }
     int InputDelay() const { return inputDelay_; }
+    // Codigo de la sala para la misma red (la IP local en el mismo formato): sirve para entrar con "unirse con codigo" cuando la busqueda
+    // no la encuentra (algunos routers y telefonos no dejan pasar los mensajes a toda la red).
+    const std::string& LanCode() const { return lanCode_; }
 
     // ---- entrar a una partida ya empezada ----
     // Quien se une con la partida en marcha ve la sala, elige su color y toca "listo"; el anfitrion lo agrega en un cuadro
@@ -174,6 +177,7 @@ private:
     bool started_ = false;
     int friendly_ = 0;
     bool noLateJoin_ = false;
+    std::string lanCode_;
     bool desync_ = false;
     bool lost_ = false;
     bool lateJoiner_ = false;

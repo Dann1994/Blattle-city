@@ -1348,6 +1348,10 @@ public:
                 using Net = app::Lan::Internet;
                 const Net net = lan_.InternetState();
                 lv.hint = "SOS EL ANFITRIÓN: EMPEZÁ CUANDO QUIERAS";
+                if (!lan_.LanCode().empty()) {                                      // por si la busqueda no la encuentra: entrar con el codigo
+                    lv.hint = "CÓDIGO DE ESTA RED: " + lan_.LanCode();
+                    lv.addHint = touch_ ? "SI NO LA ENCUENTRAN: ONLINE > UNIRSE CON CÓDIGO" : "SI NO LA VEN: ONLINE > CÓDIGO   I: ABRIR A INTERNET";
+                }
                 std::string waiting = lan_.NumPlayers() < 2 ? "ESPERANDO JUGADORES..." : (notReady > 0 ? "TODAVÍA HAY JUGADORES SIN ESTAR LISTOS" : "");
                 if (net == Net::Ready) {
                     lv.hint = "CÓDIGO PARA JUGAR POR INTERNET: " + lan_.RoomCode();
@@ -1359,7 +1363,7 @@ public:
                     lv.addHint = "NO SE PUDO ABRIR A INTERNET. I: REINTENTAR";
                     waiting = lan_.InternetNote();
                 } else if (lv.addHint.empty()) {
-                    lv.addHint = "I: ABRIR LA SALA A INTERNET (CÓDIGO PARA LOS DE AFUERA)";
+                    lv.addHint = touch_ ? "" : "I: ABRIR LA SALA A INTERNET (CÓDIGO PARA LOS DE AFUERA)";
                 }
                 lv.note = !lanNote_.empty() ? lanNote_ : waiting;
                 lv.startText = touch_ ? "TOQUE START PARA EMPEZAR   " + readyKey + " LISTO"

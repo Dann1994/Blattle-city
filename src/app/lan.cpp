@@ -117,6 +117,9 @@ struct Lan::Impl {
     };
 
     SOCKET sock = INVALID_SOCKET;
+    SOCKET beacon = INVALID_SOCKET;        // buscando: escucha los avisos que el anfitrion manda a toda la red (puerto + 1)
+    double lastBeacon = 0;
+    std::string localIp;                  // buscando: la IP de esta PC (una sala con esa IP esta en esta misma PC: se entra por 127.0.0.1)
     uint16_t port = Lan::kDefaultPort;
     sockaddr_in hostAddr{};                // miembro: direccion del anfitrion
     std::vector<Member> members;           // anfitrion: las demas PC
@@ -149,7 +152,44 @@ struct Lan::Impl {
     bool upnpOpened = false;
     double lastRenew = 0;
 
+    void CloseBeacon() {
+        if (beacon != INVALID_SOCKET) closesocket(beacon);
+        beacon = INVALID_SOCKET;
+    }
+
+    bool OpenBeacon(uint16_t bindPort) {
+        EnsureSockets();
+        CloseBeacon();
+        beacon = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (beacon == INVALID_SOCKET) return false;
+#ifdef _WIN32
+        u_long nb = 1;
+        ioctlsocket(beacon, FIONBIO, &nb);
+#else
+        fcntl(beacon, F_SETFL, fcntl(beacon, F_GETFL, 0) | O_NONBLOCK);
+#endif
+        int yes = 1;
+        setsockopt(beacon, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&yes), sizeof yes);
+        sockaddr_in a{};
+        a.sin_family = AF_INET;
+        a.sin_addr.s_addr = htonl(INADDR_ANY);
+        a.sin_port = htons(bindPort);
+        if (::bind(beacon, reinterpret_cast<sockaddr*>(&a), sizeof a) != 0) {
+            CloseBeacon();
+            return false;
+        }
+        return true;
+    }
+
+    // Direccion de difusion de la subred (supone /24): algunos routers no reenvian la de toda la red (255.255.255.255).
+    static std::string SubnetBroadcast() {
+        const std::string ip = LocalAddress();
+        const size_t p = ip.rfind('.');
+        return p == std::string::npos ? std::string() : ip.substr(0, p + 1) + "255";
+    }
+
     void Close() {
+        CloseBeacon();
         if (sock != INVALID_SOCKET) closesocket(sock);
         sock = INVALID_SOCKET;
     }
@@ -352,6 +392,11 @@ bool Lan::Host(const std::string& myName) {
     if (myName_.empty()) { error_ = "NOMBRE VACÍO"; state_ = State::Failed; return false; }
     if (!impl_->Open(impl_->port)) { error_ = "NO SE PUDO ABRIR EL PUERTO DE RED"; state_ = State::Failed; return false; }
     state_ = State::Hosting;
+    {
+        const std::string ip = LocalAddress();
+        lanCode_ = ip.empty() ? std::string() : MakeRoomCode(ip, impl_->port);
+    }
+    impl_->lastBeacon = 0;
     players_.clear();
     colors_.clear();
     ready_.clear();
@@ -371,6 +416,8 @@ bool Lan::Search() {
     state_ = State::Searching;
     games_.clear();
     impl_->lastSearch = 0;                              // manda el primer pedido enseguida
+    impl_->OpenBeacon(static_cast<uint16_t>(impl_->port + 1));      // y escucha los avisos de las salas
+    impl_->localIp = LocalAddress();
     return true;
 }
 
@@ -392,6 +439,7 @@ bool Lan::Join(const LanGame& game, const std::string& myName) {
     myName_ = CleanName(myName);
     if (myName_.empty()) { error_ = "NOMBRE VACÍO"; return false; }
     if (impl_->sock == INVALID_SOCKET && !impl_->Open(0)) { error_ = "NO SE PUDO ABRIR LA RED"; state_ = State::Failed; return false; }
+    impl_->CloseBeacon();                                // ya no se busca: no dejar el puerto de avisos ocupado
     impl_->hostAddr = Impl::Addr(game.address, game.port);
     hostName_ = game.name;
     state_ = State::Joining;
@@ -728,10 +776,13 @@ void Lan::Update() {
 
     // ---------------- recibir ----------------
     char buf[2048];
+    for (int si = 0; si < 2; ++si) {
+    const SOCKET cur = si == 0 ? impl_->sock : impl_->beacon;
+    if (cur == INVALID_SOCKET) continue;
     for (;;) {
         sockaddr_in from{};
         SockLen fl = sizeof from;
-        const int n = ::recvfrom(impl_->sock, buf, sizeof buf - 1, 0, reinterpret_cast<sockaddr*>(&from), &fl);
+        const int n = ::recvfrom(cur, buf, sizeof buf - 1, 0, reinterpret_cast<sockaddr*>(&from), &fl);
         if (n <= 0) break;
         const std::string msg(buf, static_cast<size_t>(n));
         if (internet_ == Internet::Working && !(msg.compare(0, 6, "BCNES1") == 0)) {          // respuesta de STUN a mi pedido
@@ -843,6 +894,7 @@ void Lan::Update() {
                 LanGame g;
                 g.name = f[1];
                 g.address = Impl::IpOf(from);
+                if (!impl_->localIp.empty() && g.address == impl_->localIp) g.address = "127.0.0.1";
                 g.port = ntohs(from.sin_port);
                 g.players = ToInt(f[2], 1);
                 g.maxPlayers = ToInt(f[3], kMaxPlayers);
@@ -856,8 +908,8 @@ void Lan::Update() {
                 // el mismo anfitrion puede contestar por su IP de red y por 127.0.0.1 (si esta en esta misma PC): una sola entrada
                 for (size_t i = 0; i < games_.size();) {
                     bool twin = false;
-                    if (games_[i].address == "127.0.0.1") {
-                        for (const auto& o2 : games_) twin = twin || (o2.address != "127.0.0.1" && o2.name == games_[i].name && o2.port == games_[i].port);
+                    if (games_[i].address != "127.0.0.1") {                      // se queda la de 127.0.0.1: es la que siempre se puede alcanzar
+                        for (const auto& o2 : games_) twin = twin || (o2.address == "127.0.0.1" && o2.name == games_[i].name && o2.port == games_[i].port);
                     }
                     if (twin) games_.erase(games_.begin() + static_cast<long>(i));
                     else ++i;
@@ -935,10 +987,20 @@ void Lan::Update() {
             }
         }
     }
+    }
 
     // ---------------- enviar / vencimientos ----------------
     if (state_ == State::Hosting) {
         UpdateInternet();
+        if (now - impl_->lastBeacon > 1.5) {                              // aviso a toda la red: asi los que buscan la ven sin tener que preguntar
+            impl_->lastBeacon = now;
+            std::ostringstream os;
+            os << "BCNES1!|" << myName_ << "|" << players_.size() << "|" << kMaxPlayers << "|" << BuildId();
+            const uint16_t bp = static_cast<uint16_t>(impl_->port + 1);
+            impl_->Send(Impl::Addr("255.255.255.255", bp), os.str());
+            const std::string sub = Impl::SubnetBroadcast();
+            if (!sub.empty()) impl_->Send(Impl::Addr(sub, bp), os.str());
+        }
         // PC que dejaron de dar senales
         for (size_t i = 0; i < impl_->members.size();) {
             auto& m = impl_->members[i];
@@ -1032,6 +1094,8 @@ void Lan::Update() {
         if (now - impl_->lastSearch > 1.0) {
             impl_->lastSearch = now;
             impl_->Send(Impl::Addr("255.255.255.255", impl_->port), "BCNES1?");
+            const std::string sub = Impl::SubnetBroadcast();
+            if (!sub.empty()) impl_->Send(Impl::Addr(sub, impl_->port), "BCNES1?");
             impl_->Send(Impl::Addr("127.0.0.1", impl_->port), "BCNES1?");   // por si el anfitrion esta en esta misma PC
         }
     } else if (state_ == State::Joining) {

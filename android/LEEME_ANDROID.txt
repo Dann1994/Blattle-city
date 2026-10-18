@@ -34,3 +34,7 @@ Verificado
   Se probó en un emulador Android 14 (x86_64): arranca, los menús responden a los controles táctiles, el teclado en pantalla escribe, se juega,
   y una partida en red con el anfitrión de Windows terminó con el MISMO estado del juego (hash idéntico) en las dos plataformas.
   Todavía no se probó en un teléfono real (arm64): si algo falla, avisá qué modelo es.
+
+Si la búsqueda LAN no encuentra la partida (algunos routers o teléfonos no dejan pasar los mensajes a toda la red):
+  la sala del anfitrión muestra arriba "CÓDIGO DE ESTA RED: XXXX-XXXX-XXXX"; en el otro equipo entrá con ONLINE -> UNIRSE CON CÓDIGO y escribilo.
+  Ahora el anfitrión además avisa su sala cada segundo y medio por toda la red, así que normalmente aparece sola en la lista.
