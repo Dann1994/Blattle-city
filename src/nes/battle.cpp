@@ -400,12 +400,25 @@ void Battle::LoadWideStage(const u8 blocks[kWideBlocksY][kWideBlocksX], const u8
             Sub_D80B_write_block_tiles_and_attribute(strip[col] & 0x0F, col * 0x10, 0x00);     // la franja de arriba (y = 0..15)
         }
     }
+    if (IsVersus()) {                                    // batalla vs: una aguila por equipo, cada una con su fortaleza de hierro
+        enemyEagleAlive_ = false;
+        enemyEagleHp_ = 0;
+        bossSpawned_ = 0;
+        vsWinner_ = -1;
+        for (int t = 0; t < 2; ++t) {
+            vsEagleAlive_[t] = true;
+            const int ec = 2 * spec_.vsEagleCol[t], er = 2 * spec_.vsEagleRow[t];
+            DrawEagleAt(ec, er, false, static_cast<u8>(t));
+            DrawFortressAt(ec, er, spec_.vsLayers);
+        }
+        return;
+    }
     if (!IsBossLevel()) {                                // en los niveles del aguila enemiga los jugadores no tienen aguila
         Sub_CAF5_draw_default_base();
         Sub_CB5D_draw_default_eagle();
     }
     enemyEagleAlive_ = IsBossLevel();
-    enemyEagleHp_ = enemyEagleAlive_ ? 10 * (level_ / 10) : 0;      // salud: 10, 20, 30 y 40 segun el nivel
+    enemyEagleHp_ = enemyEagleAlive_ ? 10 * Rank() : 0;             // salud: 10, 20, 30 y 40 segun la fuerza
     bossSpawned_ = 0;
     if (enemyEagleAlive_) {
         DrawEnemyEagle(false);
@@ -415,12 +428,15 @@ void Battle::LoadWideStage(const u8 blocks[kWideBlocksY][kWideBlocksX], const u8
 
 // Capas de hierro alrededor del aguila enemiga, de 1 mosaico (la unidad minima, 8 px) de espesor cada una.
 void Battle::DrawEagleFortress() {
-    const int n = EagleLayers();
+    DrawFortressAt(2 * EagleCol(), 2 * EagleRow(), EagleLayers());
+}
+
+void Battle::DrawFortressAt(int ec, int er, int n) {                          // mosaico de arriba a la izquierda del aguila
     for (int k = 1; k <= n; ++k) {
-        const int topRow = kOpenTopStrip ? 2 - k : 2;                       // con la franja de arriba abierta la capa tambien la cubre
-        for (int row = topRow < 0 ? 0 : topRow; row <= 3 + k; ++row) {
-            for (int col = 26 - k; col <= 27 + k; ++col) {
-                if (row != 3 + k && row != topRow && col != 26 - k && col != 27 + k) continue;   // solo el contorno de la capa k
+        const int topRow = kOpenTopStrip ? er - k : er;                     // con la franja de arriba abierta la capa tambien la cubre
+        for (int row = topRow < 0 ? 0 : topRow; row <= er + 1 + k && row < 30; ++row) {
+            for (int col = ec - k < 0 ? 0 : ec - k; col <= ec + 1 + k && col < kWideMapCols; ++col) {
+                if (row != er + 1 + k && row != topRow && col != ec - k && col != ec + 1 + k) continue;   // solo el contorno de la capa k
                 const uint16_t p = Sub_D5FB_calculate_pointer(col, row);
                 Sub_D784_write_tile(p, tbl_DACB_block_data[9 * 4 + (row & 1) * 2 + (col & 1)]);   // el mosaico de hierro
                 Sub_D635_calculate_nametable_attribute(col, row, tbl_DABB_nametable_attribute[9]);   // y su paleta (gris)
@@ -431,9 +447,13 @@ void Battle::DrawEagleFortress() {
 
 // Aguila enemiga de los niveles 10/20/30/40: arriba y al centro (bloque fila 0, columna 13), con la paleta roja.
 void Battle::DrawEnemyEagle(bool destroyed) {
-    Sub_D6B3_fill_buffer_with_tiles(26, 2, destroyed ? tbl_D3AB_tiles___destroyed_eagle___line1 : tbl_D3A5_tiles___default_eagle___line1);
-    Sub_D6B3_fill_buffer_with_tiles(26, 3, destroyed ? tbl_D3AE_tiles___destroyed_eagle___line2 : tbl_D3A8_tiles___default_eagle___line2);
-    Sub_D635_calculate_nametable_attribute(26, 2, destroyed ? 0 : 1);
+    DrawEagleAt(2 * EagleCol(), 2 * EagleRow(), destroyed, 1);
+}
+
+void Battle::DrawEagleAt(int ec, int er, bool destroyed, u8 attr) {
+    Sub_D6B3_fill_buffer_with_tiles(ec, er, destroyed ? tbl_D3AB_tiles___destroyed_eagle___line1 : tbl_D3A5_tiles___default_eagle___line1);
+    Sub_D6B3_fill_buffer_with_tiles(ec, er + 1, destroyed ? tbl_D3AE_tiles___destroyed_eagle___line2 : tbl_D3A8_tiles___default_eagle___line2);
+    Sub_D635_calculate_nametable_attribute(ec, er, destroyed ? 0 : attr);
 }
 
 // Cae el aguila enemiga: explota y los tanques enemigos que quedaban desaparecen (el nivel esta ganado).
@@ -442,7 +462,7 @@ void Battle::DestroyEnemyEagle(int owner) {
     enemyEagleHp_ = 0;
     ++eaglesDestroyed_;
     if (owner >= 0 && owner < nPlayers_) {
-        for (int i = 0; i < 5 * (level_ / 10); ++i) {      // plus para quien la destruyo: 5000 por cada 10 niveles
+        for (int i = 0; i < 5 * Rank(); ++i) {             // plus para quien la destruyo: 5000 por cada punto de fuerza
             Sub_D9E1_calculate_decimal_number(0);
             Sub_D9BE_add_score(owner);
         }
@@ -484,6 +504,8 @@ void Battle::NewGame(int players, int stage) {
     std::memset(extraEnemy_, 0, sizeof(extraEnemy_));
     for (int& t : stealTarget_) t = -1;
     nPlayers_ = wide_ ? (players < 1 ? 1 : (players > 4 ? 4 : players)) : 2;
+    for (int i = 0; i < 4; ++i) present_[i] = i < nPlayers_;
+    diffPlayers_ = nPlayers_;
     lastEnemy_ = wide_ ? nPlayers_ + kWideEnemySlots - 1 : con_max_tanks;
     allyBegin_ = lastEnemy_ + 1;
     lastTank_ = wide_ ? lastEnemy_ + kWideAllySlots : con_max_tanks;
@@ -491,7 +513,7 @@ void Battle::NewGame(int players, int stage) {
     std::memset(allyOwner_, 0, sizeof(allyOwner_));
     {
         static const int kTotals[4] = {20, 20, 36, 48};          // 1 y 2 jugadores: los 20 de la ROM
-        enemyTotal_ = wide_ ? kTotals[nPlayers_ - 1] * (10 + tier_) / 10 : 20;   // +10% por escalon de dificultad
+        enemyTotal_ = wide_ ? kTotals[diffPlayers_ - 1] * (10 + tier_) / 10 : 20;   // +10% por escalon de dificultad
     }
     R(ram_game_mode) = players >= 2 ? 1 : 0;
     if (wide_) {
@@ -529,7 +551,12 @@ void Battle::Sub_C331_prepare_tanks_and_spawn_players() {
     std::memset(extraEnemy_, 0, sizeof(extraEnemy_));
     for (int& t : stealTarget_) t = -1;
     bomb_ = BombingState{};
-    bomb_.countdown = IsBossLevel() ? BombInterval() : 0;
+    bomb_.countdown = (IsBossLevel() || IsVersus()) ? BombInterval() : 0;
+    std::memset(vsTeam_, 0, sizeof(vsTeam_));
+    vsAiTimer_[0] = vsAiTimer_[1] = 90;                  // batalla vs: los primeros tanques con IA salen al ratito
+    vsSpawned_[0] = vsSpawned_[1] = 0;
+    teamClock_[0] = teamClock_[1] = 0;
+    vsWinner_ = -1;
     shake_ = 0;
     Sub_E409_clear_bullet_status();
     Sub_E413_clear_some_tank_addresses();
@@ -540,7 +567,7 @@ void Battle::Sub_C331_prepare_tanks_and_spawn_players() {
             Sub_E363_tank_spawn_handler(p);
         }
     }
-    R(ram_enemy_spawn_cnt) = static_cast<u8>(IsBossLevel() ? 0 : enemyTotal_);     // en los niveles del aguila no hay cuota: salen sin parar
+    R(ram_enemy_spawn_cnt) = static_cast<u8>((IsBossLevel() || IsVersus()) ? 0 : enemyTotal_);     // en los niveles del aguila no hay cuota: salen sin parar
     R(ram_enemies_left_cnt) = static_cast<u8>(enemyTotal_);
     R(ram_enemy_type_offset) = 0;
     R(ram_frm_cnt_hi) = 0;
@@ -569,11 +596,11 @@ void Battle::Sub_C331_prepare_tanks_and_spawn_players() {
     }
     if (wide_) {
         // mismo calculo pero con el numero de nivel (hasta 40), sin pasarse de rapido
-        const int lvl = level_ > 0 ? level_ : stage;
+        const int lvl = spec_.active ? tier_ * 5 + 3 : (level_ > 0 ? level_ : stage);     // nivel hecho a mano: el ritmo sale de su dificultad
         interval = 0xBE - 4 * lvl;
         if (interval < 0x28) interval = 0x28;
-        if (nPlayers_ >= 2) interval -= 0x14;
-        if (nPlayers_ > 2) interval -= 0x0A * (nPlayers_ - 2);
+        if (diffPlayers_ >= 2) interval -= 0x14;
+        if (diffPlayers_ > 2) interval -= 0x0A * (diffPlayers_ - 2);
         if (interval < 0x1E) interval = 0x1E;
     }
     R(ram_enemy_spawn_interval) = U8(interval);
@@ -685,6 +712,12 @@ void Battle::Sub_C2E6_main_battle_script() {
     Sub_E604_bullets_movement();
     Sub_E910_check_bullets_collision_with_bullets();
     Sub_E70C_check_bullets_collision_with_tanks();
+    if (IsVersus()) {
+        for (int t = 0; t < 2; ++t) {
+            if (teamClock_[t] != 0 && (R(ram_frm_cnt_lo) & 0x3F) == 0) --teamClock_[t];
+        }
+        VersusCheckEnd();
+    }
     // sub_E972: al recoger un item, la ROM reemplaza su direccion de retorno
     // (PLA PLA + JMP), asi que el resto del cuadro (texto de game over, sonido
     // de movimiento, vidas y paleta del agua) se saltea.
@@ -876,7 +909,7 @@ void Battle::Sub_DBF1_tank_movement() {
             run = (lo & 0x01) != 0 || (lo & 0x03) == 0;
         } else {
             const u8 f = TFLAGS(x);
-            if (R(ram_clock_timer) != 0 && (f & 0x80) && f < 0xE0 && !IsAlly(x)) {
+            if ((IsVersus() ? teamClock_[vsTeam_[x]] != 0 : R(ram_clock_timer) != 0) && (f & 0x80) && f < 0xE0 && !IsAlly(x)) {
                 run = false;                            // congelado por el reloj
             } else if ((TTYPE(x) & 0xF0) == 0xA0) {
                 run = true;                             // el rapido se mueve todos los cuadros
@@ -1013,6 +1046,10 @@ void Battle::Status_FollowTarget(int x, u8 status) {
         const int p = wide_ ? chaseTarget_[x] : (status == con_tank_flag_follow_p1 ? 0 : 1);
         DESTX = TPOSX(p);
         R(ram_enemy_destination_Y) = TPOSY(p);
+    } else if (IsVersus()) {
+        const int opp = 1 - TeamOf(x);           // batalla vs: rumbo al aguila del otro equipo
+        DESTX = spec_.vsEagleCol[opp] * 16 + 8;
+        R(ram_enemy_destination_Y) = static_cast<u8>(spec_.vsEagleRow[opp] * 16 + 8);
     } else if (IsBossLevel()) {
         DESTX = guardX_[x];                      // niveles del aguila enemiga: se queda cerca de ella
         R(ram_enemy_destination_Y) = static_cast<u8>(guardY_[x]);
@@ -1043,6 +1080,10 @@ u8 Battle::Sub_DDA2_direction_to_target(int x) {
 
 // sub_DE72 (00:DE72): selector de objetivo segun el tiempo de la etapa.
 void Battle::Sub_DE72_pick_goal(int x) {
+    if (IsVersus()) {
+        VersusPickGoal(x);
+        return;
+    }
     if (IsAlly(x)) {
         // aliado: se comporta como un enemigo (rumbo al azar o persecucion) pero su objetivo son los
         // enemigos y nunca la base
@@ -1072,9 +1113,12 @@ void Battle::Sub_DE72_pick_goal(int x) {
             return;
         }
         // defensa: un punto al azar de la zona de guardia (13 columnas por 5 filas alrededor del aguila, fuera de la fortaleza)
-        int gx = 216 + (static_cast<int>(Sub_D44D_generate_random_number() % 13) - 6) * 16;
-        int gy = 24 + static_cast<int>(Sub_D44D_generate_random_number() % 5) * 16;
-        if (gx >= 168 && gx < 264 && gy < 56) gy = 72;
+        const int ex = EagleCol() * 16 + 8, ey = EagleRow() * 16 + 8;
+        int gx = ex + (static_cast<int>(Sub_D44D_generate_random_number() % 13) - 6) * 16;
+        int gy = ey + static_cast<int>(Sub_D44D_generate_random_number() % 5) * 16;
+        if (gx >= ex - 48 && gx < ex + 48 && gy < ey + 32) gy = ey + 48;
+        gx = gx < 8 ? 8 : (gx > 424 ? 424 : gx);
+        gy = gy > 216 ? 216 : gy;
         guardX_[x] = gx;
         guardY_[x] = gy;
         Sub_E420_change_tank_status(x, con_tank_flag_follow_HQ);
@@ -1148,6 +1192,7 @@ void Battle::Status_Explosion(int x) {
         return;
     }
     // se queda sin vidas: mensaje de GAME OVER desde su lado
+    if (IsVersus()) return;                  // batalla vs: el final lo decide VersusCheckEnd
     if (wide_) {
         bool anyOther = false;
         for (int p = 0; p < nPlayers_; ++p) {
@@ -1200,28 +1245,32 @@ void Battle::Sub_E363_tank_spawn_handler(int x) {
         static const int kWidePlayerX[4] = {0x78 + 96 - 0x20, 0x78 + 96 + 0x20, 0x78 + 96 - 0x30, 0x78 + 96 + 0x30};
         TPOSX(x) = wide_ ? kWidePlayerX[x] : tbl_E47A_player_spawn_pos_X[x];
         TPOSY(x) = wide_ ? 0xD8 + ShiftY() : tbl_E47C_player_spawn_pos_Y[x];
+        if (IsVersus()) {                                // batalla vs: al lado de la propia aguila, mirando al otro equipo
+            const int t = playerTeam_[x];
+            int k = 0;
+            for (int p = 0; p < x; ++p) k += playerTeam_[p] == t ? 1 : 0;
+            const int col = spec_.vsEagleCol[t] + (t == 0 ? 2 : -2);
+            int row = spec_.vsEagleRow[t] + (k == 0 ? -1 : 1);
+            row = row < 1 ? 1 : (row > 13 ? 13 : row);
+            TPOSX(x) = col * 16 + 8;
+            TPOSY(x) = row * 16 + 8;
+        }
         STUN(x) = 0;
     } else {
         R(ram_enemy_spawn_pos_index)++;
         int y = R(ram_enemy_spawn_pos_index);
         // con 3 o 4 jugadores hay 2 puntos mas, en los laterales a mitad del mapa
         // (en los niveles del aguila: a los lados del aguila, enfrente, las dos puntas de arriba y, con 3+, los laterales)
-        const int spawnPoints = IsBossLevel() ? (nPlayers_ >= 3 ? 7 : 5) : ((wide_ && nPlayers_ >= 3) ? 5 : 3);
+        const int spawnPoints = SpawnPointCount();
         if (y == spawnPoints) {
             R(ram_enemy_spawn_pos_index) = 0;
             y = 0;
         }
         if (wide_) {
-            static const int kWideSpawnX[5] = {0x08, 0x78 + 96, 0xD8 + 192 + 0x10, 0x08, 0xD8 + 192 + 0x10};
-            // los de arriba salen en la franja de arriba del todo (y = 8) cuando esta abierta; si no, en la primera fila
-            static const int kTop = kOpenTopStrip ? 0x08 : 0x18;
-            static const int kWideSpawnY[5] = {kTop, kTop, kTop, 0x78, 0x78};
-            // niveles del aguila: a los lados y enfrente de la fortaleza, justo afuera de sus capas
-            const int gap = EagleSpawnGap();
-            const int bossX[7] = {216 - gap, 216, 216 + gap, 0x08, 0xD8 + 192 + 0x10, 0x08, 0xD8 + 192 + 0x10};
-            const int bossY[7] = {0x18, 0x18 + gap, 0x18, kTop, kTop, 0x78, 0x78};     // junto al aguila: a su altura; las puntas, arriba del todo
-            TPOSX(x) = IsBossLevel() ? bossX[y] : kWideSpawnX[y];
-            TPOSY(x) = IsBossLevel() ? bossY[y] : kWideSpawnY[y];
+            int sx, sy;
+            SpawnPointPx(y, sx, sy);
+            TPOSX(x) = sx;
+            TPOSY(x) = sy;
         } else {
             TPOSX(x) = tbl_E474_enemy_spawn_pos_X[y];
             TPOSY(x) = tbl_E477_enemy_spawn_pos_Y[y];
@@ -1236,8 +1285,202 @@ void Battle::Sub_E363_tank_spawn_handler(int x) {
     Sub_D80B_write_block_tiles_and_attribute(0x0F, TPOSX(x), TPOSY(x));   // limpia el lugar
 }
 
+// ---------------------------------------------------------------------------
+// MODO BATALLA VS
+// ---------------------------------------------------------------------------
+
+int Battle::VsEagleAt(int px, int py) const {
+    for (int t = 0; t < 2; ++t) {
+        const int x0 = spec_.vsEagleCol[t] * 16, y0 = spec_.vsEagleRow[t] * 16;
+        if (px >= x0 && px < x0 + 16 && py >= y0 && py < y0 + 16) return t;
+    }
+    return -1;
+}
+
+bool Battle::NearVsEagle(int col, int row) const {
+    for (int t = 0; t < 2; ++t) {
+        if (std::abs(col - spec_.vsEagleCol[t]) <= 1 && std::abs(row - (spec_.vsEagleRow[t] - 1)) <= 1) return true;
+    }
+    return false;
+}
+
+void Battle::DestroyVsEagle(int t) {
+    vsEagleAlive_[t] = false;
+    ++eaglesDestroyed_;
+    R(ram_sfx_explosion_hq) = 1;
+    R(ram_sfx_explosion_player) = 1;
+    DrawEagleAt(2 * spec_.vsEagleCol[t], 2 * spec_.vsEagleRow[t], true, 0);
+}
+
+// Aparecen tanques con IA de cada equipo, de a uno por punto y por turnos, hasta un maximo a la vez; la reposicion no se acaba.
+void Battle::VersusSpawnHandler() {
+    if (vsWinner_ >= 0) return;
+    const int maxAi = 2 + tier_ / 3;
+    for (int t = 0; t < 2; ++t) {
+        if (vsAiTimer_[t] > 0) { --vsAiTimer_[t]; continue; }
+        int alive = 0;
+        for (int x = nPlayers_; x <= lastEnemy_; ++x) alive += (TFLAGS(x) != 0 && vsTeam_[x] == t) ? 1 : 0;
+        if (alive >= maxAi) continue;
+        for (int x = nPlayers_; x <= lastEnemy_; ++x) {
+            if (TFLAGS(x) != 0) continue;
+            const int n = spec_.nSpawns >= 4 ? 2 : 0;
+            int px, py;
+            if (n == 2) {
+                const int i = t * 2 + (vsSpawned_[t] & 1);
+                px = spec_.spawnCol[i] * 16 + 8;
+                py = spec_.spawnRow[i] * 16 + 8;
+            } else {                                         // sin puntos propios: arriba y abajo del lado del equipo
+                px = (t == 0 ? 4 : 22) * 16 + 8;
+                py = ((vsSpawned_[t] & 1) ? 12 : 2) * 16 + 8;
+            }
+            TTYPE(x) = (vsSpawned_[t] % 4 == 3) ? 0x04 : 0;   // uno de cada cuatro lleva un item (parpadea)
+            shieldHp_[x] = 0;
+            vsTeam_[x] = t;
+            TPOSX(x) = px;
+            TPOSY(x) = py;
+            TWHEELS(x) = 0;
+            TFLAGS(x) = con_tank_flag_respawn;
+            Sub_D80B_write_block_tiles_and_attribute(0x0F, px, py);     // limpia el lugar
+            ++vsSpawned_[t];
+            const int interval = 330 - tier_ * 22;
+            vsAiTimer_[t] = interval < 120 ? 120 : interval;
+            break;
+        }
+    }
+}
+
+// Los tanques con IA van tras el tanque rival mas cercano si esta cerca y, si no, hacia la aguila del otro equipo.
+void Battle::VersusPickGoal(int x) {
+    const int t = TeamOf(x);
+    const u8 r = Sub_D44D_generate_random_number();
+    int best = -1, bestDist = 1 << 20;
+    for (int e = 0; e <= lastEnemy_; ++e) {
+        const u8 f = TFLAGS(e);
+        if (!(f & 0x80) || f >= 0xE0 || TeamOf(e) == t) continue;
+        const int d = std::abs(TankX(e) - TankX(x)) + std::abs(TankY(e) - TankY(x));
+        if (d < bestDist) { bestDist = d; best = e; }
+    }
+    if ((r & 7) == 0) {                                  // de vez en cuando, rumbo al azar
+        TFLAGS(x) = static_cast<u8>((Sub_D44D_generate_random_number() & 0x03) | con_tank_flag_A0);
+        return;
+    }
+    if (best >= 0 && bestDist < 120 && (r & 1)) {
+        chaseTarget_[x] = best;
+        Sub_E420_change_tank_status(x, con_tank_flag_follow_p1);
+        return;
+    }
+    Sub_E420_change_tank_status(x, con_tank_flag_follow_HQ);
+}
+
+// Las balas dan a los tanques del otro equipo (los del propio equipo las dejan pasar).
+void Battle::VersusCollisions() {
+    for (int b = 0; b < nBullets_; ++b) {
+        if ((BSTATUS(b) & 0xF0) != 0x40) continue;
+        const int shooterTeam = TeamOf(BulletShooter(b));
+        for (int x = 0; x <= lastEnemy_; ++x) {
+            const u8 f = TFLAGS(x);
+            if (!(f & 0x80) || f >= 0xE0 || TeamOf(x) == shooterTeam) continue;
+            if (AbsDiffX(BPOSX(b), TPOSX(x)) >= 0x0A) continue;
+            if (AbsDiff8(BPOSY(b), TPOSY(x)) >= 0x0A) continue;
+            BSTATUS(b) = 0x33;
+            const int lvl = bulletLevel_[b];
+            if (x < nPlayers_) {
+                ++playerHits_[x];
+                if (HELMET(x) != 0) {
+                    BSTATUS(b) = 0;
+                    ShieldHit(x, lvl == 3 ? 2 : 1);
+                    break;
+                }
+                if (TUPGRADE(x) != 0) {                  // un impacto quita un nivel de arma (3 -> 2); a nivel 0 destruye
+                    const int drop = lvl == 3 ? 2 : 1;
+                    TUPGRADE(x) = static_cast<u8>(TUPGRADE(x) > 0x20 * drop ? TUPGRADE(x) - 0x20 * drop : 0);
+                    TTYPE(x) = TUPGRADE(x);
+                    R(ram_sfx_bullet_hit_tank) = 1;
+                    break;
+                }
+                TFLAGS(x) = con_tank_flag_explosion + 0x03;
+                R(ram_sfx_explosion_player) = 1;
+                TUPGRADE(x) = 0;
+                TTYPE(x) = 0;
+                break;
+            }
+            if (TTYPE(x) & 0x04) {                       // el tanque con item lo suelta al ser golpeado
+                Sub_E8BE_spawn_bonus();
+                TTYPE(x) = static_cast<u8>(TTYPE(x) & 0xFB);
+            }
+            const int dmg = lvl == 3 ? 2 : 1;
+            if (wd_.hp[x] > dmg) {
+                wd_.hp[x] = static_cast<u8>(wd_.hp[x] - dmg);
+                if (((TTYPE(x) >> 5) & 3) == 3) TTYPE(x) = static_cast<u8>((TTYPE(x) & 0xFC) | (wd_.hp[x] - 1 < 3 ? wd_.hp[x] - 1 : 3));
+                R(ram_sfx_bullet_hit_tank) = 1;
+            } else {
+                TFLAGS(x) = con_tank_flag_explosion + 0x03;
+                R(ram_sfx_explosion_enemy) = 1;
+                TTYPE(x) = 0;
+            }
+            break;
+        }
+    }
+}
+
+// Pierde el equipo cuyo aguila cae o al que ya no le quedan jugadores con vidas.
+void Battle::VersusCheckEnd() {
+    if (vsWinner_ >= 0) return;
+    bool lost[2] = {!vsEagleAlive_[0], !vsEagleAlive_[1]};
+    for (int t = 0; t < 2; ++t) {
+        if (lost[t]) continue;
+        bool any = false;
+        for (int p = 0; p < nPlayers_; ++p) {
+            if (playerTeam_[p] == t && present_[p] && (LIVES(p) != 0 || TFLAGS(p) != 0)) any = true;
+        }
+        if (!any) lost[t] = true;
+    }
+    if (lost[0] && lost[1]) vsWinner_ = 2;
+    else if (lost[0]) vsWinner_ = 1;
+    else if (lost[1]) vsWinner_ = 0;
+}
+
+// Cantidad de puntos de aparicion de enemigos y su posicion (centro del bloque, en pixeles).
+int Battle::SpawnPointCount() const {
+    if (spec_.active && spec_.nSpawns > 0) return spec_.nSpawns;
+    return IsBossLevel() ? (diffPlayers_ >= 3 ? 7 : 5) : ((wide_ && diffPlayers_ >= 3) ? 5 : 3);
+}
+
+void Battle::SpawnPointPx(int y, int& sx, int& sy) const {
+    if (spec_.active && spec_.nSpawns > 0) {
+        const int i = y < 0 ? 0 : (y >= spec_.nSpawns ? spec_.nSpawns - 1 : y);
+        sx = spec_.spawnCol[i] * 16 + 8;
+        sy = spec_.spawnRow[i] * 16 + 8;
+        return;
+    }
+    static const int kWideSpawnX[5] = {0x08, 0x78 + 96, 0xD8 + 192 + 0x10, 0x08, 0xD8 + 192 + 0x10};
+    // los de arriba salen en la franja de arriba del todo (y = 8) cuando esta abierta; si no, en la primera fila
+    static const int kTop = kOpenTopStrip ? 0x08 : 0x18;
+    static const int kWideSpawnY[5] = {kTop, kTop, kTop, 0x78, 0x78};
+    // niveles del aguila: a los lados y enfrente de la fortaleza, justo afuera de sus capas
+    const int gap = EagleSpawnGap();
+    const int bossX[7] = {216 - gap, 216, 216 + gap, 0x08, 0xD8 + 192 + 0x10, 0x08, 0xD8 + 192 + 0x10};
+    const int bossY[7] = {0x18, 0x18 + gap, 0x18, kTop, kTop, 0x78, 0x78};     // junto al aguila: a su altura; las puntas, arriba del todo
+    sx = IsBossLevel() ? bossX[y] : kWideSpawnX[y];
+    sy = IsBossLevel() ? bossY[y] : kWideSpawnY[y];
+}
+
 // sub_E3B8 (00:E3B8): termina la animacion de aparicion.
 void Battle::Sub_E3B8_finish_respawn(int x) {
+    if (IsVersus()) {
+        const int dir = TeamOf(x) == 0 ? 3 : 1;          // el equipo de la izquierda mira a la derecha y al reves
+        if (x < nPlayers_) {
+            TFLAGS(x) = static_cast<u8>(0xA0 | dir);
+            HELMET(x) = 3;
+            TTYPE(x) = static_cast<u8>(TUPGRADE(x) | TTYPE(x));
+            TWHEELS(x) = 0;
+        } else {
+            TFLAGS(x) = static_cast<u8>(0xA0 | dir);
+            SetEnemyKind(x, RandomEnemyKind());          // salud y tipo segun la dificultad
+            TWHEELS(x) = 0;
+        }
+        return;
+    }
     if (IsAlly(x)) {
         static const int kAllyHp[4] = {2, 3, 4, 6};
         const int kind = allyKind_[x];
@@ -1303,6 +1546,10 @@ void Battle::Sub_E3B8_finish_respawn(int x) {
 
 // sub_DB48_enemy_spawn_handler (00:DB48)
 void Battle::Sub_DB48_enemy_spawn_handler() {
+    if (IsVersus()) {
+        VersusSpawnHandler();
+        return;
+    }
     if (R(ram_enemy_timer_before_spawn) != 0) {
         R(ram_enemy_timer_before_spawn)--;
         return;
@@ -1428,7 +1675,7 @@ bool Battle::BossAggro(int x, int& nearest) {
         const u8 f = TFLAGS(p);
         if (!(f & 0x80) || f >= 0xE0) continue;
         const int dTank = AbsDiffX(TPOSX(p), TPOSX(x)) + std::abs(static_cast<int>(TPOSY(p)) - static_cast<int>(TPOSY(x)));   // (AbsDiff8 da la vuelta a los 8 bits)
-        const int dEagle = AbsDiffX(TPOSX(p), 216) + std::abs(static_cast<int>(TPOSY(p)) - 24);
+        const int dEagle = AbsDiffX(TPOSX(p), EagleCol() * 16 + 8) + std::abs(static_cast<int>(TPOSY(p)) - (EagleRow() * 16 + 8));
         if (dTank < bestDist) { bestDist = dTank; nearest = p; }
         if (dEagle < EagleGuardRadius() || dTank < 96) aggro = true;
     }
@@ -1437,25 +1684,36 @@ bool Battle::BossAggro(int x, int& nearest) {
 
 // true si el tanque x apunta hacia la fortaleza de su aguila (bloques columnas 12-14, filas 0-1) a menos de 6 bloques.
 bool Battle::AimsAtEnemyEagle(int x) {
+    return AimsAtEagleAt(x, EagleCol(), EagleRow(), EagleLayers());
+}
+
+bool Battle::AimsAtEagleAt(int x, int col, int row, int n) {
     const int tx = TPOSX(x), ty = TPOSY(x);
-    const int n = EagleLayers();
-    const int xl = 208 - 8 * n, xr = 224 + 8 * n, yb = 32 + 8 * n;                // la fortaleza: x en [xl, xr), y en [16, yb)
+    const int xl = col * 16 - 8 * n, xr = (col + 1) * 16 + 8 * n;      // la fortaleza: x en [xl, xr), y en [yt, yb)
+    const int yt = row * 16 - 8 * n, yb = (row + 1) * 16 + 8 * n;
+    const int yLow = yt - 8 > 8 ? yt - 8 : 8;
     switch (TFLAGS(x) & 0x03) {
         case 0: return tx >= xl - 8 && tx < xr + 8 && ty >= yb && ty - yb <= 96;     // hacia arriba
-        case 1: return ty >= 8 && ty < yb + 8 && tx >= xr && tx - xr <= 96;          // hacia la izquierda
-        case 3: return ty >= 8 && ty < yb + 8 && tx < xl && xl - tx <= 96;           // hacia la derecha
+        case 1: return ty >= yLow && ty < yb + 8 && tx >= xr && tx - xr <= 96;       // hacia la izquierda
+        case 2: return tx >= xl - 8 && tx < xr + 8 && ty < yt && yt - ty <= 96;      // hacia abajo
+        case 3: return ty >= yLow && ty < yb + 8 && tx < xl && xl - tx <= 96;        // hacia la derecha
         default: return false;
     }
 }
 
 void Battle::Sub_E162_enemies_fire() {
-    if (R(ram_clock_timer) != 0) {
+    if (!IsVersus() && R(ram_clock_timer) != 0) {
         return;
     }
     for (int x = lastEnemy_; x >= nPlayers_; --x) {
         const u8 f = TFLAGS(x);
         if (!(f & 0x80) || f >= 0xE0) {
             continue;
+        }
+        if (IsVersus()) {
+            if (teamClock_[vsTeam_[x]] != 0) continue;                                    // congelado por el reloj
+            const int t = vsTeam_[x];
+            if (AimsAtEagleAt(x, spec_.vsEagleCol[t], spec_.vsEagleRow[t], spec_.vsLayers)) continue;   // no le tira a su propia aguila
         }
         if (IsBossLevel() && enemyEagleAlive_ && AimsAtEnemyEagle(x)) continue;     // no le tiran a su propia aguila
         const u8 roll = Sub_D44D_generate_random_number();
@@ -1501,12 +1759,20 @@ int Battle::Sub_E693_bullet_probe(int px, int py, int bi) {
     if ((tile & (mask | 0xF0)) == 0) {
         return 0;                                        // nada en ese cuarto
     }
+    if (IsVersus() && (tile & 0xFC) == 0xC8) {
+        const int e = VsEagleAt(px, py);
+        if (e >= 0 && vsEagleAlive_[e] && e != TeamOf(BulletShooter(bi))) DestroyVsEagle(e);   // solo la destruye el otro equipo
+        BSTATUS(bi) = 0x33;                              // la bala del propio equipo se apaga contra su aguila
+        return 0;
+    }
     if (IsBossLevel() && enemyEagleAlive_ && BulletOwner(bi) < 0 &&
-        px >= 208 - 8 * EagleLayers() && px < 224 + 8 * EagleLayers() && py >= 16 && py < 32 + 8 * EagleLayers()) {
+        px >= EagleCol() * 16 - 8 * EagleLayers() && px < (EagleCol() + 1) * 16 + 8 * EagleLayers() &&
+        py >= EagleRow() * 16 - 8 * EagleLayers() && py < (EagleRow() + 1) * 16 + 8 * EagleLayers()) {
         BSTATUS(bi) = 0x33;                              // las balas enemigas no rompen la fortaleza de su aguila
         return 0;
     }
-    if ((tile & 0xFC) == 0xC8 && IsBossLevel() && py < 0x60) {   // el aguila enemiga (arriba)
+    if ((tile & 0xFC) == 0xC8 && IsBossLevel() && px >= EagleCol() * 16 && px < (EagleCol() + 1) * 16 &&
+        py >= EagleRow() * 16 && py < (EagleRow() + 1) * 16) {   // el aguila enemiga
         if (enemyEagleAlive_ && BulletOwner(bi) >= 0) {  // solo la danan las balas de los jugadores y sus aliados
             const int lvl = bulletLevel_[bi];
             const int dmg = (lvl + 1) * (lvl >= 3 ? 2 : 1);   // como a los tanques: el nivel 3 hace doble dano
@@ -1579,6 +1845,10 @@ int Battle::Sub_E693_bullet_probe(int px, int py, int bi) {
 
 // sub_E70C (00:E70C): balas contra tanques.
 void Battle::Sub_E70C_check_bullets_collision_with_tanks() {
+    if (IsVersus()) {
+        VersusCollisions();
+        return;
+    }
     // balas enemigas contra jugadores
     for (int x = nPlayers_ - 1; x >= 0; --x) {
         const u8 f = TFLAGS(x);
@@ -1742,12 +2012,17 @@ void Battle::Sub_E70C_check_bullets_collision_with_tanks() {
 
 // sub_E910 (00:E910): las balas de jugador anulan a cualquier otra bala que toquen.
 void Battle::Sub_E910_check_bullets_collision_with_bullets() {
+    const bool vs = IsVersus();
     for (int a = nBullets_ - 1; a >= 0; --a) {
-        if (BulletOwner(a) < 0) continue;
+        if (!vs && BulletOwner(a) < 0) continue;
         if ((BSTATUS(a) & 0xF0) != 0x40) continue;
         for (int b = nBullets_ - 1; b >= 0; --b) {
             if (BulletShooter(a) == BulletShooter(b)) continue;      // la misma bala o su segunda
-            if (wide_ && (IsAllyBullet(a) || IsAllyBullet(b)) && BulletOwner(a) >= 0 && BulletOwner(b) >= 0) continue;   // las balas amigas no se anulan
+            if (vs) {
+                if (TeamOf(BulletShooter(a)) == TeamOf(BulletShooter(b))) continue;       // las balas del mismo equipo no se anulan
+            } else if (wide_ && (IsAllyBullet(a) || IsAllyBullet(b)) && BulletOwner(a) >= 0 && BulletOwner(b) >= 0) {
+                continue;                                                                   // las balas amigas no se anulan
+            }
             if ((BSTATUS(b) & 0xF0) != 0x40) continue;
             if (AbsDiffX(BPOSX(b), BPOSX(a)) >= 6) continue;
             if (AbsDiff8(BPOSY(b), BPOSY(a)) >= 6) continue;
@@ -1784,8 +2059,9 @@ void Battle::Sub_E8BE_spawn_bonus() {
     } while (R(ram_0062_bonus_timer) != 0);
     {
         static const u8 kWideBonus[8] = {0, 1, 2, 3, 4, 5, 7, 3};   // en el campo ancho una de las granadas repetidas es el item de aliados
+        static const u8 kVsBonus[8] = {0, 1, 3, 4, 5, 6, 3, 0};    // batalla vs: sin pala ni aliados
         const u8 roll = Sub_D44D_generate_random_number() & 0x07;
-        R(ram_bonus_id) = wide_ ? kWideBonus[roll] : tbl_E8FA_bonus[roll];
+        R(ram_bonus_id) = IsVersus() ? kVsBonus[roll] : (wide_ ? kWideBonus[roll] : tbl_E8FA_bonus[roll]);
     }
     R(ram_0062_bonus_timer) = 0;
 }
@@ -1815,7 +2091,7 @@ bool Battle::Sub_E972_try_to_pick_up_bonus() {
         BonusHandler(R(ram_bonus_id), x);
         return true;
     }
-    if (wide_ && (R(ram_bonus_id) & 0x80) == 0 && true) {   // los enemigos tambien agarran items
+    if (wide_ && !IsVersus() && (R(ram_bonus_id) & 0x80) == 0 && true) {   // los enemigos tambien agarran items
         for (int x = nPlayers_; x <= lastEnemy_; ++x) {
             const u8 f = TFLAGS(x);
             if (!(f & 0x80) || f >= 0xE0) continue;
@@ -1829,6 +2105,46 @@ bool Battle::Sub_E972_try_to_pick_up_bonus() {
         }
     }
     return false;
+}
+
+int Battle::ActivePlayers() const {
+    int n = 0;
+    for (int p = 0; p < nPlayers_ && p < 4; ++p) n += present_[p] ? 1 : 0;
+    return n < 1 ? 1 : n;
+}
+
+void Battle::SetPresentMask(int mask) {
+    for (int p = 0; p < nPlayers_ && p < 4; ++p) {
+        present_[p] = (mask >> p) & 1;
+        if (!present_[p]) LIVES(p) = 0;
+    }
+    diffPlayers_ = ActivePlayers();
+    static const int kTotals[4] = {20, 20, 36, 48};
+    enemyTotal_ = kTotals[diffPlayers_ - 1] * (10 + tier_) / 10;
+    SetEnemyLimitForStage();
+}
+
+void Battle::MarkPlayerGone(int p) {
+    if (p < 0 || p >= nPlayers_ || !present_[p]) return;
+    present_[p] = false;
+    LIVES(p) = 0;
+    TFLAGS(p) = 0;
+    TTYPE(p) = 0;
+    TUPGRADE(p) = 0;
+    HELMET(p) = 0;
+    STUN(p) = 0;
+    shieldHp_[p] = 0;
+    playerFreeze_[p] = 0;
+    stealTarget_[p] = -1;
+}
+
+void Battle::AddPlayerLate(int p, int color) {
+    if (p < 0 || p >= nPlayers_ || present_[p]) return;
+    present_[p] = true;
+    SetPlayerColor(p, color);
+    LIVES(p) = 3;
+    TUPGRADE(p) = 0;
+    Sub_E363_tank_spawn_handler(p);                      // aparece con la estrella de siempre
 }
 
 int Battle::ShakeX() const {
@@ -1961,7 +2277,11 @@ void Battle::StartRaid() {
                 for (int j = 0; j < k; ++j) bad = bad || pos[j] == pos[k];
                 const int col = horizontal ? pos[k] : lane;
                 const int row = horizontal ? lane : pos[k];
-                if (col >= 12 && col <= 14 && row <= 1) bad = true;
+                if (IsVersus()) {
+                    if (NearVsEagle(col, row)) bad = true;                       // ninguna bomba cerca de las dos aguilas
+                } else if (col >= EagleCol() - 1 && col <= EagleCol() + 1 && row >= EagleRow() - 2 && row <= EagleRow()) {
+                    bad = true;
+                }
             } while (bad);
         }
         std::sort(pos, pos + 3);
@@ -2004,7 +2324,7 @@ void Battle::DetonateBomb(int cx, int cy) {
             steelHp_[p] = 0;
         }
     }
-    if (eagleHit && R(ram_game_over_flag) != 0 && (R(ram_game_over_flag) & 0x80)) {
+    if (eagleHit && !IsBossLevel() && !IsVersus() && R(ram_game_over_flag) != 0 && (R(ram_game_over_flag) & 0x80)) {
         R(ram_game_over_flag) = 0x27;
         ++eaglesDestroyed_;
         R(ram_sfx_explosion_player) = 1;
@@ -2036,7 +2356,7 @@ void Battle::DetonateBomb(int cx, int cy) {
 // 2 escalones de dificultad (nivel 10: +0, 20: +1, 30: +2, 40: +3).
 void Battle::SetEnemyLimitForStage() {
     static const int kEnemiesOnScreen[5] = {4, 4, 6, 10, 12};
-    int limit = nPlayers_ + kEnemiesOnScreen[nPlayers_] - 1 + (IsBossLevel() ? tier_ / 2 : 0);
+    int limit = nPlayers_ + kEnemiesOnScreen[diffPlayers_] - 1 + (IsBossLevel() ? tier_ / 2 : 0);
     if (limit > lastEnemy_) limit = lastEnemy_;
     R(ram_enemy_limit) = static_cast<u8>(limit);
 }
@@ -2166,11 +2486,11 @@ bool Battle::ShieldHit(int x, int dmg) {
 
 // Robo de vidas: el jugador sin vidas elige (izquierda/derecha) a quien robarle una y la roba con el disparo.
 void Battle::Sub_StealLives() {
-    if (!wide_) return;
+    if (!wide_ || IsVersus()) return;
     const bool baseOk = R(ram_game_over_flag) == con_not_game_over;
     for (int p = 0; p < nPlayers_; ++p) {
-        auto eligible = [&](int d) { return d != p && d >= 0 && d < nPlayers_ && LIVES(d) >= 2; };   // al donante le queda al menos una
-        if (LIVES(p) != 0 || TFLAGS(p) != 0 || !baseOk) {
+        auto eligible = [&](int d) { return d != p && d >= 0 && d < nPlayers_ && present_[d] && LIVES(d) >= 2; };   // al donante le queda al menos una
+        if (!present_[p] || LIVES(p) != 0 || TFLAGS(p) != 0 || !baseOk) {
             stealTarget_[p] = -1;
             continue;
         }
@@ -2211,9 +2531,16 @@ void Battle::BonusHandler(int id, int x) {
             if (wide_) shieldHp_[x] = 5;                 // aguanta 5 puntos de disparos
             break;
         case 1:                                          // reloj
+            if (IsVersus()) {                            // congela al otro equipo (sus tanques con IA y a sus jugadores)
+                const int opp = 1 - playerTeam_[x];
+                teamClock_[opp] = 0x0A;
+                for (int p = 0; p < nPlayers_; ++p) if (playerTeam_[p] == opp) playerFreeze_[p] = (0x0A * 64) / 2;
+                break;
+            }
             R(ram_clock_timer) = 0x0A;
             break;
         case 2:                                          // pala
+            if (IsVersus()) break;
             if ((R(ram_game_over_flag) & 0x80) && !IsBossLevel()) {
                 Sub_CB9E_draw_protected_base();
                 R(ram_shovel_timer) = 0x14;
@@ -2229,6 +2556,7 @@ void Battle::BonusHandler(int id, int x) {
             R(ram_sfx_explosion_enemy) = 1;
             for (int y = lastEnemy_; y >= nPlayers_; --y) {
                 const u8 f = TFLAGS(y);
+                if (IsVersus() && vsTeam_[y] == playerTeam_[x]) continue;      // batalla vs: solo revienta a los tanques del otro equipo
                 if ((f & 0x80) && f < 0xE0) {
                     TFLAGS(y) = con_tank_flag_explosion + 0x03;
                     TTYPE(y) = 0;
@@ -2249,7 +2577,7 @@ void Battle::BonusHandler(int id, int x) {
             TTYPE(x) = 0x60;
             break;
         case 7:
-            SpawnAllies(x);                              // aliados con IA (extension del campo ancho)
+            if (!IsVersus()) SpawnAllies(x);             // aliados con IA (extension del campo ancho)
             break;
         default:
             break;
@@ -2475,6 +2803,9 @@ void Battle::Sub_DEB8_tank_handler(int x) {
     u8 palette;
     if (IsAlly(x)) {
         palette = PlayerPalette(allyOwner_[x]);          // sprite de enemigo, color del jugador que agarro el item
+    } else if (x >= nPlayers_ && IsVersus()) {
+        const u8 own = kColorAttr[kTeamColor[vsTeam_[x] & 1]];
+        palette = ((TTYPE(x) & 0x04) && ((R(ram_frm_cnt_lo) >> 3) & 0x01)) ? u8(3) : own;      // el que lleva un item parpadea
     } else if (x >= nPlayers_) {
         if (TTYPE(x) & 0x04) {
             palette = U8(((R(ram_frm_cnt_lo) >> 3) & 0x01) + 2);
@@ -2498,7 +2829,8 @@ void Battle::Sub_E0D8_bullets_status_handler() {
         const u8 st = BSTATUS(x);
         switch (st >> 4) {
             case 0x4:                                    // ofs_003_E0FB
-                R(0x0004) = (wide_ && BulletOwner(x) >= 0) ? PlayerPalette(BulletOwner(x)) : 2;   // campo ancho: la bala lleva el color de su jugador
+                R(0x0004) = IsVersus() ? kColorAttr[kTeamColor[TeamOf(BulletShooter(x)) & 1]]
+                                       : ((wide_ && BulletOwner(x) >= 0) ? PlayerPalette(BulletOwner(x)) : 2);   // campo ancho: la bala lleva el color de su jugador
                 R(ram_0053_t01_spr_T) = 0xB1;
                 Sub_DA64_display_bullet_sprite(st & 0x03, BPOSX(x), BPOSY(x));
                 break;
@@ -2638,6 +2970,7 @@ void Battle::SpawnAllies(int owner) {
 }
 
 bool Battle::StageCleared() const {
+    if (IsVersus()) return false;
     if (IsBossLevel()) {
         return !enemyEagleAlive_ && R(ram_game_over_flag) == con_not_game_over;   // solo se gana destruyendo el aguila enemiga
     }
@@ -2652,8 +2985,9 @@ bool Battle::StageCleared() const {
 
 void Battle::NextStage(int level, const u8 blocks[kWideBlocksY][kWideBlocksX], const u8* strip) {
     SetLevel(level);
+    diffPlayers_ = ActivePlayers();                  // la dificultad sigue a los jugadores presentes al empezar el nivel
     static const int kTotals[4] = {20, 20, 36, 48};
-    enemyTotal_ = kTotals[nPlayers_ - 1] * (10 + tier_) / 10;
+    enemyTotal_ = kTotals[diffPlayers_ - 1] * (10 + tier_) / 10;
     R(ram_stage) = U8(level > 35 ? 35 : level);
     SetEnemyLimitForStage();
     LoadWideStage(blocks, strip);
@@ -2688,6 +3022,7 @@ void Battle::AddBonusPoints(int p, u8 hundreds) {
 }
 
 bool Battle::GameOver() const {
+    if (IsVersus()) return false;                       // la batalla vs termina con VersusWinner
     if (R(ram_game_over_flag) == 0) {
         return true;                                    // la base se destruyo y termino la cuenta regresiva
     }
@@ -2770,7 +3105,28 @@ uint32_t Battle::StateHash() const {
     mix(bulletLevel_, sizeof bulletLevel_);
     mix(shieldHp_, sizeof shieldHp_);
     mixInt(enemyTotal_);
+    mixInt(diffPlayers_);
+    for (int i = 0; i < 4; ++i) mixInt(present_[i] ? 1 : 0);
+    for (int i = 0; i < 4; ++i) mixInt(playerColor_[i]);
     mixInt(level_);
+    if (IsVersus()) {
+        mixInt(vsWinner_ + 1);
+        mixInt((vsEagleAlive_[0] ? 1 : 0) + (vsEagleAlive_[1] ? 2 : 0));
+        for (int i = 0; i < 4; ++i) mixInt(playerTeam_[i]);
+        mixInt(teamClock_[0]);
+        mixInt(teamClock_[1]);
+        for (int i = nPlayers_; i <= lastEnemy_; ++i) mixInt(vsTeam_[i]);
+    }
+    if (spec_.active) {                                     // niveles hechos a mano: que todos tengan la misma ficha
+        mixInt(spec_.boss ? 1 : 0);
+        mixInt(spec_.tier);
+        mixInt(spec_.rank);
+        mixInt(spec_.eagleCol * 64 + spec_.eagleRow);
+        mixInt(spec_.nSpawns);
+        for (int i = 0; i < spec_.nSpawns; ++i) mixInt(spec_.spawnCol[i] * 64 + spec_.spawnRow[i]);
+        mixInt(spec_.versus ? 1 + spec_.vsLayers : 0);
+        for (int t = 0; t < 2; ++t) mixInt(spec_.vsEagleCol[t] * 64 + spec_.vsEagleRow[t]);
+    }
     mixInt(enemyEagleAlive_ ? enemyEagleHp_ + 1 : 0);
     mixInt(bomb_.phase);
     mixInt(bomb_.countdown);

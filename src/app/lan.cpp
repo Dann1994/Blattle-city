@@ -89,7 +89,7 @@ bool ReadHex(const std::string& s, size_t pos, int n, uint8_t* out) {
 int ToInt(const std::string& s, int def = 0) { return s.empty() ? def : std::atoi(s.c_str()); }
 
 constexpr double kMemberTimeout = 6.0;
-constexpr int kMaxFramesPerPacket = 24;
+constexpr int kMaxFramesPerPacket = 100;
 
 } // namespace
 
@@ -111,7 +111,9 @@ struct Lan::Impl {
         int ack = 0;                       // cuadros recibidos por esa PC (sin huecos)
         bool active = true;
         int bit = 0;                       // bit de esta PC en la mascara de cuadros (se fija al empezar)
-        std::vector<int> players;          // sus jugadores (se fija al empezar)
+        std::vector<int> players;          // sus jugadores (se fija al empezar o al entrar)
+        bool inGame = true;                // false: espectador que todavia no entro a la partida en marcha
+        int joinFrame = 0;                 // primer cuadro en que se le piden botones
     };
 
     SOCKET sock = INVALID_SOCKET;
@@ -119,6 +121,8 @@ struct Lan::Impl {
     sockaddr_in hostAddr{};                // miembro: direccion del anfitrion
     std::vector<Member> members;           // anfitrion: las demas PC
     int nextId = 1;
+    int slotJoinFrame[4] = {-1, -1, -1, -1};    // anfitrion: cuadro en que entra el jugador de ese lugar (-1: ninguno)
+    int slotJoinColor[4] = {0, 0, 0, 0};
     double lastLobby = 0, lastSearch = 0, lastBeat = 0, lastHeard = 0, joinStart = 0, lastJoin = 0;
     // miembro: lo que pidio cada jugador local (se reenvia unos segundos hasta que el anfitrion lo confirme)
     int wantColor[4] = {0, 0, 0, 0};
@@ -289,23 +293,47 @@ std::string Lan::UniqueName(const std::string& base) const {
 
 // Anfitrion: crea el jugador k de la PC `ownerId` (el primero con su nombre; los otros con un numero).
 int Lan::AddPlayerFor(int ownerId, const std::string& base, int k) {
-    if (static_cast<int>(players_.size()) >= kMaxPlayers) return -1;
+    int slot = -1;
+    for (size_t i = 0; i < owners_.size(); ++i) {                        // con la partida en marcha se reusa un lugar libre
+        if (owners_[i] < 0) { slot = static_cast<int>(i); break; }
+    }
+    if (slot < 0 && static_cast<int>(players_.size()) >= kMaxPlayers) return -1;
     std::string name = base;
     if (k > 0) name = CleanName(base.substr(0, static_cast<size_t>(kMaxName - 2))) + " " + std::to_string(k + 1);
     name = UniqueName(name);
-    players_.push_back(name);
-    colors_.push_back(FirstFreeColor());
-    ready_.push_back(false);
-    owners_.push_back(ownerId);
-    return static_cast<int>(players_.size()) - 1;
+    if (slot < 0) {
+        players_.push_back(name);
+        colors_.push_back(FirstFreeColor());
+        ready_.push_back(false);
+        owners_.push_back(ownerId);
+        return static_cast<int>(players_.size()) - 1;
+    }
+    players_[static_cast<size_t>(slot)] = name;
+    colors_[static_cast<size_t>(slot)] = FirstFreeColor();
+    ready_[static_cast<size_t>(slot)] = false;
+    owners_[static_cast<size_t>(slot)] = ownerId;
+    return slot;
 }
 
 void Lan::RemovePlayerAt(int index) {
     if (index < 0 || static_cast<size_t>(index) >= players_.size()) return;
+    if (started_) {                                                      // en partida el lugar queda libre (no se corren los demas)
+        players_[static_cast<size_t>(index)].clear();
+        colors_[static_cast<size_t>(index)] = -1;
+        ready_[static_cast<size_t>(index)] = false;
+        owners_[static_cast<size_t>(index)] = -1;
+        return;
+    }
     players_.erase(players_.begin() + index);
     colors_.erase(colors_.begin() + index);
     ready_.erase(ready_.begin() + index);
     owners_.erase(owners_.begin() + index);
+}
+
+int Lan::PresentPlayers() const {
+    int n = 0;
+    for (int o : owners_) n += o >= 0 ? 1 : 0;
+    return n;
 }
 
 void Lan::RemovePlayersOf(int ownerId) {
@@ -375,6 +403,8 @@ bool Lan::Join(const LanGame& game, const std::string& myName) {
     mine_.clear();
     started_ = false;
     lost_ = false;
+    lateJoiner_ = false;
+    seenLobby_ = false;
     return true;
 }
 
@@ -405,6 +435,10 @@ void Lan::Leave() {
     mine_.clear();
     state_ = State::Idle;
     started_ = false;
+    lateJoiner_ = false;
+    seenLobby_ = false;
+    startMask_ = 0;
+    for (int i = 0; i < 4; ++i) { startColors_[i] = i; impl_->slotJoinFrame[i] = -1; }
     desync_ = false;
     lost_ = false;
     myId_ = 0;
@@ -412,7 +446,8 @@ void Lan::Leave() {
 
 std::string Lan::LobbyMessage(bool started) const {
     std::ostringstream os;
-    os << "BCNES1L|" << (started ? 1 : 0) << "|" << friendly_ << "|" << inputDelay_ << "|" << players_.size();
+    os << "BCNES1L|" << (started ? 1 : 0) << "|" << friendly_ << "|" << inputDelay_ << "|" << startMask_ << "|"
+       << startColors_[0] << startColors_[1] << startColors_[2] << startColors_[3] << "|" << players_.size();
     for (size_t i = 0; i < players_.size(); ++i) {
         os << "|" << players_[i] << "|" << colors_[i] << "|" << (ready_[i] ? 1 : 0) << "|" << owners_[i];
     }
@@ -421,7 +456,7 @@ std::string Lan::LobbyMessage(bool started) const {
 
 // Miembro: avisa al anfitrion como esta mi jugador local k (color y listo).
 void Lan::SendChoice(int k) {
-    if (state_ != State::Joined || started_ || k < 0 || static_cast<size_t>(k) >= mine_.size()) return;
+    if (state_ != State::Joined || (started_ && !lateJoiner_) || k < 0 || static_cast<size_t>(k) >= mine_.size()) return;
     const size_t p = static_cast<size_t>(mine_[static_cast<size_t>(k)]);
     if (p >= colors_.size()) return;
     const bool useWant = impl_->wantUntil[k] > Now();
@@ -431,7 +466,7 @@ void Lan::SendChoice(int k) {
 }
 
 bool Lan::AddLocalPlayer() {
-    if (started_ || static_cast<int>(players_.size()) >= kMaxPlayers) return false;
+    if ((started_ && !lateJoiner_) || PresentPlayers() >= kMaxPlayers) return false;
     if (state_ == State::Hosting) {
         if (AddPlayerFor(0, myName_, LocalCount()) < 0) return false;
         RecomputeMine();
@@ -442,10 +477,21 @@ bool Lan::AddLocalPlayer() {
     const int k = LocalCount();
     const int color = FirstFreeColor();
     std::string name = CleanName(myName_.substr(0, static_cast<size_t>(kMaxName - 2))) + " " + std::to_string(k + 1);
-    players_.push_back(UniqueName(name));                  // se ve enseguida; el anfitrion confirma
-    colors_.push_back(color);
-    ready_.push_back(false);
-    owners_.push_back(myId_);
+    {
+        int slot = -1;
+        for (size_t i = 0; i < owners_.size(); ++i) if (owners_[i] < 0) { slot = static_cast<int>(i); break; }
+        if (slot < 0) {                                    // se ve enseguida; el anfitrion confirma
+            players_.push_back(UniqueName(name));
+            colors_.push_back(color);
+            ready_.push_back(false);
+            owners_.push_back(myId_);
+        } else {
+            players_[static_cast<size_t>(slot)] = UniqueName(name);
+            colors_[static_cast<size_t>(slot)] = color;
+            ready_[static_cast<size_t>(slot)] = false;
+            owners_[static_cast<size_t>(slot)] = myId_;
+        }
+    }
     RecomputeMine();
     impl_->wantColor[k] = color;
     impl_->wantReady[k] = false;
@@ -455,7 +501,7 @@ bool Lan::AddLocalPlayer() {
 }
 
 void Lan::RemoveLocalPlayer(int k) {
-    if (started_ || k < 1 || static_cast<size_t>(k) >= mine_.size()) return;
+    if ((started_ && !lateJoiner_) || k < 1 || static_cast<size_t>(k) >= mine_.size()) return;
     const int index = mine_[static_cast<size_t>(k)];
     RemovePlayerAt(index);
     RecomputeMine();
@@ -467,7 +513,7 @@ void Lan::RemoveLocalPlayer(int k) {
 }
 
 void Lan::CycleColor(int k, int direction) {
-    if (started_ || (state_ != State::Hosting && state_ != State::Joined)) return;
+    if ((started_ && !lateJoiner_) || (state_ != State::Hosting && state_ != State::Joined)) return;
     if (k < 0 || static_cast<size_t>(k) >= mine_.size()) return;
     const int p = mine_[static_cast<size_t>(k)];
     int c = colors_[static_cast<size_t>(p)];
@@ -488,7 +534,7 @@ void Lan::CycleColor(int k, int direction) {
 }
 
 void Lan::ToggleReady(int k) {
-    if (started_ || (state_ != State::Hosting && state_ != State::Joined)) return;
+    if ((started_ && !lateJoiner_) || (state_ != State::Hosting && state_ != State::Joined)) return;
     if (k < 0 || static_cast<size_t>(k) >= mine_.size()) return;
     const size_t p = static_cast<size_t>(mine_[static_cast<size_t>(k)]);
     ready_[p] = !ready_[p];
@@ -511,9 +557,16 @@ bool Lan::StartGame(int friendlyFire) {
     inputDelay_ = internetWanted_ ? kOnlineInputDelay : kInputDelay;     // por internet hace falta mas colchon
     impl_->hostPlayers = PlayersOf(0);
     impl_->localCount = static_cast<int>(impl_->hostPlayers.size());
+    startMask_ = 0;
+    for (int i = 0; i < 4; ++i) {
+        startColors_[i] = static_cast<size_t>(i) < colors_.size() && colors_[static_cast<size_t>(i)] >= 0 ? colors_[static_cast<size_t>(i)] : i;
+        if (static_cast<size_t>(i) < owners_.size() && owners_[static_cast<size_t>(i)] >= 0) startMask_ |= 1 << i;
+    }
     int bit = 1;
     for (auto& m : impl_->members) {
         m.active = true;
+        m.inGame = true;
+        m.joinFrame = 0;
         m.bit = bit++;
         m.players = PlayersOf(m.id);
         m.ack = 0;
@@ -528,6 +581,11 @@ bool Lan::StartGame(int friendlyFire) {
     impl_->submitted = inputDelay_;
     for (const auto& m : impl_->members) impl_->Send(m.addr, LobbyMessage(true));    // avisa enseguida
     return true;
+}
+
+int Lan::FramesAvailable() const {
+    if (!started_) return 0;
+    return state_ == State::Hosting ? impl_->broadcastNext : impl_->contiguous;
 }
 
 bool Lan::FrameReady(int f) const {
@@ -554,9 +612,8 @@ void Lan::SubmitLocal(int simFrame, const uint8_t* buttons, int count) {
             }
             impl_->have[f] = static_cast<uint8_t>(impl_->have[f] | 1);
         } else {
-            const size_t n = static_cast<size_t>(std::max(1, impl_->localCount));
-            if (impl_->own.size() < (f + 1) * n) impl_->own.resize((f + 1) * n, 0);
-            for (size_t k = 0; k < n; ++k) impl_->own[f * n + k] = static_cast<int>(k) < count ? buttons[k] : 0;
+            if (impl_->own.size() < (f + 1) * 4) impl_->own.resize((f + 1) * 4, 0);                  // 4 bytes por cuadro
+            for (size_t k = 0; k < 4; ++k) impl_->own[f * 4 + k] = static_cast<int>(k) < count ? buttons[k] : 0;
         }
         ++impl_->submitted;
     }
@@ -696,11 +753,12 @@ void Lan::Update() {
                 } else if (member) {                                        // ya estaba: repite la bienvenida
                     member->lastSeen = now;
                     impl_->Send(from, "BCNES1W|" + std::to_string(member->id));
-                } else if (started_ || static_cast<int>(players_.size()) >= kMaxPlayers) {
+                } else if (PresentPlayers() >= kMaxPlayers || (started_ && noLateJoin_)) {
                     impl_->Send(from, "BCNES1F");
                 } else {
                     Impl::Member m;
                     m.addr = from;
+                    m.inGame = !started_;                                    // con la partida en marcha entra mirando hasta tocar "listo"
                     m.id = impl_->nextId++;
                     m.baseName = CleanName(f[1]);
                     if (m.baseName.empty()) m.baseName = "JUGADOR";
@@ -719,9 +777,13 @@ void Lan::Update() {
                         RecomputeMine();
                         impl_->lastLobby = 0;
                     } else {
-                        member->active = false;
+                        const int id = member->id;                                     // en partida: sus lugares quedan libres
+                        RemovePlayersOf(id);
+                        impl_->members.erase(impl_->members.begin() + (member - impl_->members.data()));
+                        impl_->lastLobby = 0;
+                        (void)id;
                     }
-                } else if (kind == 'P' && f.size() >= 4 && !started_) {
+                } else if (kind == 'P' && f.size() >= 4 && (!started_ || !member->inGame)) {
                     const int k = ToInt(f[1], -1);
                     std::vector<int> owned = PlayersOf(member->id);
                     int p = -1;
@@ -734,7 +796,7 @@ void Lan::Update() {
                     }
                     RecomputeMine();
                     impl_->lastLobby = 0;
-                } else if (kind == 'R' && f.size() >= 2 && !started_) {
+                } else if (kind == 'R' && f.size() >= 2 && (!started_ || !member->inGame)) {
                     const int k = ToInt(f[1], -1);
                     std::vector<int> owned = PlayersOf(member->id);
                     if (k >= 1 && static_cast<size_t>(k) < owned.size()) {
@@ -743,20 +805,23 @@ void Lan::Update() {
                         impl_->lastLobby = 0;
                     }
                 } else if (kind == 'I' && f.size() >= 4 && started_) {
-                    const size_t per = std::max<size_t>(1, member->players.size());
                     member->ack = std::max(member->ack, ToInt(f[1]));
-                    const int f0 = ToInt(f[2]);
-                    for (size_t k = 0; (k + 1) * per * 2 <= f[3].size(); ++k) {
-                        uint8_t b[4] = {0, 0, 0, 0};
-                        if (!ReadHex(f[3], k * per * 2, static_cast<int>(per), b)) break;
-                        const size_t fr = static_cast<size_t>(f0) + k;
-                        if (f0 < 0 || fr > 1000000) break;
-                        impl_->EnsureFrame(fr);
-                        if (!(impl_->have[fr] & (1 << member->bit))) {
-                            for (size_t q = 0; q < member->players.size() && q < 4; ++q) {
-                                impl_->in[fr][static_cast<size_t>(member->players[q])] = b[q];
+                    if (member->inGame) {
+                        const size_t per = std::max<size_t>(1, member->players.size());
+                        const int f0 = ToInt(f[2]);
+                        for (size_t k = 0; (k + 1) * per * 2 <= f[3].size(); ++k) {
+                            uint8_t b[4] = {0, 0, 0, 0};
+                            if (!ReadHex(f[3], k * per * 2, static_cast<int>(per), b)) break;
+                            const size_t fr = static_cast<size_t>(f0) + k;
+                            if (f0 < 0 || fr > 1000000) break;
+                            if (static_cast<int>(fr) < member->joinFrame) continue;           // antes de entrar no se le piden botones
+                            impl_->EnsureFrame(fr);
+                            if (!(impl_->have[fr] & (1 << member->bit))) {
+                                for (size_t q = 0; q < member->players.size() && q < 4; ++q) {
+                                    impl_->in[fr][static_cast<size_t>(member->players[q])] = static_cast<uint8_t>(b[q] & ~0x0C);   // sin marcas ni Start
+                                }
+                                impl_->have[fr] = static_cast<uint8_t>(impl_->have[fr] | (1 << member->bit));
                             }
-                            impl_->have[fr] = static_cast<uint8_t>(impl_->have[fr] | (1 << member->bit));
                         }
                     }
                 } else if (kind == 'K' && f.size() >= 3) {
@@ -811,23 +876,32 @@ void Lan::Update() {
                     lost_ = true;
                     state_ = State::Closed;
                     error_ = "EL ANFITRIÓN CERRÓ LA PARTIDA";
-                } else if (kind == 'L' && f.size() >= 5 && state_ == State::Joined) {
+                } else if (kind == 'L' && f.size() >= 7 && state_ == State::Joined) {
+                    const bool wasStarted = started_;
                     started_ = started_ || f[1] == "1";
+                    if (f[1] != "1") seenLobby_ = true;
                     friendly_ = ToInt(f[2]);
                     inputDelay_ = std::max(2, std::min(20, ToInt(f[3], kInputDelay)));
-                    const int cnt = ToInt(f[4]);
+                    startMask_ = ToInt(f[4]) & 0x0F;
+                    for (int i = 0; i < 4 && i < static_cast<int>(f[5].size()); ++i) startColors_[i] = std::max(0, std::min(kColorCount - 1, f[5][static_cast<size_t>(i)] - '0'));
+                    const int cnt = ToInt(f[6]);
                     players_.clear();
                     colors_.clear();
                     ready_.clear();
                     owners_.clear();
-                    for (int i = 0; i < cnt && static_cast<size_t>(5 + i * 4 + 3) < f.size(); ++i) {
-                        const size_t b = static_cast<size_t>(5 + i * 4);
+                    for (int i = 0; i < cnt && static_cast<size_t>(7 + i * 4 + 3) < f.size(); ++i) {
+                        const size_t b = static_cast<size_t>(7 + i * 4);
                         players_.push_back(f[b]);
-                        colors_.push_back(std::max(0, std::min(kColorCount - 1, ToInt(f[b + 1]))));
+                        colors_.push_back(std::max(-1, std::min(kColorCount - 1, ToInt(f[b + 1]))));
                         ready_.push_back(f[b + 2] == "1");
                         owners_.push_back(ToInt(f[b + 3]));
                     }
                     RecomputeMine();
+                    if (started_ && !wasStarted) {                          // llegue con la partida en marcha si no estaba entre los del principio
+                        bool inMask = false;
+                        for (int p : mine_) inMask = inMask || ((startMask_ >> p) & 1);
+                        lateJoiner_ = !inMask;
+                    }
                     if (!players_.empty()) hostName_ = players_[0];
                     if (started_ && impl_->in.empty()) {                    // empieza: los primeros cuadros van vacios
                         for (int fr = 0; fr < inputDelay_; ++fr) {
@@ -874,41 +948,77 @@ void Lan::Update() {
                     impl_->lastLobby = 0;
                     continue;
                 }
-                m.active = false;                                          // en partida: sus botones pasan a ser 0
+                RemovePlayersOf(m.id);                                     // en partida: sus lugares quedan libres (marca de "se fue")
+                impl_->members.erase(impl_->members.begin() + static_cast<long>(i));
+                impl_->lastLobby = 0;
+                continue;
             }
             ++i;
         }
-        if (!started_) {
-            if (now - impl_->lastLobby > 0.5) {
-                impl_->lastLobby = now;
-                const std::string msg = LobbyMessage(false);
-                for (const auto& m : impl_->members) impl_->Send(m.addr, msg);
+        if (now - impl_->lastLobby > 0.5) {
+            impl_->lastLobby = now;
+            const std::string msg = LobbyMessage(started_);
+            for (const auto& m : impl_->members) impl_->Send(m.addr, msg);
+        }
+        if (started_) {
+            // un espectador que ya eligio color, esta "listo" y ya se puso al dia entra en un cuadro futuro
+            for (auto& m : impl_->members) {
+                if (m.inGame || !m.active) continue;
+                const std::vector<int> mine = PlayersOf(m.id);
+                bool allReady = !mine.empty();
+                for (int p : mine) allReady = allReady && ready_[static_cast<size_t>(p)];
+                if (!allReady || m.ack < impl_->broadcastNext - 3) continue;
+                int usedBits = 0;
+                for (const auto& o : impl_->members) if (o.inGame) usedBits |= 1 << o.bit;
+                int bit = 1;
+                while (bit < 8 && (usedBits & (1 << bit))) ++bit;
+                if (bit >= 8) continue;
+                const int joinAt = impl_->broadcastNext + inputDelay_ + 4;
+                for (size_t fr = static_cast<size_t>(impl_->broadcastNext); fr < impl_->have.size(); ++fr) impl_->have[fr] = static_cast<uint8_t>(impl_->have[fr] & ~(1 << bit));
+                m.inGame = true;
+                m.bit = bit;
+                m.joinFrame = joinAt;
+                m.players = mine;
+                for (int p : mine) {
+                    impl_->slotJoinFrame[p] = joinAt;
+                    impl_->slotJoinColor[p] = std::max(0, colors_[static_cast<size_t>(p)]);
+                }
             }
-        } else {
-            // cuadros completos: los de todas las PC activas
-            uint8_t need = 1;
-            for (const auto& m : impl_->members) {
-                if (m.active) need = static_cast<uint8_t>(need | (1 << m.bit));
-            }
-            while (static_cast<size_t>(impl_->broadcastNext) < impl_->in.size() &&
-                   (impl_->have[static_cast<size_t>(impl_->broadcastNext)] & need) == need) {
+            // cuadros completos: los de todas las PC que ya estan en la partida (las que entran, desde su cuadro)
+            while (static_cast<size_t>(impl_->broadcastNext) < impl_->in.size()) {
+                const int f = impl_->broadcastNext;
+                uint8_t need = 1;
+                for (const auto& m : impl_->members) {
+                    if (m.inGame && f >= m.joinFrame) need = static_cast<uint8_t>(need | (1 << m.bit));
+                }
+                if ((impl_->have[static_cast<size_t>(f)] & need) != need) break;
+                for (int s = 0; s < 4; ++s) {                              // marcas de los que se fueron y de los que entran
+                    if (static_cast<size_t>(s) < owners_.size() && owners_[static_cast<size_t>(s)] < 0) impl_->in[static_cast<size_t>(f)][static_cast<size_t>(s)] = kGoneMark;
+                    if (impl_->slotJoinFrame[s] == f) {
+                        impl_->in[static_cast<size_t>(f)][static_cast<size_t>(s)] = static_cast<uint8_t>(0x04 | (impl_->slotJoinColor[s] << 4));
+                        impl_->slotJoinFrame[s] = -1;
+                    }
+                }
                 ++impl_->broadcastNext;
             }
-            // manda a cada PC los cuadros que le faltan
+            // manda a cada PC los cuadros que le faltan (los que llegan tarde reciben el historial en varios paquetes)
             for (auto& m : impl_->members) {
                 if (!m.active) continue;
-                const int first = std::max(0, m.ack);
-                const int cnt = std::min(impl_->broadcastNext - first, kMaxFramesPerPacket);
-                if (cnt <= 0) continue;
-                std::ostringstream os;
-                os << "BCNES1G|" << first << "|" << cnt << "|";
-                for (int k = 0; k < cnt; ++k) {
-                    for (int s = 0; s < 4; ++s) os << Hex(impl_->in[static_cast<size_t>(first + k)][static_cast<size_t>(s)]);
+                int first = std::max(0, m.ack);
+                for (int packet = 0; packet < 4; ++packet) {
+                    const int cnt = std::min(impl_->broadcastNext - first, kMaxFramesPerPacket);
+                    if (cnt <= 0) break;
+                    std::ostringstream os;
+                    os << "BCNES1G|" << first << "|" << cnt << "|";
+                    for (int k = 0; k < cnt; ++k) {
+                        for (int s = 0; s < 4; ++s) os << Hex(impl_->in[static_cast<size_t>(first + k)][static_cast<size_t>(s)]);
+                    }
+                    impl_->Send(m.addr, os.str());
+                    first += cnt;
                 }
-                impl_->Send(m.addr, os.str());
             }
-            if (desync_ && now - impl_->lastLobby > 1.0) {
-                impl_->lastLobby = now;
+            if (desync_ && now - impl_->lastBeat > 1.0) {
+                impl_->lastBeat = now;
                 for (const auto& m : impl_->members) impl_->Send(m.addr, "BCNES1D");
             }
         }
@@ -941,13 +1051,13 @@ void Lan::Update() {
             // mis botones de los cuadros que el anfitrion todavia no me confirmo
             const int first = impl_->contiguous;
             const int cnt = std::min(impl_->submitted - first, kMaxFramesPerPacket);
-            const size_t per = static_cast<size_t>(std::max(1, impl_->localCount));
+            const size_t per = static_cast<size_t>(std::max(1, LocalCount()));
             if (cnt > 0) {
                 std::ostringstream os;
                 os << "BCNES1I|" << impl_->contiguous << "|" << first << "|";
                 for (int k = 0; k < cnt; ++k) {
                     const size_t fr = static_cast<size_t>(first + k);
-                    for (size_t q = 0; q < per; ++q) os << Hex(fr * per + q < impl_->own.size() ? impl_->own[fr * per + q] : 0);
+                    for (size_t q = 0; q < per; ++q) os << Hex(fr * 4 + q < impl_->own.size() ? impl_->own[fr * 4 + q] : 0);
                 }
                 impl_->Send(impl_->hostAddr, os.str());
             }

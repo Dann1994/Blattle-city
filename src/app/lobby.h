@@ -22,6 +22,12 @@ public:
     // Cambia el color al siguiente (+1) o anterior (-1) entre los que no usa otro jugador.
     void CycleColor(int slot, int direction);
 
+    // MODO BATALLA VS: cada jugador esta en el equipo 0 o 1 (por defecto alternados) y lo cambia con arriba/abajo.
+    int Team(int slot) const { return team_[slot & 3]; }
+    static int TeamColor(int team) { return team ? 3 : 0; }      // amarillo y rojo
+    void ToggleTeam(int slot) { if (slot >= 0 && slot < 4 && joined_[slot]) team_[slot] ^= 1; }
+    int TeamCount(int team) const;
+    bool VersusReady() const;                   // los dos equipos con 1 o 2 jugadores
     bool Joined(int slot) const { return joined_[slot]; }
     int Color(int slot) const { return color_[slot]; }
     bool ColorTaken(int color, int exceptSlot) const;
@@ -32,6 +38,7 @@ public:
 private:
     bool joined_[4] = {false, false, false, false};
     int color_[4] = {0, 1, 2, 3};
+    int team_[4] = {0, 1, 0, 1};
 };
 
 // Reparto automatico de mandos: cada mando conectado (ids 0-3) se asigna al primer jugador

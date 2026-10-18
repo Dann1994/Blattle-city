@@ -14,6 +14,7 @@
 
 #include "../nes/battle.h"
 #include "flow.h"
+#include "levels.h"
 
 namespace app {
 
@@ -24,6 +25,8 @@ struct HudInfo {
     std::vector<std::string> pauseItems;   // menu de pausa (vacio = no se muestra)
     int pauseSelected = 0;
     int curtain = 0;                       // filas (0..15) de cortina gris tapadas arriba y abajo
+    std::string introText;                 // en lugar del "STAGE N" de la cortina (por ejemplo "BATALLA VS")
+    std::string introPrompt;               // segunda linea bajo el STAGE N (por ejemplo "APRETA START")
     std::string introSubtitle;             // texto bajo el STAGE N de la cortina (niveles del aguila enemiga)
     int introLevel = 0;                    // numero que muestra la cortina cerrada
     std::string banner;                    // cartel centrado (por ejemplo "NIVEL 3 COMPLETADO")
@@ -62,6 +65,43 @@ struct LobbyView {
     std::string note;
     std::string meLine2[4];                 // segunda linea de ayuda en cada casilla propia (por ejemplo "F LISTO")
     std::string addHint;                    // como sumar otro jugador de esta PC
+    std::string title;                      // titulo propio (si esta vacio, el de siempre)
+    std::string tag[4];                     // en lugar del nombre del color (por ejemplo "EQUIPO 1")
+};
+
+
+// Editor de niveles: lo que hay que dibujar (lo arma LevelEditor::BuildView).
+constexpr int kEditorBarH = 30;                      // alto de la barra de herramientas
+constexpr int kEditorToolX[3] = {4, 62, 148};         // x de cada herramienta en la barra
+constexpr int kEditorPalX = 4;                        // x del primer bloque de la paleta
+constexpr int kEditorPalStep = 18;                    // separacion entre bloques de la paleta
+
+struct EditorView {
+    int cursorCol = 0, cursorRow = 0;
+    bool showCursor = true;
+    int nSpawns = 0;
+    uint8_t spawnCol[kMaxSpawns] = {}, spawnRow[kMaxSpawns] = {};
+    bool boss = false;
+    bool versus = false;                              // batalla vs: dos aguilas
+    int vsEagleCol[2] = {1, 25}, vsEagleRow[2] = {7, 7};
+    int eagleCol = 13, eagleRow = 1, eagleReach = 1;
+    int tool = 0;                                     // 0 bloque, 1 aparicion, 2 aguila
+    int palette = 0;
+    std::vector<int> paletteIds;
+    bool barTop = true;
+    std::string help, status;
+    std::vector<std::string> warnings;
+    int page = 0;                                     // 0 edicion, 1 menu, 2 casilleros, 3 confirmar, 4 mensaje
+    std::vector<std::string> menuItems;
+    int menuSel = 0;
+    int slotCols = 8, slotCount = 40, slotSel = 1;
+    std::string slotTitle, slotInfo, slotLegend;
+    std::vector<int> slotState;                       // 0 vacio, 1 propio, 2 de fabrica
+    std::string confirmText;
+    int confirmSel = 1;
+    std::vector<std::string> message;
+    bool slotOnly = false;                            // solo la lista de casilleros (sin el mapa de fondo)
+    std::string slotFooter;                           // pie de la lista (si esta vacio, el de siempre)
 };
 
 class Renderer {
@@ -78,6 +118,7 @@ public:
     void RenderHighScore(int score, int frame, std::vector<uint8_t>& rgba) const;
     void RenderMenu(const MenuView& menu, std::vector<uint8_t>& rgba) const;
     void RenderLobby(const LobbyView& lobby, std::vector<uint8_t>& rgba) const;
+    void RenderEditor(const nes::Battle& stage, const EditorView& view, std::vector<uint8_t>& rgba) const;
 
     // La pantalla NES pura de 256x240 (sin paneles), como 0x00RRGGBB.
     void RenderNesScreen(const nes::Battle& battle, std::vector<uint32_t>& rgb) const;
@@ -91,6 +132,7 @@ private:
     void DrawIcon(std::vector<uint32_t>& canvas, int w, int x, int y, const std::string& token) const;
     void DrawText(std::vector<uint32_t>& canvas, int w, int x, int y, const std::string& text, uint32_t color) const;
     void DrawHudTile(std::vector<uint32_t>& canvas, int w, int x, int y, int tile, const nes::Battle& battle, int palette) const;
+    void DrawBlockIcon(std::vector<uint32_t>& canvas, int x, int y, int id, const nes::Battle& battle) const;
     void DrawSprite16(std::vector<uint32_t>& canvas, int w, int x, int y, int tileBase, int palette, int scale = 1) const;
     void DrawBrickLetters(std::vector<uint32_t>& canvas, int w, const char* text, int x0, int y0, int bgSet) const;
     void DrawBombing(std::vector<uint32_t>& world, int w, const nes::Battle& battle) const;

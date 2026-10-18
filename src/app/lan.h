@@ -11,7 +11,8 @@
 //   anuncio:    anfitrion -> cliente        "BCNES1!|nombre|jugadores|maximo|version"
 //   unirse:     cliente -> anfitrion        "BCNES1J|nombre|version"        (crea el primer jugador de esa PC)
 //   respuesta:  anfitrion -> cliente        "BCNES1W|id"  /  "BCNES1F" (llena o ya empezo)  /  "BCNES1V" (version distinta)
-//   sala:       anfitrion -> miembros       "BCNES1L|empezo|fuegoamigo|retraso|n|nombre|color|listo|dueno|..."  (cada medio segundo)
+//   sala:       anfitrion -> miembros       "BCNES1L|empezo|fuegoamigo|retraso|mascara|colores|n|nombre|color|listo|dueno|..."  (cada medio segundo)
+//               (mascara/colores: quienes estaban al empezar la partida y de que color; dueno -1 = lugar libre)
 //   mis jugadores: miembro -> anfitrion     "BCNES1P|k|color|listo"   (k = mi jugador local 0..3; si k es el siguiente, lo crea)
 //                                           "BCNES1R|k"               (quita mi jugador local k, salvo el primero)
 //   latido:     miembro -> anfitrion        "BCNES1H"  (cada segundo; sin latidos 6 s = se fue)
@@ -109,13 +110,31 @@ public:
     const std::string& InternetNote() const { return internetNote_; }
     int InputDelay() const { return inputDelay_; }
 
+    // ---- entrar a una partida ya empezada ----
+    // Quien se une con la partida en marcha ve la sala, elige su color y toca "listo"; el anfitrion lo agrega en un cuadro
+    // futuro (marca en el flujo de botones) y su tanque aparece. Mientras tanto su PC reproduce toda la partida desde el
+    // principio (es determinista), asi que llega al mismo estado que los demas.
+    bool LateJoiner() const { return lateJoiner_; }
+    int StartMask() const { return startMask_; }          // jugadores que estaban al empezar (bit p)
+    int StartColor(int p) const { return p >= 0 && p < 4 ? startColors_[p] : 0; }
+    int PresentPlayers() const;                           // jugadores de la sala (sin contar lugares libres)
+    // Marcas en el flujo de botones (el bit Select no lo usa nadie, asi que no se confunden con botones):
+    //   0x0C = ese jugador se fue;  0x04 | color << 4 = ese jugador entra con ese color.
+    static constexpr uint8_t kGoneMark = 0x0C;
+    static bool IsMark(uint8_t b) { return (b & 0x04) != 0; }
+    static bool IsJoinMark(uint8_t b) { return (b & 0x0C) == 0x04; }
+    static int JoinColor(uint8_t b) { return (b >> 4) & 0x0F; }
+
     // ---- partida ----
     bool StartGame(int friendlyFire);                   // solo el anfitrion: empieza la partida para todos
     bool Started() const { return started_; }
-    int FriendlyFire() const { return friendly_; }
+    int FriendlyFire() const { return friendly_; }       // (tambien lleva las opciones de la sala: modo batalla vs, dificultad, bombardeo y mapa)
+    void SetOptions(int v) { friendly_ = v; }             // solo el anfitrion: lo que la sala muestra antes de empezar
+    void SetNoLateJoin(bool v) { noLateJoin_ = v; }       // sin entrar con la partida en marcha (batalla vs)
     int NumPlayers() const { return static_cast<int>(players_.size()); }
     // El juego pide el cuadro `f`: se puede simular cuando ya llegaron los botones de todos.
     bool FrameReady(int f) const;
+    int FramesAvailable() const;                        // cuadros ya recibidos (hasta ahi se puede simular)
     void FrameInputs(int f, uint8_t out[4]) const;      // botones de los 4 jugadores en el cuadro f
     // Botones locales (uno por jugador de esta PC): se piden hasta el cuadro simulado + retraso (una vez por cuadro del juego).
     void SubmitLocal(int simFrame, const uint8_t* buttons, int count);
@@ -154,8 +173,13 @@ private:
     int myId_ = 0;
     bool started_ = false;
     int friendly_ = 0;
+    bool noLateJoin_ = false;
     bool desync_ = false;
     bool lost_ = false;
+    bool lateJoiner_ = false;
+    bool seenLobby_ = false;                            // miembro: ya vi la sala antes de que empezara
+    int startMask_ = 0;
+    int startColors_[4] = {0, 1, 2, 3};
 };
 
 } // namespace app

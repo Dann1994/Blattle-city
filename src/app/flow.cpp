@@ -32,9 +32,16 @@ void GameFlow::StartIntro() {
     startPressed_ = false;
 }
 
+int GameFlow::NextLevelNumber() const {
+    if (hooks_.nextLevel) return hooks_.nextLevel(level_);
+    return level_ >= MainLevelCount() ? 1 : level_ + 1;       // despues del ultimo (el 40, o el ultimo nivel agregado) vuelve al 1
+}
+
 void GameFlow::SkipToNextLevel() {
     if (level_ <= 0 || !hooks_.loadNextLevel) return;
-    level_ = level_ >= kLevelCount ? 1 : level_ + 1;
+    const int next = NextLevelNumber();
+    if (next <= 0) return;
+    level_ = next;
     hooks_.loadNextLevel(level_);
     clearTimer_ = 0;
     StartIntro();
@@ -58,7 +65,12 @@ void GameFlow::StartScore() {
 }
 
 void GameFlow::FinishScore() {
-    level_ = level_ >= kLevelCount ? 1 : level_ + 1;
+    const int next = NextLevelNumber();
+    if (next <= 0) {                                     // era el ultimo nivel de la serie: de vuelta al titulo
+        if (hooks_.returnToTitle) hooks_.returnToTitle();
+        return;
+    }
+    level_ = next;
     if (hooks_.loadNextLevel) hooks_.loadNextLevel(level_);
     StartIntro();
 }
@@ -129,6 +141,14 @@ void GameFlow::Step() {
     switch (mode_) {
         case Mode::Playing: {
             battle_.RunFrame();
+            if (versus_) {
+                if (battle_.VersusWinner() >= 0) {
+                    mode_ = Mode::VersusResult;
+                    gameOverTimer_ = 0;
+                }
+                startPressed_ = false;
+                return;
+            }
             UpdateHiScore();
             if (battle_.GameOver()) {
                 battle_.StartGameOverMessage();                  // el cartel rojo sube desde abajo mientras los jugadores quedan quietos
@@ -147,7 +167,24 @@ void GameFlow::Step() {
             return;
         }
         case Mode::StageIntro: {
-            if (startPressed_ && introFrame_ < kIntroHold) introFrame_ = kIntroHold;
+            waitingStart_ = false;
+            if (requireStart_) {
+                if (introFrame_ < kIntroHold) {                  // la cortina cierra y muestra el cartel
+                    curtainRows_ = 15;
+                    battle_.RunSoundFrame();
+                    ++introFrame_;
+                    startPressed_ = false;
+                    return;
+                }
+                if (introFrame_ == kIntroHold && !startPressed_) {   // y espera a que el anfitrion toque Start
+                    curtainRows_ = 15;
+                    battle_.RunSoundFrame();
+                    waitingStart_ = true;
+                    return;
+                }
+            } else if (startPressed_ && introFrame_ < kIntroHold) {
+                introFrame_ = kIntroHold;
+            }
             startPressed_ = false;
             if (introFrame_ < kIntroHold) {
                 curtainRows_ = 15;                       // cortina cerrada con el cartel
@@ -189,6 +226,15 @@ void GameFlow::Step() {
                 } else if (hooks_.returnToTitle) {
                     hooks_.returnToTitle();
                 }
+            }
+            startPressed_ = false;
+            return;
+        }
+        case Mode::VersusResult: {
+            battle_.RunFrame();                                  // las explosiones terminan de verse
+            ++gameOverTimer_;
+            if (gameOverTimer_ >= 420 || (startPressed_ && gameOverTimer_ > 60)) {
+                if (hooks_.returnToTitle) hooks_.returnToTitle();
             }
             startPressed_ = false;
             return;

@@ -48,6 +48,16 @@ int Lobby::Count() const {
     return n;
 }
 
+int Lobby::TeamCount(int team) const {
+    int n = 0;
+    for (int s = 0; s < 4; ++s) n += (joined_[s] && team_[s] == team) ? 1 : 0;
+    return n;
+}
+
+bool Lobby::VersusReady() const {
+    return TeamCount(0) >= 1 && TeamCount(0) <= 2 && TeamCount(1) >= 1 && TeamCount(1) <= 2;
+}
+
 int Lobby::SlotOfPlayer(int index) const {
     int n = 0;
     for (int s = 0; s < 4; ++s) {

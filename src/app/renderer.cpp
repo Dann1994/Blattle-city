@@ -149,12 +149,19 @@ void Renderer::RenderNesScreen(const nes::Battle& battle, std::vector<uint32_t>&
             const uint8_t attr = battle.AttrCell(tx, ty);
             const int quadrant = ((ty >> 1) & 1) * 2 + ((tx >> 1) & 1);
             const int palette = (attr >> (quadrant * 2)) & 3;
+            int eagleTeam = -1;                              // batalla vs: cada aguila lleva el color de su equipo
+            if (battle.IsVersus()) {
+                for (int t = 0; t < 2; ++t) {
+                    if (battle.VsEagleAlive(t) && tx >= 2 * battle.VsEagleCol(t) && tx < 2 * battle.VsEagleCol(t) + 2 &&
+                        ty >= 2 * battle.VsEagleRow(t) && ty < 2 * battle.VsEagleRow(t) + 2) eagleTeam = t;
+                }
+            }
             for (int py = 0; py < 8; ++py) {
                 for (int px = 0; px < 8; ++px) {
                     const int idx = ChrPixel(1, tile, px, py);
                     const size_t o = static_cast<size_t>(ty * 8 + py) * kNesW + (tx * 8 + px);
                     bgIndex[o] = static_cast<uint8_t>(idx);
-                    rgb[o] = bgColor(palette, idx);
+                    rgb[o] = eagleTeam >= 0 ? NesColor(SpritePaletteColor(battle.TeamPaletteIndex(eagleTeam), idx)) : bgColor(palette, idx);
                 }
             }
         }
@@ -403,6 +410,21 @@ void Renderer::DrawWideHudOverlay(std::vector<uint32_t>& world, int w, const nes
     static const char* const kLabels[4] = {"IP", "IIP", "IIIP", "IVP"};
     const int xr = w - 3;                                         // borde derecho visible (se recortan 3 px por lado)
     const int x0 = xr - 34;
+    if (battle.IsVersus()) {
+        // batalla vs: las vidas de cada equipo en su esquina de arriba (equipo 1 a la izquierda, equipo 2 a la derecha)
+        int cnt[2] = {0, 0};
+        for (int p = 0; p < 4 && p < hud.players; ++p) {
+            if (!battle.PlayerPresent(p)) continue;
+            const int t = battle.PlayerTeam(p), k = cnt[t]++;
+            const int px = t == 0 ? 6 + k * 34 : xr - 30 - k * 34, py = t == 0 ? 3 : 14;
+            const uint32_t color = NesColor(SpritePaletteColor(battle.PlayerPaletteIndex(p), 2));
+            const uint32_t colors[4] = {0, NesColor(SpritePaletteColor(battle.PlayerPaletteIndex(p), 1)), color,
+                                        NesColor(SpritePaletteColor(battle.PlayerPaletteIndex(p), 3))};
+            DrawText(layer, w, px, py, std::to_string(p + 1), color);
+            DrawColoredTile(layer, w, px + 9, py, nes::tbl_D341_tile___player_icon[0], colors);
+            DrawHudTileT(layer, w, px + 19, py, 0x6E + (battle.Lives(p) % 10), battle, 0);
+        }
+    } else {
     // enemigos que faltan por aparecer: dos columnas de hasta 10, arriba a la derecha
     const int pending = battle.R(nes::ram_enemy_spawn_cnt);
     for (int i = 0; i < pending && i < 20; ++i) {
@@ -410,8 +432,10 @@ void Renderer::DrawWideHudOverlay(std::vector<uint32_t>& world, int w, const nes
     }
     // vidas de cada jugador, en columna
     const int players = hud.players < 4 ? hud.players : 4;
+    int row = 0;
     for (int p = 0; p < players; ++p) {
-        const int y = 100 + p * 24;
+        if (!battle.PlayerPresent(p)) continue;                  // partida en red: lugares sin jugador no se muestran
+        const int y = 100 + row++ * 24;
         const uint32_t color = NesColor(SpritePaletteColor(battle.PlayerPaletteIndex(p), 2));
         DrawText(layer, w, x0 + 34 - TextWidth(kLabels[p]), y, kLabels[p], color);
         const uint32_t colors[4] = {0, NesColor(SpritePaletteColor(battle.PlayerPaletteIndex(p), 1)), color,
@@ -437,6 +461,7 @@ void Renderer::DrawWideHudOverlay(std::vector<uint32_t>& world, int w, const nes
         DrawHudTileT(layer, w, fx + 8, fy + 18, 0x6E + (hud.stage % 10), battle, 0);
     } else {
         DrawHudTileT(layer, w, fx + 8, fy + 18, 0x6E + (hud.stage % 10), battle, 0);
+    }
     }
     // mezcla con el campo (65% HUD)
     for (size_t i = 0; i < layer.size(); ++i) {
@@ -717,8 +742,11 @@ void Renderer::FinishFrame(std::vector<uint32_t>& canvas, const HudInfo& hud, st
             }
         }
         if (hud.curtain >= 15) {
-            const std::string text = "STAGE " + std::to_string(hud.introLevel > 0 ? hud.introLevel : 1);
+            const std::string text = !hud.introText.empty() ? hud.introText : "STAGE " + std::to_string(hud.introLevel > 0 ? hud.introLevel : 1);
             DrawText(canvas, kScreenW, (kScreenW - TextWidth(text)) / 2, 116, text, 0x000000);
+            if (!hud.introPrompt.empty()) {
+                DrawText(canvas, kScreenW, (kScreenW - TextWidth(hud.introPrompt)) / 2, 164, hud.introPrompt, 0x000000);
+            }
             if (!hud.introSubtitle.empty()) {
                 DrawText(canvas, kScreenW, (kScreenW - TextWidth(hud.introSubtitle)) / 2, 136, hud.introSubtitle, 0xA80000);
             }
@@ -986,7 +1014,7 @@ void Renderer::RenderLobby(const LobbyView& l, std::vector<uint8_t>& rgba) const
     std::vector<uint32_t> canvas(static_cast<size_t>(kScreenW) * kScreenH, 0x000000);
     static const int kPaletteOf[7] = {0, 1, 4, 5, 6, 7, 8};
     static const char* const kNames[7] = {"AMARILLO", "VERDE", "AZUL", "ROJO", "VIOLETA", "NARANJA", "MARRON"};
-    const std::string title = l.net ? "SALA DE ESPERA" : "SELECCIÓN DE JUGADORES";
+    const std::string title = !l.title.empty() ? l.title : (l.net ? "SALA DE ESPERA" : "SELECCIÓN DE JUGADORES");
     DrawText(canvas, kScreenW, (kScreenW - TextWidth(title)) / 2, 14, title, 0xFCA044);
     DrawText(canvas, kScreenW, (kScreenW - TextWidth(l.hint)) / 2, 30, l.hint, 0x7C7C7C);
     if (!l.addHint.empty()) DrawText(canvas, kScreenW, (kScreenW - TextWidth(l.addHint)) / 2, 42, l.addHint, 0x58A8F8);
@@ -1004,8 +1032,8 @@ void Renderer::RenderLobby(const LobbyView& l, std::vector<uint8_t>& rgba) const
         if (l.joined[s]) {
             const int pal = kPaletteOf[l.color[s] % 7];
             DrawSprite16(canvas, kScreenW, x0 + 22, y0 + 34, 0x00, pal, 3);          // el tanque en su color
-            const char* cn = kNames[l.color[s] % 7];
-            const int tw = static_cast<int>(std::string(cn).size()) * 8;
+            const std::string cn = !l.tag[s].empty() ? l.tag[s] : std::string(kNames[l.color[s] % 7]);
+            const int tw = TextWidth(cn);
             DrawText(canvas, kScreenW, x0 + (92 - tw) / 2, y0 + 92, cn, NesColor(SpritePaletteColor(pal, 2)));
             if (l.net) {                                                           // sala en red: "LISTO" o lo que falta
                 if (l.ready[s]) {
@@ -1037,6 +1065,198 @@ void Renderer::RenderLobby(const LobbyView& l, std::vector<uint8_t>& rgba) const
     if (!l.note.empty()) DrawText(canvas, kScreenW, (kScreenW - TextWidth(l.note)) / 2, 192, l.note, 0xF83800);
     DrawText(canvas, kScreenW, (kScreenW - TextWidth(l.startText)) / 2, 206, l.startText, 0xF8D878);
     DrawText(canvas, kScreenW, (kScreenW - TextWidth(l.backText)) / 2, 222, l.backText, 0x7C7C7C);
+    ToRgba(canvas, rgba);
+}
+
+
+// ---------------------------------------------------------------------------
+// Editor de niveles
+// ---------------------------------------------------------------------------
+
+namespace {
+
+uint32_t Blend(uint32_t base, uint32_t over, int percent) {
+    auto ch = [&](int shift) {
+        const int b = (base >> shift) & 0xFF, o = (over >> shift) & 0xFF;
+        return static_cast<uint32_t>((b * (100 - percent) + o * percent) / 100) << shift;
+    };
+    return ch(16) | ch(8) | ch(0);
+}
+
+void Rect(std::vector<uint32_t>& c, int x0, int y0, int x1, int y1, uint32_t color) {
+    FillRect(c, kScreenW, x0, y0, x1, y1, color);
+}
+
+void Frame(std::vector<uint32_t>& c, int x0, int y0, int x1, int y1, uint32_t color, int t = 1) {
+    Rect(c, x0, y0, x1, y0 + t, color);
+    Rect(c, x0, y1 - t, x1, y1, color);
+    Rect(c, x0, y0, x0 + t, y1, color);
+    Rect(c, x1 - t, y0, x1, y1, color);
+}
+
+void Shade(std::vector<uint32_t>& c, int x0, int y0, int x1, int y1, uint32_t color, int percent) {
+    for (int y = std::max(0, y0); y < std::min(kScreenH, y1); ++y)
+        for (int x = std::max(0, x0); x < std::min(kScreenW, x1); ++x) {
+            uint32_t& px = c[static_cast<size_t>(y) * kScreenW + x];
+            px = Blend(px, color, percent);
+        }
+}
+
+}  // namespace
+
+void Renderer::DrawBlockIcon(std::vector<uint32_t>& canvas, int x, int y, int id, const nes::Battle& battle) const {
+    const int attr = nes::tbl_DABB_nametable_attribute[id & 15] & 3;
+    for (int k = 0; k < 4; ++k) {
+        DrawHudTile(canvas, kScreenW, x + (k & 1) * 8, y + (k >> 1) * 8, nes::tbl_DACB_block_data[(id & 15) * 4 + k], battle, attr);
+    }
+}
+
+void Renderer::RenderEditor(const nes::Battle& stage, const EditorView& v, std::vector<uint8_t>& rgba) const {
+    std::vector<uint32_t> canvas;
+    RenderNesScreen(stage, canvas);
+    const int worldW = stage.MapCols() * 8;
+    if (worldW != kScreenW) canvas.resize(static_cast<size_t>(kScreenW) * kScreenH, 0);
+    DrawBombing(canvas, kScreenW, stage);
+    const bool plain = v.slotOnly || v.page == 2;                     // la lista de casilleros va sobre fondo negro
+    if (plain) std::fill(canvas.begin(), canvas.end(), 0u);
+
+    if (!plain) {
+    // cuadricula tenue sobre el campo
+    for (int by = 0; by < kScreenH; by += 16)
+        for (int x = 0; x < kScreenW; ++x) {
+            uint32_t& px = canvas[static_cast<size_t>(by) * kScreenW + x];
+            px = Blend(px, 0xFFFFFF, 14);
+        }
+    for (int bx = 0; bx < kScreenW; bx += 16)
+        for (int y = 0; y < kScreenH; ++y) {
+            uint32_t& px = canvas[static_cast<size_t>(y) * kScreenW + bx];
+            px = Blend(px, 0xFFFFFF, 14);
+        }
+    // lugares donde empiezan los jugadores (no se tocan)
+    static const int kPlayerCols[4] = {11, 15, 10, 16};
+    for (int p = 0; p < 4 && !v.versus; ++p) {
+        const int x0 = kPlayerCols[p] * 16, y0 = (kGridRows - 1) * 16;
+        Frame(canvas, x0 + 1, y0 + 1, x0 + 15, y0 + 15, 0x58A8F8);
+        DrawText(canvas, kScreenW, x0 + 4, y0 + 4, std::to_string(p + 1), 0x58A8F8);
+    }
+    // la fortaleza del aguila enemiga (el motor ya la dibuja; aca se marca su alcance en la herramienta ÁGUILA)
+    if (v.versus) {                                                   // donde empiezan los jugadores de cada equipo (no se mueven)
+        for (int t = 0; t < 2; ++t) {
+            const int pc = v.vsEagleCol[t] + (t == 0 ? 2 : -2);
+            for (int k = 0; k < 2; ++k) {
+                const int x0 = pc * 16, y0 = (v.vsEagleRow[t] + (k == 0 ? -1 : 1)) * 16;
+                Frame(canvas, x0 + 1, y0 + 1, x0 + 15, y0 + 15, 0x58A8F8);
+                DrawText(canvas, kScreenW, x0 + 4, y0 + 4, "J", 0x58A8F8);
+            }
+            if (v.tool == 2) Frame(canvas, (v.vsEagleCol[t] - 1) * 16, (v.vsEagleRow[t] - 1) * 16, (v.vsEagleCol[t] + 2) * 16, (v.vsEagleRow[t] + 2) * 16, 0xFC9838, 2);
+        }
+    }
+    if (v.boss && v.tool == 2) {
+        const int r = v.eagleReach;
+        Frame(canvas, (v.eagleCol - r) * 16, (v.eagleRow - r) * 16, (v.eagleCol + r + 1) * 16, (v.eagleRow + r + 1) * 16, 0xFC9838, 2);
+    }
+    // puntos de aparicion de enemigos
+    for (int i = 0; i < v.nSpawns; ++i) {
+        const int x0 = v.spawnCol[i] * 16, y0 = v.spawnRow[i] * 16;
+        Rect(canvas, x0 + 2, y0 + 2, x0 + 14, y0 + 14, v.versus ? (v.spawnCol[i] < 13 ? 0xB08800 : 0xD82800) : 0xD82800);
+        Frame(canvas, x0 + 2, y0 + 2, x0 + 14, y0 + 14, 0xFCFCFC);
+        const std::string n = std::to_string(i + 1);
+        DrawText(canvas, kScreenW, x0 + 8 - TextWidth(n) / 2, y0 + 4, n, 0xFCFCFC);
+    }
+    // cursor
+    if (v.showCursor) {
+        const uint32_t color = v.tool == 1 ? 0xF83800 : (v.tool == 2 ? 0xFC9838 : 0xF8D878);
+        Frame(canvas, v.cursorCol * 16, v.cursorRow * 16, v.cursorCol * 16 + 16, v.cursorRow * 16 + 16, color, 2);
+    }
+
+    }
+
+    // barra de herramientas (arriba o abajo, del lado opuesto al cursor)
+    if (!plain) {
+        const int y0 = v.barTop ? 0 : kScreenH - kEditorBarH;
+        Rect(canvas, 0, y0, kScreenW, y0 + kEditorBarH, 0x101018);
+        Rect(canvas, 0, v.barTop ? kEditorBarH - 1 : y0, kScreenW, v.barTop ? kEditorBarH : y0 + 1, 0x7C7C7C);
+        static const char* const kTools[3] = {"BLOQUE", "APARICIÓN", "ÁGUILA"};
+        for (int t = 0; t < 3; ++t) {
+            if (t == 2 && !v.boss && !v.versus) continue;
+            DrawText(canvas, kScreenW, kEditorToolX[t], y0 + 2, kTools[t], t == v.tool ? 0xF8D878 : 0x7C7C7C);
+            if (t == v.tool) Rect(canvas, kEditorToolX[t], y0 + 10, kEditorToolX[t] + TextWidth(kTools[t]), y0 + 11, 0xF8D878);
+        }
+        DrawText(canvas, kScreenW, 214, y0 + 2, v.status, 0xFCFCFC);
+        if (v.tool == 0) {
+            for (size_t i = 0; i < v.paletteIds.size(); ++i) {
+                const int x = kEditorPalX + static_cast<int>(i) * kEditorPalStep;
+                DrawBlockIcon(canvas, x, y0 + 12, v.paletteIds[i], stage);
+                if (v.paletteIds[i] == 13) Frame(canvas, x, y0 + 12, x + 16, y0 + 28, 0x404040);
+                if (static_cast<int>(i) == v.palette) Frame(canvas, x - 1, y0 + 11, x + 17, y0 + 29, 0xF8D878);
+            }
+            DrawText(canvas, kScreenW, kEditorPalX + static_cast<int>(v.paletteIds.size()) * kEditorPalStep + 4, y0 + 16, v.help, 0x7C7C7C);
+        } else if (v.tool == 1) {
+            DrawText(canvas, kScreenW, 4, y0 + 17, v.versus ? "APARICIONES DE LA IA: 2 POR EQUIPO (" + std::to_string(v.nSpawns) + "/4)  PONER/QUITAR"
+                                                          : "APARICIONES: " + std::to_string(v.nSpawns) + "/" + std::to_string(kMaxSpawns) + "  PONER/QUITAR EN EL CURSOR", 0xB8F8B8);
+        } else {
+            DrawText(canvas, kScreenW, 4, y0 + 17, v.versus ? "MOVÉ EL ÁGUILA DEL EQUIPO DE ESE LADO" : "MOVÉ EL ÁGUILA ENEMIGA CON EL CURSOR", 0xFC9838);
+        }
+        if (!v.warnings.empty()) {
+            DrawText(canvas, kScreenW, kScreenW - 8 - TextWidth("AVISOS: " + std::to_string(v.warnings.size())), y0 + 20, "AVISOS: " + std::to_string(v.warnings.size()), 0xF83800);
+        }
+    }
+
+    auto panel = [&](int x0, int y0, int x1, int y1) {
+        Rect(canvas, x0, y0, x1, y1, 0x080810);
+        Frame(canvas, x0, y0, x1, y1, 0xFCFCFC, 2);
+    };
+
+    if (v.page != 0) Shade(canvas, 0, 0, kScreenW, kScreenH, 0x000000, 60);
+    if (v.page == 1) {                                                // menu
+        int widest = 0;
+        for (const std::string& it : v.menuItems) widest = std::max(widest, TextWidth(it));
+        const int boxW = widest + 100, boxH = static_cast<int>(v.menuItems.size()) * 18 + 40;
+        const int bx = (kScreenW - boxW) / 2, by = (kScreenH - boxH) / 2;
+        panel(bx, by, bx + boxW, by + boxH);
+        DrawText(canvas, kScreenW, (kScreenW - TextWidth("EDITOR DE NIVELES")) / 2, by + 8, "EDITOR DE NIVELES", 0xFCA044);
+        for (size_t i = 0; i < v.menuItems.size(); ++i) {
+            const bool sel = static_cast<int>(i) == v.menuSel;
+            const int tx = bx + (boxW - widest) / 2, ty = by + 26 + static_cast<int>(i) * 18;
+            DrawText(canvas, kScreenW, tx, ty, v.menuItems[i], sel ? 0xF8D878 : 0xFCFCFC);
+            if (sel) DrawSprite16(canvas, kScreenW, tx - 28, ty - 4, 0x18, 0);
+        }
+    } else if (v.page == 2) {                                         // casilleros
+        DrawText(canvas, kScreenW, (kScreenW - TextWidth(v.slotTitle)) / 2, 10, v.slotTitle, 0xFCA044);
+        const int rows = (v.slotCount + v.slotCols - 1) / v.slotCols;
+        const int cellW = std::min(40, 400 / v.slotCols), cellH = std::min(22, 150 / rows);
+        const int gx = (kScreenW - cellW * v.slotCols) / 2, gy = 30;
+        for (int s = 0; s < v.slotCount; ++s) {
+            const int x0 = gx + (s % v.slotCols) * cellW, y0 = gy + (s / v.slotCols) * cellH;
+            const int st = s < static_cast<int>(v.slotState.size()) ? v.slotState[static_cast<size_t>(s)] : 0;
+            const uint32_t fill = st == 1 ? 0x006800 : (st == 2 ? 0x0030A0 : 0x202028);
+            Rect(canvas, x0 + 1, y0 + 1, x0 + cellW - 1, y0 + cellH - 1, fill);
+            const std::string n = std::to_string(s + 1);
+            DrawText(canvas, kScreenW, x0 + (cellW - TextWidth(n)) / 2, y0 + (cellH - 8) / 2, n, st == 0 ? 0x7C7C7C : 0xFCFCFC);
+            if (s + 1 == v.slotSel) Frame(canvas, x0, y0, x0 + cellW, y0 + cellH, 0xF8D878, 2);
+        }
+        const int iy = gy + rows * cellH + 10;
+        DrawText(canvas, kScreenW, (kScreenW - TextWidth(v.slotInfo)) / 2, iy, v.slotInfo, 0xFCFCFC);
+        DrawText(canvas, kScreenW, (kScreenW - TextWidth(v.slotLegend)) / 2, iy + 14, v.slotLegend, 0x7C7C7C);
+        const std::string foot = v.slotFooter.empty() ? std::string("ACEPTAR ELEGIR   BORRAR: SUPR / X   VOLVER") : v.slotFooter;
+        DrawText(canvas, kScreenW, (kScreenW - TextWidth(foot)) / 2, 224, foot, 0x7C7C7C);
+    } else if (v.page == 3) {                                         // confirmacion
+        const int w = std::max(TextWidth(v.confirmText) + 40, 200), h = 70;
+        const int bx = (kScreenW - w) / 2, by = (kScreenH - h) / 2;
+        panel(bx, by, bx + w, by + h);
+        DrawText(canvas, kScreenW, (kScreenW - TextWidth(v.confirmText)) / 2, by + 14, v.confirmText, 0xFCFCFC);
+        DrawText(canvas, kScreenW, bx + w / 2 - 50, by + 44, "SÍ", v.confirmSel == 0 ? 0xF8D878 : 0x7C7C7C);
+        DrawText(canvas, kScreenW, bx + w / 2 + 28, by + 44, "NO", v.confirmSel == 1 ? 0xF8D878 : 0x7C7C7C);
+    } else if (v.page == 4) {                                         // mensaje
+        int widest = 0;
+        for (const std::string& l : v.message) widest = std::max(widest, TextWidth(l));
+        const int w = widest + 40, h = static_cast<int>(v.message.size()) * 12 + 36;
+        const int bx = (kScreenW - w) / 2, by = (kScreenH - h) / 2;
+        panel(bx, by, bx + w, by + h);
+        for (size_t i = 0; i < v.message.size(); ++i) {
+            DrawText(canvas, kScreenW, (kScreenW - TextWidth(v.message[i])) / 2, by + 12 + static_cast<int>(i) * 12, v.message[i], i == 0 ? 0xB8F8B8 : 0xF83800);
+        }
+    }
     ToRgba(canvas, rgba);
 }
 

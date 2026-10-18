@@ -29,7 +29,7 @@ add_library(nes_core STATIC src/nes/battle.cpp src/nes/sound_driver.cpp)
 target_include_directories(nes_core PUBLIC ${CMAKE_SOURCE_DIR}/src/nes)
 
 # Renderer por software (fondo + sprites desde el CHR original).
-add_library(nes_render STATIC src/app/renderer.cpp src/app/levels.cpp src/app/flow.cpp src/app/lobby.cpp src/app/config.cpp)
+add_library(nes_render STATIC src/app/editor.cpp src/app/renderer.cpp src/app/levels.cpp src/app/flow.cpp src/app/lobby.cpp src/app/config.cpp)
 target_link_libraries(nes_render PUBLIC nes_core)
 
 # Emulacion de la APU (audio de la NES), sin dependencias de ventana.
@@ -59,6 +59,18 @@ if (MINGW)
 endif()
 
 # Pruebas de la logica portada (sin ventana).
+# Editor de niveles aparte (agrega niveles al modo principal)
+add_executable(level_editor src/app/editor_main.cpp)
+target_link_libraries(level_editor PRIVATE nes_render raylib)
+target_compile_definitions(level_editor PRIVATE BCNES_ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets/")
+if (WIN32)
+    target_compile_definitions(level_editor PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_options(level_editor PRIVATE -mwindows)
+endif()
+if (MINGW)
+    target_link_options(level_editor PRIVATE -static-libgcc -static-libstdc++ -static)
+endif()
+
 add_executable(nes_tests tests/nes_tests.cpp)
 target_link_libraries(nes_tests PRIVATE nes_render nes_lan)
 if (MINGW)

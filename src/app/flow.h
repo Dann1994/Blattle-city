@@ -28,11 +28,12 @@ struct ScoreTally {
 
 class GameFlow {
 public:
-    enum class Mode { Playing, StageIntro, ScoreScreen, GameOverMessage, GameOver, HighScore };
+    enum class Mode { Playing, StageIntro, ScoreScreen, GameOverMessage, GameOver, HighScore, VersusResult };
 
     struct Hooks {
         std::function<void(int level)> loadNextLevel;   // genera el mapa y llama a Battle::NextStage
         std::function<void()> returnToTitle;            // termino todo: de vuelta a la pantalla de titulo
+        std::function<int(int)> nextLevel;              // opcional: numero del nivel que sigue al dado (0 = no hay mas, vuelve al titulo)
     };
 
     GameFlow(nes::Battle& battle, Hooks hooks);
@@ -42,6 +43,12 @@ public:
     void Begin(int level);
     void Step();
     void PressStart() { startPressed_ = true; }
+    // Partida en red: cada nivel espera en la cortina ("STAGE N") a que el anfitrion toque Start, para que todos esten listos.
+    void SetRequireStart(bool v) { requireStart_ = v; }
+    bool WaitingForStart() const { return mode_ == Mode::StageIntro && waitingStart_; }
+    // Modo batalla vs: no hay recuento ni game over; cuando hay ganador se muestra el resultado y se vuelve.
+    void SetVersus(bool v) { versus_ = v; }
+    int VersusResultTimer() const { return gameOverTimer_; }
     void SkipToNextLevel();                              // tecla de prueba: pasa de nivel de una
 
     Mode mode() const { return mode_; }
@@ -58,6 +65,7 @@ public:
     static constexpr int kCurtainFrames = 16;
 
 private:
+    int NextLevelNumber() const;
     void StartScore();
     void StepScore();
     void FinishScore();
@@ -77,6 +85,9 @@ private:
     int hiScore_ = 20000;
     int hiAtStart_ = 20000;
     bool startPressed_ = false;
+    bool requireStart_ = false;
+    bool versus_ = false;
+    bool waitingStart_ = false;
     ScoreTally tally_;
 };
 

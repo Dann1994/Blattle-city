@@ -82,6 +82,17 @@ public:
     void SetPlayerColors(const int colors[4]) {
         for (int i = 0; i < 4; ++i) playerColor_[i] = colors[i] < 0 ? 0 : (colors[i] > 6 ? 6 : colors[i]);
     }
+    void SetPlayerColor(int p, int color) { playerColor_[p] = color < 0 ? 0 : (color > 6 ? 6 : color); }
+    // ---- partida en red: jugadores que entran y salen ----
+    // La partida en red siempre se crea con 4 lugares de jugador; los que no estan quedan "ausentes" (sin tanque, sin vidas).
+    // La dificultad (enemigos totales y en pantalla, ritmo de aparicion, puntos de aparicion) se calcula con los jugadores
+    // presentes AL EMPEZAR CADA NIVEL: si alguien entra o se va, el cambio se nota a partir del nivel siguiente.
+    void SetPresentMask(int mask);                       // antes de StartStage: quienes estan al empezar (bit p = jugador p)
+    void MarkPlayerGone(int p);                          // se fue: su tanque desaparece y no vuelve
+    void AddPlayerLate(int p, int color);                // entro en medio de la partida: aparece con 3 vidas
+    bool PlayerPresent(int p) const { return p >= 0 && p < 4 && present_[p]; }
+    int ActivePlayers() const;                           // jugadores presentes (al menos 1)
+    int DifficultyPlayers() const { return diffPlayers_; }
     int PlayerPaletteIndex(int p) const { return wide_ ? kColorPalette[playerColor_[p]] : (p < 2 ? p : p + 2); }
     // Puntaje (en puntos) y enemigos destruidos por tipo (0 basico .. 3 blindado) de un jugador.
     int Score(int p) const;
@@ -103,15 +114,56 @@ public:
     // (nivel - 1) / 5: mas enemigos, mas fuertes, mas agresivos y con mas salud. Antes de NewGame.
     void SetLevel(int level) {
         level_ = level;
-        tier_ = level > 0 ? (level - 1) / 5 : 0;
+        tier_ = spec_.active ? spec_.tier : (level > 0 ? (level - 1) / 5 : 0);
     }
+    // Nivel hecho a mano (editor de niveles): en vez de salir del numero de nivel, el tipo (comun o con aguila enemiga), la
+    // dificultad, la fuerza del aguila, su lugar y los puntos de aparicion de enemigos los dicta esta ficha. Hay que fijarla antes
+    // de NewGame / NextStage; con active = false todo vuelve a depender del numero de nivel.
+    static constexpr int kMaxSpawns = 12;
+    struct StageSpec {
+        bool active = false;
+        bool boss = false;
+        int tier = 0;                 // dificultad 0..7
+        int rank = 1;                 // aguila enemiga 1..4: capas de hierro, salud, premio y tiempo entre bombardeos
+        int eagleCol = 13, eagleRow = 1;      // aguila enemiga: bloque (columna 0..26, fila 0..14; la fila 0 es la franja de arriba)
+        int nSpawns = 0;              // puntos de aparicion de enemigos (0 = los de siempre)
+        int spawnCol[kMaxSpawns] = {}, spawnRow[kMaxSpawns] = {};
+        // MODO BATALLA VS: dos equipos con su aguila a cada lado. Las apariciones son los 4 puntos de los tanques con IA de cada equipo
+        // (0 y 1: equipo izquierdo, 2 y 3: equipo derecho); tier = fuerza de los tanques con IA y de los bombardeos; rank = tiempo entre bombardeos.
+        bool versus = false;
+        int vsEagleCol[2] = {1, 25}, vsEagleRow[2] = {7, 7};
+        int vsLayers = 1;             // capas de hierro de cada aguila
+    };
+    void SetStageSpec(const StageSpec& s) { spec_ = s; }
+    const StageSpec& GetStageSpec() const { return spec_; }
     int Level() const { return level_; }
     // Niveles 10, 20, 30 y 40: hay un aguila enemiga arriba; los enemigos no se acaban y solo se gana destruyendola.
-    bool IsBossLevel() const { return wide_ && level_ > 0 && level_ % 10 == 0; }
+    bool IsBossLevel() const { return wide_ && level_ > 0 && (spec_.active ? spec_.boss : level_ % 10 == 0); }
+    // Fuerza del aguila enemiga 1..4 (niveles 10/20/30/40; en un nivel hecho a mano, la que se eligio).
+    // ---- MODO BATALLA VS (dos equipos; el equipo 0 es el amarillo de la izquierda y el 1 el rojo de la derecha) ----
+    bool IsVersus() const { return wide_ && level_ > 0 && spec_.active && spec_.versus; }
+    static constexpr int kTeamColor[2] = {0, 3};                 // amarillo y rojo (los colores de las dos aguilas)
+    void SetTeams(const int team[4]) {                           // equipo (0/1) de cada jugador; tambien les pone el color del equipo
+        for (int i = 0; i < 4; ++i) {
+            playerTeam_[i] = team[i] ? 1 : 0;
+            playerColor_[i] = kTeamColor[playerTeam_[i]];
+        }
+    }
+    int TeamOf(int tank) const { return tank >= 0 && tank < nPlayers_ ? playerTeam_[tank] : vsTeam_[tank < 0 || tank >= kMaxTanks ? 0 : tank]; }
+    int PlayerTeam(int p) const { return playerTeam_[p & 3]; }
+    int TeamPaletteIndex(int t) const { return kColorPalette[kTeamColor[t & 1]]; }   // paleta de sprites del color del equipo
+    int VersusWinner() const { return vsWinner_; }               // -1 sigue la partida, 0 / 1 gano ese equipo, 2 empate
+    bool VsEagleAlive(int team) const { return vsEagleAlive_[team & 1]; }
+    int VsEagleCol(int team) const { return spec_.vsEagleCol[team & 1]; }
+    int VsEagleRow(int team) const { return spec_.vsEagleRow[team & 1]; }
+    int VsTeamClock(int team) const { return teamClock_[team & 1]; }    // cuadros-por-64 que le quedan congelado a ese equipo
+    int Rank() const { return spec_.active ? spec_.rank : (level_ / 10 < 1 ? 1 : (level_ / 10 > 4 ? 4 : level_ / 10)); }
+    int EagleCol() const { return spec_.active ? spec_.eagleCol : 13; }     // bloque del aguila enemiga
+    int EagleRow() const { return spec_.active ? spec_.eagleRow : 1; }
     // Un jugador a menos de esto del aguila enemiga (en pixeles) la pone en alerta: 160 y +16 por escalon de dificultad.
     int EagleGuardRadius() const { return 160 + 16 * tier_; }
     bool EnemyHunting(int x) const { return hunting_[x]; }   // el enemigo x esta en modo ataque (niveles del aguila)
-    int EagleLayers() const { return level_ / 10 < 1 ? 1 : (level_ / 10 > 4 ? 4 : level_ / 10); }   // 10: 1 capa, 20: 2, 30: 3, 40: 4   // capas de hierro de la fortaleza (cada una de 1 mosaico = 8 px)
+    int EagleLayers() const { return Rank(); }   // 10: 1 capa, 20: 2, 30: 3, 40: 4   // capas de hierro de la fortaleza (cada una de 1 mosaico = 8 px)
     int EagleSpawnGap() const { return 16 * (1 + (EagleLayers() + 1) / 2); }   // distancia de las apariciones a la fortaleza (px)
     bool EnemyEagleAlive() const { return enemyEagleAlive_; }
     // Robo de vidas: a quien quedo sin vidas, la vida de que jugador va a robar (-1: no puede robar ahora).
@@ -135,12 +187,12 @@ public:
         struct Blast { int cx = 0, cy = 0, age = -1; } blast[kMaxPlanes * 3];      // age >= 0: explosion en curso
     };
     // Tiempo entre bombardeos: nivel 10: 4 min, 20: 3 min, 30: 2 min, 40: 1 min (60 cuadros por segundo).
-    int BombInterval() const { return (5 - (level_ / 10 > 4 ? 4 : (level_ / 10 < 1 ? 1 : level_ / 10))) * 60 * 60; }
+    int BombInterval() const { return (5 - Rank()) * 60 * 60; }
     static constexpr int kBombAlertFrames = 150;
     static constexpr int kBombFuse = 90;                // un segundo y medio entre la marca roja y la explosion
     static constexpr int kBombBlastFrames = 40;         // duracion de la animacion de la explosion
     const BombingState& Bombing() const { return bomb_; }
-    bool BombingActive() const { return IsBossLevel() && enemyEagleAlive_; }
+    bool BombingActive() const { return (IsBossLevel() && enemyEagleAlive_) || (IsVersus() && vsWinner_ < 0); }
     int BomberSoundCount() const { return bomberSounds_; }   // sube cada vez que entra un avion (el programa hace sonar el efecto)
     int ShakeX() const;                                // temblor del escenario (pixeles)
     int ShakeY() const;
@@ -365,6 +417,19 @@ private:
     void Sub_StealLives();
     void SetEnemyLimitForStage();                  // enemigos a la vez en pantalla segun jugadores y dificultad
     bool AimsAtEnemyEagle(int x);
+    bool AimsAtEagleAt(int x, int col, int row, int layers);
+    // modo batalla vs
+    void VersusSpawnHandler();
+    void VersusPickGoal(int x);
+    void VersusCollisions();
+    void VersusCheckEnd();
+    int VsEagleAt(int px, int py) const;                         // equipo del aguila en ese pixel (-1 si no hay)
+    void DestroyVsEagle(int team);
+    void DrawEagleAt(int ec, int er, bool destroyed, u8 attr);
+    void DrawFortressAt(int ec, int er, int layers);
+    bool NearVsEagle(int bombCol, int bombRow) const;
+    void SpawnPointPx(int index, int& x, int& y) const;       // donde sale el enemigo del punto de aparicion `index`
+    int SpawnPointCount() const;
     bool BossAggro(int x, int& nearest);           // niveles del aguila: hay un jugador cerca del aguila o del enemigo x
     void Sub_Bombing();
     void StartRaid();
@@ -405,6 +470,8 @@ private:
     int bossSpawned_ = 0;
     int enemyEagleHp_ = 0;
     int playerHits_[4] = {}, itemPickups_[4] = {}, blastCount_ = 0, eaglesDestroyed_ = 0;
+    bool present_[4] = {true, true, true, true};
+    int diffPlayers_ = 1;                                // jugadores con los que se calcula la dificultad del nivel en curso
     BombingState bomb_;
     int bomberSounds_ = 0;
     int shake_ = 0;
@@ -415,6 +482,12 @@ private:
     int nPlayers_ = 2;
     int enemyTotal_ = 20;
     int level_ = 0;
+    StageSpec spec_;
+    int playerTeam_[4] = {0, 1, 0, 1};
+    int vsTeam_[kMaxTanks] = {};                          // equipo de cada tanque con IA (los jugadores usan playerTeam_)
+    bool vsEagleAlive_[2] = {false, false};
+    int vsWinner_ = -1;
+    int vsAiTimer_[2] = {0, 0}, vsSpawned_[2] = {0, 0}, teamClock_[2] = {0, 0};
     int tier_ = 0;
     int lastTank_ = 7;
     int lastEnemy_ = 7;

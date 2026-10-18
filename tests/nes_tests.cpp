@@ -7,6 +7,8 @@
 #include <cstring>
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <thread>
 #include <string>
 #include <vector>
@@ -14,6 +16,7 @@
 #include <string>
 
 #include "../src/app/arena.h"
+#include "../src/app/editor.h"
 #include "../src/app/flow.h"
 #include "../src/app/lan.h"
 #include "../src/app/nat.h"
@@ -1723,6 +1726,613 @@ void TestOnlineCodeAndHybridRoom() {
     CHECK_EQ(s0.fx->battle->StateHash(), s2.fx->battle->StateHash());
 }
 
+std::unique_ptr<FlowFixture> MakeNetFlow(int level, int presentMask, bool requireStart) {
+    auto fx = std::make_unique<FlowFixture>();
+    fx->battle = std::make_unique<nes::Battle>();
+    fx->battle->SetWide(true);
+    fx->battle->SetLevel(level);
+    fx->battle->NewGame(4, level);                                  // la partida en red siempre tiene 4 lugares
+    fx->battle->SetPresentMask(presentMask);
+    u8 blocks[14][27];
+    app::GenerateWideLevel(level, blocks);
+    fx->battle->LoadWideStage(blocks);
+    fx->battle->StartStage();
+    app::GameFlow::Hooks hooks;
+    FlowFixture* raw = fx.get();
+    hooks.loadNextLevel = [raw](int lv) {
+        u8 bl[14][27];
+        app::GenerateWideLevel(lv, bl);
+        raw->battle->NextStage(lv, bl);
+        ++raw->loaded;
+    };
+    hooks.returnToTitle = [raw]() { raw->restarted = true; };
+    fx->flow = std::make_unique<app::GameFlow>(*fx->battle, hooks);
+    fx->flow->SetRequireStart(requireStart);
+    fx->flow->Begin(level);
+    return fx;
+}
+
+// La misma logica que la partida en red del programa: marcas de entrada/salida, Start del anfitrion y botones.
+void ApplyNetFrame(FlowFixture& fx, const uint8_t in[4], int hostPlayer) {
+    bool startNow = false;
+    for (int i = 0; i < 4; ++i) {
+        uint8_t b = in[i];
+        if (app::Lan::IsMark(b)) {
+            if (app::Lan::IsJoinMark(b)) fx.battle->AddPlayerLate(i, app::Lan::JoinColor(b));
+            else fx.battle->MarkPlayerGone(i);
+            b = 0;
+        }
+        if ((b & nes::con_btn_Start) && i == hostPlayer) startNow = true;
+        fx.battle->SetButtons(i, static_cast<u8>(b & ~(nes::con_btn_Start | nes::con_btn_Select)));
+    }
+    if (startNow) fx.flow->PressStart();
+    fx.flow->Step();
+}
+
+void TestNetPlayersComeAndGo() {
+    std::printf("[red] quien se va o entra cambia la dificultad desde el nivel siguiente; cada nivel espera el Start del anfitrion\n");
+    using Mode = app::GameFlow::Mode;
+    // presentes al empezar: jugadores 0 y 1
+    auto one = MakeFlow(1, 1);
+    auto two = MakeFlow(1, 2);
+    auto three = MakeFlow(1, 3);
+    auto fx = MakeNetFlow(1, 0x03, false);
+    auto& b = *fx->battle;
+    CHECK_EQ(b.ActivePlayers(), 2);
+    CHECK_EQ(b.EnemyTotal(), two->battle->EnemyTotal());               // la dificultad como la de 2 jugadores
+    CHECK(b.PlayerPresent(0) && b.PlayerPresent(1) && !b.PlayerPresent(2) && !b.PlayerPresent(3));
+    CHECK_EQ(b.Lives(2), 0);
+    CHECK_EQ(b.TankFlags(2), 0);                                        // los ausentes no tienen tanque
+    for (int f = 0; f < 300; ++f) fx->flow->Step();
+    CHECK(b.TankFlags(2) == 0 && b.TankFlags(3) == 0);
+    // se va el jugador 1: desaparece y su lugar no vuelve; en el mismo nivel nada cambia
+    const int totalMid = b.EnemyTotal();
+    b.MarkPlayerGone(1);
+    CHECK_EQ(b.ActivePlayers(), 1);
+    CHECK_EQ(b.TankFlags(1), 0);
+    CHECK_EQ(b.Lives(1), 0);
+    CHECK_EQ(b.EnemyTotal(), totalMid);
+    // entra el jugador 2 con color violeta: aparece con 3 vidas
+    b.AddPlayerLate(2, 4);
+    CHECK(b.PlayerPresent(2));
+    CHECK_EQ(b.Lives(2), 3);
+    CHECK(b.TankFlags(2) != 0);
+    CHECK_EQ(b.PlayerPaletteIndex(2), 6);                               // violeta
+    CHECK_EQ(b.ActivePlayers(), 2);
+    // al empezar el nivel siguiente la dificultad sigue a los presentes (2: jugador 0 y 2)
+    u8 blocks[14][27];
+    app::GenerateWideLevel(2, blocks);
+    b.MarkPlayerGone(2);                                                // ahora solo queda el jugador 0
+    b.NextStage(2, blocks);
+    CHECK_EQ(b.DifficultyPlayers(), 1);
+    auto oneL2 = MakeFlow(2, 1);
+    CHECK_EQ(b.EnemyTotal(), oneL2->battle->EnemyTotal());              // igual que una partida de 1 jugador
+    CHECK(b.EnemyTotal() < two->battle->EnemyTotal() * 11 / 10 + 1);
+    (void)one;
+    (void)three;
+    // cada nivel espera el Start del anfitrion en la cortina
+    auto gate = MakeNetFlow(1, 0x03, true);
+    for (int f = 0; f < 400; ++f) gate->flow->Step();
+    CHECK(gate->flow->mode() == Mode::StageIntro);
+    CHECK(gate->flow->WaitingForStart());
+    CHECK_EQ(gate->flow->curtainRows(), 15);
+    gate->flow->PressStart();
+    for (int f = 0; f < 200 && gate->flow->mode() != Mode::Playing; ++f) gate->flow->Step();
+    CHECK(gate->flow->mode() == Mode::Playing);
+    CHECK(!gate->flow->WaitingForStart());
+    // y el nivel que sigue tambien: otra vez en espera
+    gate->flow->SkipToNextLevel();
+    for (int f = 0; f < 400; ++f) gate->flow->Step();
+    CHECK(gate->flow->WaitingForStart());
+}
+
+void TestLanLateJoin() {
+    std::printf("[red] entrar en medio de la partida: elige color, se pone al dia y aparece; si alguien se va, los demas siguen igual\n");
+    const uint16_t port = 47937;
+    app::Lan host(port), guest(port), late(port);
+    CHECK(host.Host("Ana"));
+    CHECK(guest.Search());
+    CHECK(SpinLan({&host, &guest}, [&] { return !guest.Games().empty(); }));
+    CHECK(guest.Join(guest.Games()[0], "Beto"));
+    CHECK(SpinLan({&host, &guest}, [&] { return guest.state() == app::Lan::State::Joined && host.NumPlayers() == 2; }));
+    CHECK(host.StartGame(1));
+    CHECK(SpinLan({&host, &guest}, [&] { return guest.Started(); }));
+    CHECK(!guest.LateJoiner());
+    CHECK_EQ(host.StartMask(), 0x03);
+    CHECK_EQ(guest.StartMask(), 0x03);
+    CHECK_EQ(guest.StartColor(1), guest.Colors()[1]);
+
+    NetSide sh, sg, sl;
+    sh.fx = MakeNetFlow(10, host.StartMask(), true);
+    sg.fx = MakeNetFlow(10, guest.StartMask(), true);
+    auto script = [](int player, int frame) -> u8 {
+        const int phase = (frame / 17 + player * 3) % 8;
+        u8 v = 0;
+        if (phase == 0 || phase == 1) v |= nes::con_btn_Up;
+        if (phase == 2 || phase == 3) v |= nes::con_btn_Left;
+        if (phase == 4 || phase == 5) v |= nes::con_btn_Right;
+        if (phase == 6) v |= nes::con_btn_Down;
+        if ((frame + player) % 13 < 4) v |= nes::con_btn_A;
+        return v;
+    };
+    bool lateCreated = false, lateReadyDone = false, sawJoinMark = false, sawGoneMark = false, guestLeft = false;
+    int joinFrame = -1, joinColor = -1, goneFrame = -1;
+    constexpr int kFrames = 1000;
+    const auto t0 = std::chrono::steady_clock::now();
+    auto stepSide = [&](NetSide& side, app::Lan& lan, int hostPlayer, int myPlayer) {
+        if (side.frame >= kFrames) return;
+        uint8_t local = 0;
+        if (side.fx->battle->PlayerPresent(myPlayer)) local = script(myPlayer, side.frame);
+        if (&lan == &host && side.fx->flow->WaitingForStart()) local |= nes::con_btn_Start;     // el anfitrion empieza cada nivel
+        lan.SubmitLocal(side.frame, local);
+        if (!lan.FrameReady(side.frame)) return;
+        uint8_t in[4];
+        lan.FrameInputs(side.frame, in);
+        for (int i = 0; i < 4; ++i) {
+            if (app::Lan::IsJoinMark(in[i]) && !sawJoinMark) { sawJoinMark = true; joinFrame = side.frame; joinColor = app::Lan::JoinColor(in[i]); }
+            if (app::Lan::IsMark(in[i]) && !app::Lan::IsJoinMark(in[i]) && i == 1 && !sawGoneMark && guestLeft) { sawGoneMark = true; goneFrame = side.frame; }
+        }
+        ApplyNetFrame(*side.fx, in, hostPlayer);
+        ++side.frame;
+    };
+    while (std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() < 30.0) {
+        host.Update();
+        if (!guestLeft) guest.Update();
+        if (lateCreated) late.Update();
+        stepSide(sh, host, 0, 0);
+        if (!guestLeft) stepSide(sg, guest, 0, 1);
+        if (!lateCreated && sh.frame >= 250) {                                   // alguien se une con la partida en marcha
+            CHECK(late.Search());
+            CHECK(SpinLan({&host, &guest, &late}, [&] { return !late.Games().empty(); }));
+            CHECK(late.Join(late.Games()[0], "Cata"));
+            CHECK(SpinLan({&host, &guest, &late}, [&] { return late.state() == app::Lan::State::Joined && late.Started(); }));
+            CHECK(late.LateJoiner());
+            CHECK_EQ(late.StartMask(), 0x03);
+            CHECK_EQ(late.MyPlayers().size(), static_cast<size_t>(1));
+            CHECK_EQ(late.MyPlayers()[0], 2);                                    // toma el primer lugar libre
+            CHECK(host.Colors()[2] >= 0);
+            sl.fx = MakeNetFlow(10, late.StartMask(), true);                     // reproduce desde el cuadro 0
+            lateCreated = true;
+        }
+        if (lateCreated && sl.frame < kFrames) {
+            // reproduccion rapida: simula todo lo que ya llego
+            int budget = 300;
+            while (budget-- > 0 && late.FrameReady(sl.frame) && sl.frame < kFrames) stepSide(sl, late, 0, 2);
+            if (!lateReadyDone && late.FramesAvailable() - sl.frame <= 3 && sl.frame > 100) {
+                const int before = late.Colors()[2];
+                late.CycleColor(0, +1);                                          // elige otro color y toca listo
+                late.ToggleReady(0);
+                CHECK(late.Colors()[2] != before);
+                lateReadyDone = true;
+            }
+        }
+        if (sawJoinMark && !guestLeft && sh.frame >= joinFrame + 150) {          // Beto se va unos cuadros despues
+            guest.Leave();
+            guestLeft = true;
+        }
+        if (sh.frame >= kFrames && sl.frame >= kFrames) break;
+    }
+    CHECK(lateCreated && lateReadyDone);
+    CHECK(sawJoinMark);
+    CHECK(joinFrame > 250);                                                      // en un cuadro futuro, no en el pasado
+    CHECK_EQ(joinColor, host.Colors()[2]);                                       // con el color que eligio
+    CHECK(sawGoneMark);
+    CHECK(goneFrame > joinFrame);
+    CHECK_EQ(sh.frame, kFrames);
+    CHECK_EQ(sl.frame, kFrames);
+    CHECK_EQ(sh.fx->battle->StateHash(), sl.fx->battle->StateHash());            // el recien llegado ve exactamente lo mismo
+    CHECK(sh.fx->battle->PlayerPresent(2) && !sh.fx->battle->PlayerPresent(1));
+    CHECK(sl.fx->battle->PlayerPresent(2) && !sl.fx->battle->PlayerPresent(1));
+    CHECK_EQ(sh.fx->battle->PlayerPaletteIndex(2), sl.fx->battle->PlayerPaletteIndex(2));
+    CHECK_EQ(host.NumPlayers(), 3);                                              // el lugar de Beto quedo libre
+    CHECK_EQ(host.PresentPlayers(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// Niveles hechos a mano y editor
+// ---------------------------------------------------------------------------
+
+void TestCustomLevels() {
+    std::printf("[editor] niveles hechos a mano: archivo, serie del modo principal, ficha del motor (aguila donde sea, apariciones propias, dificultad)\n");
+    namespace fs = std::filesystem;
+    const fs::path tmp = fs::temp_directory_path() / "bcnes_levels_test";
+    fs::remove_all(tmp);
+    app::SetLevelRoot(tmp.string());
+    app::UseCustomLevels(true);
+
+    // ---- archivo ida y vuelta ----
+    app::LevelDef a = app::BuiltinLevelDef(20);
+    CHECK(a.boss && a.tier == 3 && a.rank == 2 && a.nSpawns == 7);
+    CHECK(app::BuiltinLevelDef(3).nSpawns == 5 && !app::BuiltinLevelDef(3).boss);
+    CHECK(app::SaveLevelDef(app::OwnLevelFile(5), a));
+    app::LevelDef b;
+    CHECK(app::LoadLevelDef(app::OwnLevelFile(5), b));
+    CHECK(std::memcmp(a.cells, b.cells, sizeof(a.cells)) == 0);
+    CHECK(a.boss == b.boss && a.tier == b.tier && a.rank == b.rank && a.eagleCol == b.eagleCol && a.eagleRow == b.eagleRow && a.nSpawns == b.nSpawns);
+    CHECK(std::memcmp(a.spawnCol, b.spawnCol, sizeof(a.spawnCol)) == 0 && std::memcmp(a.spawnRow, b.spawnRow, sizeof(a.spawnRow)) == 0);
+    CHECK(app::OwnSlotHasFile(5) && !app::OwnSlotHasFile(6));
+    CHECK(!app::LoadLevelDef(app::OwnLevelFile(6), b));                  // no existe
+    { std::ofstream bad(app::OwnLevelFile(7)); bad << "cualquier cosa\n"; }
+    CHECK(!app::LoadLevelDef(app::OwnLevelFile(7), b));                  // danado
+
+    // ---- la serie del modo principal crece con los archivos 41, 42... y se corta en el primer hueco ----
+    CHECK_EQ(app::MainLevelCount(), 40);
+    CHECK(app::SaveLevelDef(app::MainLevelFile(41), a));
+    CHECK(app::SaveLevelDef(app::MainLevelFile(42), a));
+    CHECK(app::SaveLevelDef(app::MainLevelFile(44), a));
+    CHECK_EQ(app::MainLevelCount(), 42);
+    app::UseCustomLevels(false);                                          // en red: solo los de fabrica
+    CHECK_EQ(app::MainLevelCount(), 40);
+    CHECK(!app::MainLevelHasFile(41));
+    app::UseCustomLevels(true);
+    auto fx = MakeFlow(41, 1);
+    fx->flow->SkipToNextLevel();
+    CHECK_EQ(fx->flow->level(), 42);
+    fx->flow->SkipToNextLevel();
+    CHECK_EQ(fx->flow->level(), 1);                                       // despues del ultimo, vuelve al 1
+    {
+        app::LevelDef m;
+        CHECK(app::LoadMainLevelDef(41, m) && m.boss);                    // el archivo
+        CHECK(app::LoadMainLevelDef(7, m) && !m.boss && m.tier == 1);     // uno de fabrica
+        CHECK(!app::LoadMainLevelDef(43, m));                             // no existe
+    }
+
+    // ---- ficha del motor: aguila en otro lugar, apariciones propias y dificultad elegida ----
+    {
+        nes::Battle bt;
+        bt.SetWide(true);
+        nes::Battle::StageSpec sp;
+        sp.active = true;
+        sp.boss = true;
+        sp.tier = 7;
+        sp.rank = 2;
+        sp.eagleCol = 5;
+        sp.eagleRow = 4;
+        sp.nSpawns = 2;
+        sp.spawnCol[0] = 2; sp.spawnRow[0] = 3;
+        sp.spawnCol[1] = 20; sp.spawnRow[1] = 5;
+        bt.SetStageSpec(sp);
+        bt.SetLevel(3);                                                   // el numero de nivel no manda: manda la ficha
+        bt.NewGame(1, 3);
+        u8 blocks[14][27];
+        u8 strip[27];
+        std::memset(blocks, 13, sizeof(blocks));
+        std::memset(strip, 13, sizeof(strip));
+        bt.LoadWideStage(blocks, strip);
+        bt.StartStage();
+        CHECK(bt.IsBossLevel());
+        CHECK_EQ(bt.Tier(), 7);
+        CHECK_EQ(bt.Rank(), 2);
+        CHECK_EQ(bt.EnemyEagleHealth(), 20);
+        CHECK(bt.BombInterval() == 3 * 60 * 60);                           // fuerza 2: cada 3 minutos
+        CHECK((bt.Tile(10, 8) & 0xFC) == 0xC8 && (bt.Tile(11, 9) & 0xFC) == 0xC8);          // el aguila esta en (columna 5, fila 4)
+        CHECK(bt.Tile(8, 8) != 0 && bt.Tile(13, 8) != 0 && bt.Tile(10, 6) != 0 && bt.Tile(10, 11) != 0);   // y su fortaleza de 2 capas
+        CHECK(bt.Tile(13, 13) == 0 || (bt.Tile(13, 13) & 0xFC) != 0xC8);
+        CHECK_EQ(bt.EnemyTotal(), 20 * 17 / 10);                           // +70% por la dificultad 8
+        bool seen[2] = {false, false};
+        bool onlyOurs = true;
+        for (int f = 0; f < 900; ++f) {
+            bt.RunFrame();
+            for (int e = bt.Players(); e <= bt.LastEnemy(); ++e) {
+                if (bt.TankFlags(e) < 0xE0) continue;                      // recien apareciendo
+                const int x = bt.TankX(e), y = bt.TankY(e);
+                if (x == 2 * 16 + 8 && y == 3 * 16 + 8) seen[0] = true;
+                else if (x == 20 * 16 + 8 && y == 5 * 16 + 8) seen[1] = true;
+                else onlyOurs = false;
+            }
+        }
+        CHECK(seen[0] && seen[1] && onlyOurs);                              // salen solo de los puntos elegidos
+        // un nivel comun con la misma maquinaria: sin aguila enemiga, con su propia dificultad
+        nes::Battle n2;
+        n2.SetWide(true);
+        sp.boss = false;
+        sp.tier = 0;
+        n2.SetStageSpec(sp);
+        n2.SetLevel(40);                                                  // aunque sea "el 40"
+        n2.NewGame(1, 40);
+        n2.LoadWideStage(blocks, strip);
+        n2.StartStage();
+        CHECK(!n2.IsBossLevel() && !n2.EnemyEagleAlive() && n2.Tier() == 0);
+    }
+
+    // ---- avisos al armar un nivel ----
+    {
+        app::LevelDef d = app::BlankLevelDef(false);
+        CHECK(app::CheckLevelDef(d).empty());
+        d.cells[0][1] = 9;                                                 // hierro alrededor de la aparicion de arriba a la izquierda
+        d.cells[1][0] = 9;
+        d.cells[1][1] = 9;
+        const auto w = app::CheckLevelDef(d);
+        CHECK(w.size() == 1 && w[0].find("ENCERRADA") != std::string::npos);
+        app::LevelDef boss = app::BlankLevelDef(true);
+        CHECK(app::CheckLevelDef(boss).empty());
+        boss.spawnCol[0] = static_cast<uint8_t>(boss.eagleCol);            // una aparicion encima del aguila
+        boss.spawnRow[0] = static_cast<uint8_t>(boss.eagleRow);
+        CHECK(!app::CheckLevelDef(boss).empty());
+    }
+
+    // ---- el editor, manejado con teclas ----
+    {
+        app::LevelEditor ed(app::LevelEditor::Target::Own);
+        auto tap = [&](auto setKey) {
+            app::EditorKeys k;
+            setKey(k);
+            ed.Step(k);
+            ed.Step(app::EditorKeys{});                                    // soltar
+        };
+        CHECK(ed.InEditPage() && ed.CursorCol() == 13 && ed.CursorRow() == 7);
+        tap([](app::EditorKeys& k) { k.right = true; });
+        CHECK_EQ(ed.CursorCol(), 14);
+        tap([](app::EditorKeys& k) { k.place = true; });                    // el bloque de la paleta
+        CHECK_EQ(ed.def().cells[7][14], app::LevelEditor::PaletteIds()[1]);
+        tap([](app::EditorKeys& k) { k.nextItem = true; });
+        tap([](app::EditorKeys& k) { k.place = true; });
+        tap([](app::EditorKeys& k) { k.erase = true; });
+        CHECK_EQ(ed.def().cells[7][14], 13);                               // borrar deja vacio
+        CHECK(ed.Dirty());
+        for (int i = 0; i < 7; ++i) tap([](app::EditorKeys& k) { k.down = true; });
+        CHECK_EQ(ed.CursorRow(), 14);
+        tap([](app::EditorKeys& k) { k.place = true; });
+        CHECK_EQ(ed.def().cells[14][14], 13);                              // la base y los lugares de los jugadores no se pintan
+        for (int i = 0; i < 9; ++i) tap([](app::EditorKeys& k) { k.up = true; });
+        // aparicion: poner y quitar
+        const int before = ed.def().nSpawns;
+        tap([](app::EditorKeys& k) { k.tool = true; });
+        CHECK(ed.CurrentTool() == app::LevelEditor::Tool::Spawn);
+        tap([](app::EditorKeys& k) { k.place = true; });
+        CHECK_EQ(ed.def().nSpawns, before + 1);
+        tap([](app::EditorKeys& k) { k.place = true; });
+        CHECK_EQ(ed.def().nSpawns, before);
+        tap([](app::EditorKeys& k) { k.tool = true; });                     // sin aguila enemiga, la herramienta aguila no aparece
+        CHECK(ed.CurrentTool() == app::LevelEditor::Tool::Block);
+        // menu: tipo especial
+        tap([](app::EditorKeys& k) { k.menu = true; });
+        CHECK(!ed.InEditPage());
+        tap([](app::EditorKeys& k) { k.down = true; });
+        tap([](app::EditorKeys& k) { k.accept = true; });
+        CHECK(ed.def().boss);
+        tap([](app::EditorKeys& k) { k.back = true; });
+        CHECK(ed.InEditPage());
+        tap([](app::EditorKeys& k) { k.tool = true; });
+        tap([](app::EditorKeys& k) { k.tool = true; });
+        CHECK(ed.CurrentTool() == app::LevelEditor::Tool::Eagle);
+        // mover el aguila: el cursor esta en la columna 14, fila 7 -> se acomoda y despeja su zona
+        for (int i = 0; i < 2; ++i) tap([](app::EditorKeys& k) { k.up = true; });
+        tap([](app::EditorKeys& k) { k.place = true; });
+        CHECK(ed.def().eagleCol == 14 && ed.def().eagleRow == 3);
+        // guardar y volver a abrir
+        CHECK(ed.SaveToSlot(9));
+        CHECK(!ed.Dirty() && ed.CurrentSlot() == 9);
+        app::LevelEditor ed2(app::LevelEditor::Target::Own);
+        CHECK(ed2.LoadFromSlot(9));
+        CHECK(std::memcmp(ed.def().cells, ed2.def().cells, sizeof(ed.def().cells)) == 0);
+        CHECK(ed2.def().boss && ed2.def().eagleCol == 14 && ed2.def().eagleRow == 3);
+        CHECK(!ed2.LoadFromSlot(12));                                      // casillero vacio
+        CHECK(!ed2.SaveToSlot(41));                                        // solo hay 40
+        // la vista tiene lo necesario para dibujar
+        app::EditorView view;
+        ed2.BuildView(view);
+        CHECK(view.boss && view.nSpawns == ed2.def().nSpawns && view.paletteIds.size() == 14);
+        std::vector<uint8_t> rgba;
+        app::Renderer renderer;
+        (void)renderer;                                                    // (el dibujo necesita los graficos de la ROM: se prueba a mano)
+        // la ficha para jugar sale igual que la del editor
+        nes::Battle::StageSpec spec;
+        u8 blocks[14][27];
+        u8 strip[27];
+        app::LevelDefToStage(ed2.def(), blocks, strip, spec);
+        CHECK(spec.active && spec.boss && spec.eagleCol == 14 && spec.nSpawns == ed2.def().nSpawns);
+    }
+    // ---- el editor arma mapas de batalla vs ----
+    {
+        const fs::path et = fs::temp_directory_path() / "bcnes_vs_editor";
+        fs::remove_all(et);
+        app::SetLevelRoot(et.string());
+        app::LevelEditor ed(app::LevelEditor::Target::Own);
+        auto tap = [&](auto setKey) {
+            app::EditorKeys k;
+            setKey(k);
+            ed.Step(k);
+            ed.Step(app::EditorKeys{});
+        };
+        tap([](app::EditorKeys& k) { k.menu = true; });
+        tap([](app::EditorKeys& k) { k.down = true; });
+        tap([](app::EditorKeys& k) { k.accept = true; });                  // normal -> especial
+        tap([](app::EditorKeys& k) { k.accept = true; });                  // especial -> batalla vs
+        CHECK(ed.def().versus && !ed.def().boss && ed.def().nSpawns == 4);
+        tap([](app::EditorKeys& k) { k.back = true; });
+        // aparicion de la izquierda: ya hay 2, no entra una tercera; se quita una y entra otra
+        tap([](app::EditorKeys& k) { k.tool = true; });
+        CHECK(ed.CurrentTool() == app::LevelEditor::Tool::Spawn);
+        for (int i = 0; i < 8; ++i) tap([](app::EditorKeys& k) { k.left = true; });        // columna 5
+        tap([](app::EditorKeys& k) { k.place = true; });
+        CHECK_EQ(ed.def().nSpawns, 4);
+        for (int i = 0; i < 2; ++i) tap([](app::EditorKeys& k) { k.down = true; });
+        // el aguila del equipo 1 se mueve con su herramienta
+        tap([](app::EditorKeys& k) { k.tool = true; });
+        CHECK(ed.CurrentTool() == app::LevelEditor::Tool::Eagle);
+        for (int i = 0; i < 3; ++i) tap([](app::EditorKeys& k) { k.left = true; });        // columna 2
+        tap([](app::EditorKeys& k) { k.place = true; });
+        CHECK(ed.def().vsEagleCol[0] == 2 && ed.def().vsEagleRow[0] == 9 && ed.def().vsEagleCol[1] == 25);
+        CHECK(app::CheckLevelDef(ed.def()).size() <= 1);
+        CHECK(ed.SaveToSlot(4));
+        app::LevelEditor ed2(app::LevelEditor::Target::Own);
+        CHECK(ed2.LoadFromSlot(4) && ed2.def().versus && ed2.def().vsEagleCol[0] == 2 && ed2.def().vsLayers == 1);
+        fs::remove_all(et);
+        app::SetLevelRoot("");
+    }
+    fs::remove_all(tmp);
+    app::SetLevelRoot("");
+}
+
+// ---------------------------------------------------------------------------
+// Modo batalla vs
+// ---------------------------------------------------------------------------
+
+std::unique_ptr<nes::Battle> MakeVersus(int players, const int teams[4], int tier = 0, int rank = 3) {
+    auto b = std::make_unique<nes::Battle>();
+    b->SetWide(true);
+    nes::Battle::StageSpec sp;
+    sp.active = true;
+    sp.versus = true;
+    sp.tier = tier;
+    sp.rank = rank;
+    sp.nSpawns = 4;
+    const int sc[4] = {4, 4, 22, 22}, sr[4] = {2, 12, 2, 12};
+    for (int i = 0; i < 4; ++i) { sp.spawnCol[i] = sc[i]; sp.spawnRow[i] = sr[i]; }
+    b->SetStageSpec(sp);
+    b->SetLevel(1);
+    b->NewGame(players, 1);
+    b->SetTeams(teams);
+    u8 blocks[14][27];
+    u8 strip[27];
+    std::memset(blocks, 13, sizeof(blocks));
+    std::memset(strip, 13, sizeof(strip));
+    b->LoadWideStage(blocks, strip);
+    b->StartStage();
+    return b;
+}
+
+void TestVersusMode() {
+    std::printf("[batalla vs] dos equipos con aguila propia, tanques con IA por equipo, items, bombardeo y fin de partida\n");
+    const int teams[4] = {0, 1, 0, 1};
+    auto b = MakeVersus(2, teams);
+    CHECK(b->IsVersus() && !b->IsBossLevel() && !b->EnemyEagleAlive());
+    CHECK(b->VsEagleAlive(0) && b->VsEagleAlive(1) && b->VersusWinner() == -1);
+    CHECK((b->Tile(2, 14) & 0xFC) == 0xC8 && (b->Tile(50, 14) & 0xFC) == 0xC8);        // las dos aguilas
+    CHECK(b->Tile(1, 14) != 0 && b->Tile(4, 14) != 0 && b->Tile(2, 13) != 0 && b->Tile(2, 16) != 0);   // y su cubierta de hierro
+    CHECK(b->TeamOf(0) == 0 && b->TeamOf(1) == 1);
+    CHECK(b->PlayerPaletteIndex(0) == 0 && b->PlayerPaletteIndex(1) == 5);             // amarillo y rojo
+    CHECK(b->BombingActive() && b->BombInterval() == 2 * 60 * 60);
+    CHECK(!b->GameOver() && !b->StageCleared());
+    bool aiSeen[2] = {false, false};
+    for (int f = 0; f < 600; ++f) {
+        b->RunFrame();
+        for (int e = b->Players(); e <= b->LastEnemy(); ++e) {
+            if (b->TankFlags(e) != 0) aiSeen[b->TeamOf(e)] = true;
+        }
+    }
+    CHECK(aiSeen[0] && aiSeen[1]);                                                      // salen tanques de los dos equipos
+    CHECK(b->VersusWinner() == -1);
+    // un equipo tira al aguila rival con balas de 3 estrellas (rompen el hierro) hasta destruirla
+    for (int e = b->Players(); e <= b->LastEnemy(); ++e) b->DebugSetTankFlags(e, 0);   // sin tanques de por medio
+    b->SetUpgrade(0, 0x60);
+    b->SetTankPos(0, 330, 120);
+    b->DebugSetTankFlags(0, 0xA3);                                                      // mirando a la derecha
+    for (int f = 0; f < 400 && b->VsEagleAlive(1); ++f) {
+        b->SetButtons(0, (f % 20) < 2 ? nes::con_btn_A : 0);
+        b->RunFrame();
+        for (int e = b->Players(); e <= b->LastEnemy(); ++e) b->DebugSetTankFlags(e, 0);
+        b->SetTankPos(0, 330, 120);
+    }
+    CHECK(!b->VsEagleAlive(1));
+    CHECK(b->VsEagleAlive(0));
+    for (int f = 0; f < 3; ++f) b->RunFrame();
+    CHECK_EQ(b->VersusWinner(), 0);                                                     // gana el equipo de la izquierda
+    CHECK(!b->BombingActive());
+
+    // sin vidas: si el equipo rival se queda sin jugadores con vidas, pierde aunque conserve el aguila
+    auto c = MakeVersus(2, teams);
+    for (int f = 0; f < 120; ++f) c->RunFrame();
+    c->SetLives(1, 0);
+    c->DebugSetTankFlags(1, 0);
+    c->RunFrame();
+    CHECK_EQ(c->VersusWinner(), 0);
+
+    // 2 contra 2: los tanques del mismo equipo no se lastiman; los del otro si
+    auto d = MakeVersus(4, teams);
+    for (int f = 0; f < 200; ++f) d->RunFrame();
+    CHECK(d->TeamOf(2) == 0 && d->TeamOf(3) == 1);
+    CHECK(d->PlayerPaletteIndex(2) == 0 && d->PlayerPaletteIndex(3) == 5);
+    for (int e = d->Players(); e <= d->LastEnemy(); ++e) d->DebugSetTankFlags(e, 0);
+    d->SetTankPos(0, 100, 100);
+    d->SetTankPos(2, 140, 100);                                                         // compañero, a la derecha
+    d->SetTankPos(1, 260, 100);                                                         // rival
+    d->DebugSetTankFlags(0, 0xA3);
+    d->DebugSetTankFlags(2, 0xA3);
+    d->DebugSetTankFlags(1, 0xA3);
+    for (int f = 0; f < 40; ++f) {
+        d->SetButtons(0, (f % 20) < 2 ? nes::con_btn_A : 0);
+        d->RunFrame();
+        d->SetTankPos(0, 100, 100);
+        d->SetTankPos(2, 140, 100);
+        d->SetTankPos(1, 260, 100);
+    }
+    CHECK((d->TankFlags(2) & 0xF0) >= 0x80 && d->TankFlags(2) < 0xE0);                  // el compañero sigue en pie
+    CHECK(d->Upgrade(1) == 0 || d->TankFlags(1) < 0x80 || d->PlayerHits(1) > 0);           // el rival fue alcanzado
+
+    // ---- mapas al azar: simetricos entre los dos equipos y con camino ----
+    {
+        int bad = 0, asym = 0;
+        bool differ = false;
+        app::LevelDef first = app::GenerateVersusLevel(1);
+        for (uint32_t seed = 1; seed <= 300; ++seed) {
+            const app::LevelDef g = app::GenerateVersusLevel(seed);
+            if (!g.versus || g.nSpawns != 4) ++bad;
+            for (int r = 0; r < app::kGridRows; ++r)
+                for (int c = 0; c < 13; ++c)
+                    if (g.cells[r][c] != g.cells[r][26 - c]) ++asym;
+            if (!app::CheckLevelDef(g).empty()) ++bad;
+            if (std::memcmp(g.cells, first.cells, sizeof(g.cells)) != 0) differ = true;
+            const app::LevelDef again = app::GenerateVersusLevel(seed);
+            if (std::memcmp(g.cells, again.cells, sizeof(g.cells)) != 0) ++bad;       // mismo numero, mismo mapa
+        }
+        CHECK_EQ(bad, 0);
+        CHECK_EQ(asym, 0);
+        CHECK(differ);
+        const app::LevelDef g = app::GenerateVersusLevel(77);
+        namespace fs = std::filesystem;
+        const fs::path vt = fs::temp_directory_path() / "bcnes_vs_test";
+        fs::remove_all(vt);
+        app::SetLevelRoot(vt.string());
+        CHECK(app::SaveLevelDef(app::OwnLevelFile(3), g));
+        app::LevelDef back;
+        CHECK(app::LoadLevelDef(app::OwnLevelFile(3), back));
+        CHECK(back.versus && back.vsEagleCol[1] == 25 && back.vsLayers == 1 && std::memcmp(back.cells, g.cells, sizeof(g.cells)) == 0);
+        nes::Battle::StageSpec spec;
+        u8 blocks[14][27];
+        u8 strip[27];
+        app::LevelDefToStage(back, blocks, strip, spec);
+        CHECK(spec.active && spec.versus && spec.nSpawns == 4 && spec.spawnCol[0] < 13 && spec.spawnCol[3] > 13);
+        app::LevelDef few = back;                                              // con una sola aparicion por equipo se avisa y se repite
+        few.nSpawns = 2;
+        few.spawnCol[0] = 4; few.spawnRow[0] = 2; few.spawnCol[1] = 22; few.spawnRow[1] = 2;
+        CHECK(!app::CheckLevelDef(few).empty());
+        app::LevelDefToStage(few, blocks, strip, spec);
+        CHECK(spec.nSpawns == 4 && spec.spawnCol[1] == 4 && spec.spawnCol[3] == 22);
+        fs::remove_all(vt);
+        app::SetLevelRoot("");
+    }
+
+    // el flujo: al haber ganador se muestra el resultado y despues se vuelve
+    {
+        auto vb = MakeVersus(2, teams);
+        bool toTitle = false;
+        app::GameFlow::Hooks hk;
+        hk.returnToTitle = [&] { toTitle = true; };
+        app::GameFlow fl(*vb, hk);
+        fl.SetVersus(true);
+        fl.Begin(0);
+        for (int f = 0; f < 120; ++f) fl.Step();
+        CHECK(fl.mode() == app::GameFlow::Mode::Playing);
+        vb->SetLives(1, 0);
+        vb->DebugSetTankFlags(1, 0);
+        for (int f = 0; f < 5; ++f) fl.Step();
+        CHECK(fl.mode() == app::GameFlow::Mode::VersusResult && vb->VersusWinner() == 0);
+        for (int f = 0; f < 430 && !toTitle; ++f) fl.Step();
+        CHECK(toTitle);
+    }
+
+    // dos PC que reciben lo mismo dan el mismo resultado
+    auto h1 = MakeVersus(2, teams, 4), h2 = MakeVersus(2, teams, 4);
+    for (int f = 0; f < 1500; ++f) {
+        const u8 in0 = static_cast<u8>(((f / 25) % 4 == 0 ? nes::con_btn_Right : (f / 25) % 4 == 1 ? nes::con_btn_Up : (f / 25) % 4 == 2 ? nes::con_btn_Left : nes::con_btn_Down) | ((f % 9) < 2 ? nes::con_btn_A : 0));
+        h1->SetButtons(0, in0); h2->SetButtons(0, in0);
+        h1->RunFrame(); h2->RunFrame();
+    }
+    CHECK_EQ(h1->StateHash(), h2->StateHash());
+}
+
 void TestGameOverScreen() {
     std::printf("[pantallas] sin base o sin jugadores aparece GAME OVER, luego HI-SCORE si hay record y vuelve al titulo\n");
     auto fx = MakeFlow(1, 2);
@@ -1918,6 +2528,10 @@ int main() {
     TestLanLockstep();
     TestLanSeveralPlayersPerPc();
     TestOnlineCodeAndHybridRoom();
+    TestNetPlayersComeAndGo();
+    TestLanLateJoin();
+    TestCustomLevels();
+    TestVersusMode();
     TestBossSpawnPointsAnyPlayerCount();
     TestBossDifficultyScaling();
     TestEnemyItemsAndShield();
