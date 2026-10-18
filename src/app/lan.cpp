@@ -410,7 +410,15 @@ bool Lan::Host(const std::string& myName) {
     return true;
 }
 
+std::string Lan::SearchDiag() const {
+    std::string s = "MI IP " + (impl_->localIp.empty() ? std::string("?") : impl_->localIp) + "  AVISOS " + std::to_string(diagSeen_);
+    if (!diagFrom_.empty()) s += " DE " + diagFrom_;
+    return s;
+}
+
 bool Lan::Search() {
+    diagSeen_ = 0;
+    diagFrom_.clear();
     if (state_ == State::Hosting || state_ == State::Joined) return false;
     if (impl_->sock == INVALID_SOCKET && !impl_->Open(0)) { error_ = "NO SE PUDO ABRIR LA RED"; state_ = State::Failed; return false; }
     state_ = State::Searching;
@@ -894,6 +902,8 @@ void Lan::Update() {
                 LanGame g;
                 g.name = f[1];
                 g.address = Impl::IpOf(from);
+                ++diagSeen_;
+                diagFrom_ = g.address;
                 if (!impl_->localIp.empty() && g.address == impl_->localIp) g.address = "127.0.0.1";
                 g.port = ntohs(from.sin_port);
                 g.players = ToInt(f[2], 1);

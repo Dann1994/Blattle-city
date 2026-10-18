@@ -38,3 +38,6 @@ Verificado
 Si la búsqueda LAN no encuentra la partida (algunos routers o teléfonos no dejan pasar los mensajes a toda la red):
   la sala del anfitrión muestra arriba "CÓDIGO DE ESTA RED: XXXX-XXXX-XXXX"; en el otro equipo entrá con ONLINE -> UNIRSE CON CÓDIGO y escribilo.
   Ahora el anfitrión además avisa su sala cada segundo y medio por toda la red, así que normalmente aparece sola en la lista.
+
+LAN -> UNIRSE CON CÓDIGO: ahora también está dentro del menú LAN (usa el "CÓDIGO DE ESTA RED" que muestra la sala del anfitrión).
+La pantalla de búsqueda muestra cuántos avisos llegaron ("MI IP ... AVISOS n DE ..."): si dice AVISOS 0, la red o el firewall no dejan pasar los mensajes a toda la red; usá el código.

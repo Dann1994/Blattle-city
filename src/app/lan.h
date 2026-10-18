@@ -112,6 +112,8 @@ public:
     // Codigo de la sala para la misma red (la IP local en el mismo formato): sirve para entrar con "unirse con codigo" cuando la busqueda
     // no la encuentra (algunos routers y telefonos no dejan pasar los mensajes a toda la red).
     const std::string& LanCode() const { return lanCode_; }
+    // Diagnostico de la busqueda: la IP de esta PC y cuantos avisos de salas llegaron (y de quien el ultimo).
+    std::string SearchDiag() const;
 
     // ---- entrar a una partida ya empezada ----
     // Quien se une con la partida en marcha ve la sala, elige su color y toca "listo"; el anfitrion lo agrega en un cuadro
@@ -178,6 +180,8 @@ private:
     int friendly_ = 0;
     bool noLateJoin_ = false;
     std::string lanCode_;
+    int diagSeen_ = 0;
+    std::string diagFrom_;
     bool desync_ = false;
     bool lost_ = false;
     bool lateJoiner_ = false;

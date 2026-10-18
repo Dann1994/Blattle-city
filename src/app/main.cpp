@@ -663,7 +663,7 @@ public:
             case Scene::KeysList: return 8;
             case Scene::PadSettings: return 6;
             case Scene::Pause: return 3;
-            case Scene::LanMenu: return 4;
+            case Scene::LanMenu: return 5;
             case Scene::OnlineMenu: return 4;
             case Scene::LanSearch: return lan_.Games().empty() ? 1 : static_cast<int>(lan_.Games().size());
             default: return 0;
@@ -686,10 +686,10 @@ public:
             case Scene::NameEntry: {
                 const bool online = nameNext_ == Scene::OnlineMenu;
                 if (g_cfg.playerName.empty()) { scene_ = vsMode_ ? Scene::VsMenu : Scene::PlayMenu; menuIndex_ = online ? 2 : 1; }      // sin nombre no se puede entrar a LAN / online
-                else { scene_ = online ? Scene::OnlineMenu : Scene::LanMenu; menuIndex_ = 2; }
+                else { scene_ = online ? Scene::OnlineMenu : Scene::LanMenu; menuIndex_ = online ? 2 : 3; }
                 break;
             }
-            case Scene::CodeEntry: scene_ = Scene::OnlineMenu; menuIndex_ = 1; break;
+            case Scene::CodeEntry: scene_ = codeFrom_; menuIndex_ = codeFrom_ == Scene::LanMenu ? 2 : 1; break;
             case Scene::LanHost: case Scene::LanSearch: case Scene::LanJoined:
                 lan_.Leave();                                                  // se sale de la sala (avisa a los demas y cierra el puerto)
                 scene_ = roomFrom_;
@@ -732,7 +732,7 @@ public:
     void AcceptCode() {
         if (lan_.JoinCode(codeBuf_, g_cfg.playerName)) {
             lanNote_.clear();
-            roomFrom_ = Scene::OnlineMenu;
+            roomFrom_ = codeFrom_;
             scene_ = Scene::LanJoined;
             menuIndex_ = 0;
         } else {
@@ -771,7 +771,8 @@ public:
             else if (then == 2) BeginCodeEntry();
             else { scene_ = Scene::OnlineMenu; menuIndex_ = nameForced_ ? 0 : 2; }
         }
-        else { scene_ = Scene::LanMenu; menuIndex_ = nameForced_ ? 0 : 2; }
+        else if (then == 2) BeginCodeEntry();
+        else { scene_ = Scene::LanMenu; menuIndex_ = nameForced_ ? 0 : 3; }
     }
     void StartHost(bool online) {
         lanNote_.clear();
@@ -1147,7 +1148,7 @@ public:
             case Scene::OnlineMenu:
                 lanNote_.clear();
                 if (index == 0) { if (g_cfg.playerName.empty()) { nameThen_ = 1; BeginNameEntry(Scene::OnlineMenu); } else StartHost(true); }
-                else if (index == 1) { if (g_cfg.playerName.empty()) { nameThen_ = 2; BeginNameEntry(Scene::OnlineMenu); } else BeginCodeEntry(); }
+                else if (index == 1) { codeFrom_ = Scene::OnlineMenu; if (g_cfg.playerName.empty()) { nameThen_ = 2; BeginNameEntry(Scene::OnlineMenu); } else BeginCodeEntry(); }
                 else if (index == 2) { nameThen_ = 0; BeginNameEntry(Scene::OnlineMenu); }
                 else GoBack();
                 break;
@@ -1155,7 +1156,8 @@ public:
                 lanNote_.clear();
                 if (index == 0) { if (g_cfg.playerName.empty()) BeginNameEntry(Scene::LanHost); else StartHost(false); }
                 else if (index == 1) { if (g_cfg.playerName.empty()) BeginNameEntry(Scene::LanSearch); else StartSearch(); }
-                else if (index == 2) { nameThen_ = 0; BeginNameEntry(Scene::LanMenu); }
+                else if (index == 2) { codeFrom_ = Scene::LanMenu; if (g_cfg.playerName.empty()) { nameThen_ = 2; BeginNameEntry(Scene::LanMenu); } else BeginCodeEntry(); }
+                else if (index == 3) { nameThen_ = 0; BeginNameEntry(Scene::LanMenu); }
                 else GoBack();
                 break;
             case Scene::Settings:
@@ -1407,7 +1409,7 @@ public:
                 break;
             case Scene::LanMenu:
                 v.title = "LAN";
-                v.items = {"CREAR PARTIDA", "UNIRSE", "NOMBRE: " + (g_cfg.playerName.empty() ? std::string("(SIN NOMBRE)") : g_cfg.playerName), "VOLVER"};
+                v.items = {"CREAR PARTIDA", "UNIRSE", "UNIRSE CON CÓDIGO", "NOMBRE: " + (g_cfg.playerName.empty() ? std::string("(SIN NOMBRE)") : g_cfg.playerName), "VOLVER"};
                 v.note = lanNote_;
                 v.footer = NavHint();
                 break;
@@ -1443,7 +1445,7 @@ public:
                     v.items.push_back(g.name + "  " + std::to_string(g.players) + "/" + std::to_string(g.maxPlayers) + (g.compatible ? "" : " (OTRA VERSIÓN)"));
                 }
                 if (lan_.Games().empty()) { v.items.push_back("..."); v.enabled = {false}; v.selected = -1; }
-                v.note = !lanNote_.empty() ? lanNote_ : (lan_.Games().empty() ? "NO SE ENCONTRÓ NINGUNA PARTIDA TODAVÍA" : "");
+                v.note = !lanNote_.empty() ? lanNote_ : (lan_.Games().empty() ? lan_.SearchDiag() : "");
                 v.footer = touch_ ? std::string("TOQUE LISTO PARA CONFIRMAR") : BackHint() + "  ENTER UNIRSE";
                 break;
             }
@@ -1740,6 +1742,7 @@ private:
     std::string nameBuf_, lanNote_;
     Scene nameNext_ = Scene::LanMenu;
     bool nameForced_ = false;
+    Scene codeFrom_ = Scene::OnlineMenu;                  // menu desde el que se pidio el codigo (LAN u ONLINE)
     int nameThen_ = 0;                                    // despues de pedir el nombre en ONLINE: 1 crear sala, 2 pedir codigo
     std::string codeBuf_;
     Scene roomFrom_ = Scene::LanMenu;                     // menu al que se vuelve al salir de una sala
