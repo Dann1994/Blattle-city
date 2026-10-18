@@ -17,8 +17,14 @@
 
 namespace app {
 
+// Botones extra (controles en pantalla tactil): se mezclan con los del mando. Con esto el mouse/touch de raylib no se usa.
+struct EditorExtra {
+    bool left = false, right = false, up = false, down = false;
+    bool a = false, aHeld = false, b = false, bHeld = false, x = false, y = false, lb = false, rb = false, start = false;
+};
+
 // destX/destY/scale: donde se dibuja la pantalla del juego dentro de la ventana (para llevar el mouse a sus pixeles).
-inline EditorKeys GatherEditorKeys(float destX, float destY, float scale) {
+inline EditorKeys GatherEditorKeys(float destX, float destY, float scale, const EditorExtra* extra = nullptr) {
     EditorKeys k;
     bool padLeft = false, padRight = false, padUp = false, padDown = false;
     bool padA = false, padAHeld = false, padB = false, padBHeld = false, padX = false, padY = false, padLB = false, padRB = false, padStart = false;
@@ -39,28 +45,44 @@ inline EditorKeys GatherEditorKeys(float destX, float destY, float scale) {
         padRB = padRB || IsGamepadButtonPressed(g, GAMEPAD_BUTTON_RIGHT_TRIGGER_1);
         padStart = padStart || IsGamepadButtonPressed(g, GAMEPAD_BUTTON_MIDDLE_RIGHT);
     }
+    if (extra) {
+        padLeft = padLeft || extra->left;
+        padRight = padRight || extra->right;
+        padUp = padUp || extra->up;
+        padDown = padDown || extra->down;
+        padA = padA || extra->a;
+        padAHeld = padAHeld || extra->aHeld;
+        padB = padB || extra->b;
+        padBHeld = padBHeld || extra->bHeld;
+        padX = padX || extra->x;
+        padY = padY || extra->y;
+        padLB = padLB || extra->lb;
+        padRB = padRB || extra->rb;
+        padStart = padStart || extra->start;
+    }
     k.left = IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A) || padLeft;
     k.right = IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D) || padRight;
     k.up = IsKeyDown(KEY_UP) || IsKeyDown(KEY_W) || padUp;
     k.down = IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S) || padDown;
-    const bool mouseLeft = IsMouseButtonPressed(MOUSE_BUTTON_LEFT), mouseRight = IsMouseButtonPressed(MOUSE_BUTTON_RIGHT);
+    const bool useMouse = extra == nullptr;
+    const bool mouseLeft = useMouse && IsMouseButtonPressed(MOUSE_BUTTON_LEFT), mouseRight = useMouse && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT);
     k.place = IsKeyPressed(KEY_SPACE) || IsKeyPressed(KEY_Z) || IsKeyPressed(KEY_F) || padA || mouseLeft;
-    k.placeHeld = IsKeyDown(KEY_SPACE) || IsKeyDown(KEY_Z) || IsKeyDown(KEY_F) || padAHeld || IsMouseButtonDown(MOUSE_BUTTON_LEFT);
+    k.placeHeld = IsKeyDown(KEY_SPACE) || IsKeyDown(KEY_Z) || IsKeyDown(KEY_F) || padAHeld || (useMouse && IsMouseButtonDown(MOUSE_BUTTON_LEFT));
     k.erase = IsKeyPressed(KEY_X) || IsKeyPressed(KEY_DELETE) || padB || padX || mouseRight;
-    k.eraseHeld = IsKeyDown(KEY_X) || IsKeyDown(KEY_DELETE) || padBHeld || IsMouseButtonDown(MOUSE_BUTTON_RIGHT);
+    k.eraseHeld = IsKeyDown(KEY_X) || IsKeyDown(KEY_DELETE) || padBHeld || (useMouse && IsMouseButtonDown(MOUSE_BUTTON_RIGHT));
     k.prevItem = IsKeyPressed(KEY_Q) || IsKeyPressed(KEY_PAGE_UP) || padLB;
     k.nextItem = IsKeyPressed(KEY_E) || IsKeyPressed(KEY_PAGE_DOWN) || padRB;
-    k.tool = IsKeyPressed(KEY_TAB) || padY || IsMouseButtonPressed(MOUSE_BUTTON_MIDDLE);
+    k.tool = IsKeyPressed(KEY_TAB) || padY || (useMouse && IsMouseButtonPressed(MOUSE_BUTTON_MIDDLE));
     k.menu = IsKeyPressed(KEY_ESCAPE) || padStart;
-    k.back = IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_BACKSPACE) || padB;
+    k.back = IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_BACKSPACE) || IsKeyPressed(KEY_BACK) || padB;
     k.accept = IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_SPACE) || padA;
     const Vector2 m = GetMousePosition();
     const float cx = (m.x - destX) / scale, cy = (m.y - destY) / scale;
-    if (scale > 0 && cx >= 0 && cy >= 0 && cx < kScreenW && cy < kScreenH) {
+    if (useMouse && scale > 0 && cx >= 0 && cy >= 0 && cx < kScreenW && cy < kScreenH) {
         k.mx = static_cast<int>(cx);
         k.my = static_cast<int>(cy);
     }
-    k.wheel = static_cast<int>(GetMouseWheelMove());
+    k.wheel = useMouse ? static_cast<int>(GetMouseWheelMove()) : 0;
     return k;
 }
 

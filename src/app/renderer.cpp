@@ -121,6 +121,11 @@ bool Renderer::LoadChr(const std::string& path) {
     return chr_.size() >= 8192;
 }
 
+bool Renderer::LoadChrData(const uint8_t* data, size_t size) {
+    chr_.assign(data, data + size);
+    return chr_.size() >= 8192;
+}
+
 int Renderer::ChrPixel(int table, int tile, int x, int y) const {
     if (table == 2) {
         return CustomPixel(tile, x, y);
@@ -1056,8 +1061,8 @@ void Renderer::RenderLobby(const LobbyView& l, std::vector<uint8_t>& rgba) const
             DrawText(canvas, kScreenW, x0 + (92 - TextWidth("ESPERANDO")) / 2, y0 + 52, "ESPERANDO", 0x7C7C7C);
             DrawText(canvas, kScreenW, x0 + (92 - TextWidth("JUGADOR")) / 2, y0 + 64, "JUGADOR", 0x7C7C7C);
         } else {
-            DrawText(canvas, kScreenW, x0 + 12, y0 + 44, "PRESIONA", 0x7C7C7C);
-            DrawText(canvas, kScreenW, x0 + 12, y0 + 56, "DISPARO", 0x7C7C7C);
+            DrawText(canvas, kScreenW, x0 + 12, y0 + 44, l.joinLine1.empty() ? "PRESIONA" : l.joinLine1, 0x7C7C7C);
+            DrawText(canvas, kScreenW, x0 + 12, y0 + 56, l.joinLine2.empty() ? "DISPARO" : l.joinLine2, 0x7C7C7C);
             const std::string key = l.joinKey[s];
             DrawText(canvas, kScreenW, x0 + (92 - TextWidth(key)) / 2, y0 + 76, key, 0xFCFCFC);
         }

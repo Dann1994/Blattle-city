@@ -39,11 +39,20 @@
 #include "editor_input.h"
 #include "flow.h"
 #include "lan.h"
+#include "nat.h"
 #include "levels.h"
 #include "lan.h"
 #include "lobby.h"
 #include "renderer.h"
 #include "samples.h"
+#include "touch.h"
+
+#ifdef __ANDROID__
+#include <android/log.h>
+#include <sys/system_properties.h>
+#include <android_native_app_glue.h>
+extern "C" struct android_app* GetAndroidApp(void);
+#endif
 
 namespace {
 
@@ -119,6 +128,7 @@ app::SampleBank g_samples;
 bool g_useSamples = true;      // true: grabaciones del proyecto anterior; false: sintetizador de la NES (APU)
 app::Config g_cfg;             // teclas, mando, vibracion y demas ajustes (se guardan en un archivo)
 std::string g_cfgPath = "battlecitynes_settings.txt";
+app::TouchControls g_touch;      // controles en pantalla tactil (Android, o --touch en la PC)
 int g_padOfSlot[4] = {-1, -1, -1, -1};   // mando de cada jugador: se reparten solos al conectarlos
 
 void SaveConfig() {
@@ -179,6 +189,9 @@ void ServiceRumbleTimers() {
 
 // Pantalla completa (ventana sin bordes): Alt+Enter, F11 y la opcion de Configuracion. Se recuerda entre sesiones.
 void ToggleFullscreen() {
+#ifdef __ANDROID__
+    return;                                                   // en el telefono ya es pantalla completa
+#endif
     ToggleBorderlessWindowed();
     g_cfg.fullscreen = IsWindowState(FLAG_BORDERLESS_WINDOWED_MODE);
     SaveConfig();
@@ -275,7 +288,16 @@ public:
     enum class Ev { Up, Down, Left, Right, Accept, Back, Fire, Start };
 
     bool Init(const std::string& chrPath) {
+#ifdef __ANDROID__
+        int n = 0;                                          // los graficos vienen dentro del APK (hace falta la ventana ya abierta)
+        unsigned char* d = LoadFileData(chrPath.c_str(), &n);
+        if (!d) return false;
+        const bool ok = renderer_.LoadChrData(d, static_cast<size_t>(n));
+        UnloadFileData(d);
+        return ok;
+#else
         return renderer_.LoadChr(chrPath);
+#endif
     }
 
     void Reset(int players) {
@@ -588,6 +610,7 @@ public:
     bool Capturing() const { return capture_ != Capture::None; }
     bool CapturingPad() const { return capture_ == Capture::Pad; }
     void SetUsingPad(bool v) { usingPad_ = v; }
+    void SetTouch(bool v) { touch_ = v; }                  // pantalla tactil: los textos dicen "TOQUE A", "CRUCETA"...
     // En la seleccion de jugadores, cada mando conectado hace entrar a su jugador.
     void AutoJoinPads(const int padOfSlot[4]) {
         if (scene_ != Scene::Lobby) return;
@@ -1209,11 +1232,16 @@ public:
     }
 
     // Textos de ayuda segun el dispositivo en uso (teclado o mando).
-    std::string BackHint() const { return usingPad_ ? PadButtonName(g_cfg.padCancel) + " VOLVER" : "ESC VOLVER"; }
+    std::string BackHint() const {
+        if (touch_) return "TOQUE B PARA VOLVER";
+        return usingPad_ ? PadButtonName(g_cfg.padCancel) + " VOLVER" : "ESC VOLVER";
+    }
     std::string NavHint() const {
+        if (touch_) return "CRUCETA: ELEGIR   TOQUE A PARA ACEPTAR";
         return usingPad_ ? "{DPAD} ELEGIR  " + PadButtonName(g_cfg.padFire) + " ACEPTAR" : "ARRIBA ABAJO ELEGIR  P ACEPTAR";
     }
     std::string ChangeHint() const {
+        if (touch_) return "CRUCETA: CAMBIAR   TOQUE A: ACEPTAR   TOQUE B: VOLVER";
         return usingPad_ ? "{DPAD} CAMBIAR  " + PadButtonName(g_cfg.padFire) + " ACEPTAR  " + PadButtonName(g_cfg.padCancel) + " VOLVER"
                          : "IZQUIERDA DERECHA CAMBIAR  ESC VOLVER";
     }
@@ -1223,7 +1251,7 @@ public:
         v.selected = menuIndex_;
         if (scene_ == Scene::Editor && editor_) {
             app::EditorView ev;
-            editor_->SetHelp(usingPad_ ? "START MENÚ  Y HERRAM." : "ESC MENÚ  TAB HERRAM.");
+            editor_->SetHelp(touch_ ? "TOQUE START: MENÚ  Y: HERRAM." : (usingPad_ ? "START MENÚ  Y HERRAM." : "ESC MENÚ  TAB HERRAM."));
             editor_->BuildView(ev);
             renderer_.RenderEditor(editor_->Stage(), ev, rgba);
             return;
@@ -1259,9 +1287,17 @@ public:
             }
             lv.hint = usingPad_ ? PadButtonName(g_cfg.padFire) + " PARA UNIRSE  {DPAD} COLOR" : "DISPARO PARA UNIRSE  ARRIBA ABAJO COLOR";
             lv.startText = usingPad_ ? PadButtonName(g_cfg.padStart) + " PARA EMPEZAR" : "P START PARA EMPEZAR";
+            if (touch_) {                                                            // pantalla tactil
+                for (int sl = 0; sl < 4; ++sl) lv.joinKey[sl] = sl == 0 ? "A" : "OTRO MANDO";
+                lv.joinLine1 = "TOQUE";
+                lv.joinLine2 = "EL BOTON";
+                lv.hint = "TOQUE A PARA UNIRSE   CRUCETA: COLOR";
+                lv.startText = "TOQUE START PARA EMPEZAR";
+            }
             if (vsMode_) {
                 lv.title = "MODO BATALLA VS";
                 lv.hint = usingPad_ ? PadButtonName(g_cfg.padFire) + " PARA UNIRSE  {DPAD} CAMBIAR DE EQUIPO" : "DISPARO PARA UNIRSE  ARRIBA ABAJO EQUIPO";
+                if (touch_) lv.hint = "TOQUE A PARA UNIRSE   CRUCETA: EQUIPO";
                 for (int sl = 0; sl < 4; ++sl) {
                     lv.color[sl] = app::Lobby::TeamColor(lobby_.Team(sl));
                     lv.tag[sl] = lobby_.Team(sl) == 0 ? "EQUIPO 1" : "EQUIPO 2";
@@ -1285,7 +1321,7 @@ public:
                 lv.mine[i] = lan_.IsMine(static_cast<int>(i));
                 const int k = lan_.LocalIndexOf(static_cast<int>(i));
                 if (k >= 0) {                                                        // la tecla (o boton) de disparo de ese jugador local
-                    lv.meLine2[i] = ((usingPad_ && g_padOfSlot[k] >= 0) ? PadButtonName(g_cfg.padFire) : KeyName(g_cfg.key[k][app::Config::Fire])) + " LISTO";
+                    lv.meLine2[i] = touch_ && k == 0 ? std::string("TOQUE A") : ((usingPad_ && g_padOfSlot[k] >= 0) ? PadButtonName(g_cfg.padFire) : KeyName(g_cfg.key[k][app::Config::Fire])) + " LISTO";
                 }
             }
             lv.upDownText = "ELEGÍ COLOR";
@@ -1298,7 +1334,7 @@ public:
                     lv.tag[i] = (i & 1) ? "EQUIPO 2" : "EQUIPO 1";
                 }
             }
-            if (lan_.NumPlayers() < 4 && lan_.LocalCount() < 4) {
+            if (!touch_ && lan_.NumPlayers() < 4 && lan_.LocalCount() < 4) {
                 const int next = lan_.LocalCount();
                 lv.addHint = "OTRO JUGADOR EN ESTA PC: DISPARO J" + std::to_string(next + 1) + " (" +
                              ((usingPad_ && g_padOfSlot[next] >= 0) ? PadButtonName(g_cfg.padFire) : KeyName(g_cfg.key[next][app::Config::Fire])) + ")";
@@ -1307,7 +1343,7 @@ public:
             const bool late = scene_ == Scene::LateJoin;
             int notReady = 0;
             for (int i = 0; i < lan_.NumPlayers(); ++i) notReady += lan_.Ready()[static_cast<size_t>(i)] ? 0 : 1;
-            const std::string readyKey = usingPad_ ? PadButtonName(g_cfg.padFire) : KeyName(g_cfg.key[0][app::Config::Fire]);
+            const std::string readyKey = touch_ ? std::string("TOQUE A:") : (usingPad_ ? PadButtonName(g_cfg.padFire) : KeyName(g_cfg.key[0][app::Config::Fire]));
             if (host) {
                 using Net = app::Lan::Internet;
                 const Net net = lan_.InternetState();
@@ -1326,7 +1362,8 @@ public:
                     lv.addHint = "I: ABRIR LA SALA A INTERNET (CÓDIGO PARA LOS DE AFUERA)";
                 }
                 lv.note = !lanNote_.empty() ? lanNote_ : waiting;
-                lv.startText = (usingPad_ ? PadButtonName(g_cfg.padStart) : std::string("ENTER")) + " EMPEZAR  " + readyKey + " LISTO";
+                lv.startText = touch_ ? "TOQUE START PARA EMPEZAR   " + readyKey + " LISTO"
+                                      : (usingPad_ ? PadButtonName(g_cfg.padStart) : std::string("ENTER")) + " EMPEZAR  " + readyKey + " LISTO";
             } else if (late) {
                 lv.hint = "PARTIDA EN CURSO: ELEGÍ TU COLOR Y TOCÁ LISTO PARA ENTRAR";
                 lv.note = CaughtUp() ? "" : "PONIÉNDOME AL DÍA CON LA PARTIDA...";
@@ -1354,7 +1391,8 @@ public:
                 v.items = {"JUGAR EN ESTA PC", "LAN", "ONLINE", "MAPA: " + VersusMapText(), "DIFICULTAD IA: " + std::to_string(vsTier_ + 1) + "/8",
                            "BOMBARDEO CADA: " + std::to_string(5 - vsRank_) + (vsRank_ == 4 ? " MINUTO" : " MINUTOS"), "VOLVER"};
                 v.note = lanNote_;
-                v.footer = usingPad_ ? "{DPAD} ELEGIR Y CAMBIAR  " + PadButtonName(g_cfg.padFire) + " ACEPTAR" : "ARRIBA ABAJO ELEGIR  IZQUIERDA DERECHA CAMBIAR";
+                v.footer = touch_ ? "CRUCETA: ELEGIR Y CAMBIAR   TOQUE A PARA ACEPTAR"
+                                  : (usingPad_ ? "{DPAD} ELEGIR Y CAMBIAR  " + PadButtonName(g_cfg.padFire) + " ACEPTAR" : "ARRIBA ABAJO ELEGIR  IZQUIERDA DERECHA CAMBIAR");
                 break;
             }
             case Scene::PlayMenu:
@@ -1384,15 +1422,15 @@ public:
                 }
                 v.items = {shown + (((menuTick_ / 30) & 1) ? " " : "_")};
                 v.selected = -1;
-                v.note = lanNote_.empty() ? "ESCRIBÍ O PEGÁ (CTRL+V) EL CÓDIGO DEL ANFITRIÓN" : lanNote_;
-                v.footer = BackHint() + "  ENTER UNIRSE";
+                v.note = lanNote_.empty() ? (touch_ ? "ESCRIBÍ EL CÓDIGO DEL ANFITRIÓN Y TOQUE LISTO" : "ESCRIBÍ O PEGÁ (CTRL+V) EL CÓDIGO DEL ANFITRIÓN") : lanNote_;
+                v.footer = touch_ ? std::string("TOQUE LISTO PARA UNIRSE") : BackHint() + "  ENTER UNIRSE";
                 break;
             }
             case Scene::NameEntry:
                 v.title = "TU NOMBRE EN LA RED";
                 v.items = {nameBuf_ + (((menuTick_ / 30) & 1) ? " " : "_")};
                 v.selected = -1;
-                v.note = "ESCRIBÍ TU NOMBRE Y APRETÁ ENTER";
+                v.note = touch_ ? "ESCRIBÍ TU NOMBRE Y TOQUE LISTO" : "ESCRIBÍ TU NOMBRE Y APRETÁ ENTER";
                 v.footer = BackHint();
                 break;
             case Scene::LanSearch: {
@@ -1402,7 +1440,7 @@ public:
                 }
                 if (lan_.Games().empty()) { v.items.push_back("..."); v.enabled = {false}; v.selected = -1; }
                 v.note = !lanNote_.empty() ? lanNote_ : (lan_.Games().empty() ? "NO SE ENCONTRÓ NINGUNA PARTIDA TODAVÍA" : "");
-                v.footer = BackHint() + "  ENTER UNIRSE";
+                v.footer = touch_ ? std::string("TOQUE LISTO PARA CONFIRMAR") : BackHint() + "  ENTER UNIRSE";
                 break;
             }
             case Scene::LanJoined: {
@@ -1488,7 +1526,7 @@ public:
             const int w = battle_->VersusWinner();
             hud.banner = w == 2 ? "EMPATE" : (w == 0 ? "GANA EL EQUIPO 1 (AMARILLO)" : "GANA EL EQUIPO 2 (ROJO)");
         }
-        if (netGame_ && flow_->WaitingForStart()) hud.introPrompt = lan_.IsHost() ? "APRETÁ START PARA EMPEZAR EL NIVEL" : "ESPERANDO AL ANFITRIÓN...";
+        if (netGame_ && flow_->WaitingForStart()) hud.introPrompt = lan_.IsHost() ? (touch_ ? "TOQUE START PARA EMPEZAR EL NIVEL" : "APRETÁ START PARA EMPEZAR EL NIVEL") : "ESPERANDO AL ANFITRIÓN...";
         if (netGame_ && lan_.Desynced()) hud.banner = "DESINCRONIZADO";
         else if (netGame_ && netStall_ > 20) hud.banner = "ESPERANDO A LOS DEMÁS...";
         if (battle_->IsBossLevel()) hud.introSubtitle = "DESTRUYE LA BASE ENEMIGA";
@@ -1712,6 +1750,7 @@ private:
     int captureTarget_ = 0;
     int keysPlayer_ = 0;
     bool usingPad_ = false;
+    bool touch_ = false;
     std::vector<Rumble> rumble_;
     bool prevAlive_[4] = {false, false, false, false};
     int prevUpgrade_[4] = {0, 0, 0, 0};
@@ -1742,6 +1781,10 @@ private:
 };
 
 std::string FindChr(const char* argv0) {
+#ifdef __ANDROID__
+    (void)argv0;
+    return "chr.bin";                                       // dentro del APK: assets/chr.bin
+#endif
     std::vector<std::string> candidates = {"assets/chr.bin", "../assets/chr.bin", "../../assets/chr.bin", "../../../assets/chr.bin"};
     std::string dir = argv0 ? argv0 : "";
     const size_t slash = dir.find_last_of("/\\");
@@ -1853,6 +1896,7 @@ u8 PadFromKeys(int player) {
     if (down(app::Config::Right)) pad |= nes::con_btn_Right;
     if (down(app::Config::Fire)) pad |= nes::con_btn_A;
     if (down(app::Config::Fire2)) pad |= nes::con_btn_B;
+    if (player == 0) pad |= g_touch.Bits();                    // controles en pantalla
     const int pad_id = g_padOfSlot[player];
     if (pad_id >= 0 && IsGamepadAvailable(pad_id)) {
         if (IsGamepadButtonDown(pad_id, GAMEPAD_BUTTON_LEFT_FACE_UP)) pad |= nes::con_btn_Up;
@@ -1891,10 +1935,14 @@ int NewPadButton() {
 }
 
 int RunWindow(TestScreen& screen, double selfTestSeconds, const std::string& assetsDir) {
-    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
-    InitWindow(1280, 720, "Battle City");
+    if (!IsWindowReady()) {                                                    // (en Android la ventana ya se abrio al arrancar)
+        SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+        InitWindow(1280, 720, "Battle City");
+    }
+#ifndef __ANDROID__
     if (g_cfg.fullscreen) ToggleBorderlessWindowed();                          // se recuerda la pantalla completa
-    {
+#endif
+    if (!g_touch.Enabled()) {
         Image icon = LoadImage((assetsDir + "icon.png").c_str());              // el tanque amarillo
         if (icon.data) {
             SetWindowIcon(icon);
@@ -1933,26 +1981,44 @@ int RunWindow(TestScreen& screen, double selfTestSeconds, const std::string& ass
         const int padNow = GetGamepadButtonPressed();
         if (padNow > 0) screen.SetUsingPad(true);
         else if (keyNow != 0) screen.SetUsingPad(false);
+        else if (g_touch.Enabled()) screen.SetUsingPad(true);
+        screen.SetTouch(g_touch.Enabled());                  // con la pantalla tactil los textos hablan de A / B / START
         {
             bool available[4];
             for (int g = 0; g < 4; ++g) available[g] = IsGamepadAvailable(g);
             app::AssignPads(available, g_padOfSlot);                 // los mandos conectados toman a los jugadores solos
             screen.AutoJoinPads(g_padOfSlot);
         }
-        const bool padStartPressed = AnyPadPressed(g_cfg.padStart);
+        g_touch.SetExtras(screen.InEditor());
+        g_touch.Update(GetScreenWidth(), GetScreenHeight(), screen.TextEntry());
+        const bool touchBack = g_touch.Pressed(app::TouchControls::kB) || IsKeyPressed(KEY_BACK);       // B en pantalla o la tecla Atras de Android
+        const bool padStartPressed = AnyPadPressed(g_cfg.padStart) || g_touch.Pressed(app::TouchControls::kStart);
 
         // ---- menus ----
         if (!screen.InGame()) {
             if (screen.InEditor()) {                                           // editor de niveles: teclado, mando y mouse
                 const float sw = static_cast<float>(GetScreenWidth()), sh = static_cast<float>(GetScreenHeight());
                 const float scale = std::min(sw / app::kScreenW, sh / app::kScreenH);
-                screen.EditorStep(app::GatherEditorKeys((sw - app::kScreenW * scale) / 2, (sh - app::kScreenH * scale) / 2, scale));
+                app::EditorExtra extra;
+                using TC = app::TouchControls;
+                extra.left = g_touch.DirX() < 0; extra.right = g_touch.DirX() > 0; extra.up = g_touch.DirY() < 0; extra.down = g_touch.DirY() > 0;
+                extra.a = g_touch.Pressed(TC::kA); extra.aHeld = g_touch.Held(TC::kA);
+                extra.b = g_touch.Pressed(TC::kB); extra.bHeld = g_touch.Held(TC::kB);
+                extra.x = g_touch.Pressed(TC::kX); extra.y = g_touch.Pressed(TC::kY);
+                extra.lb = g_touch.Pressed(TC::kL); extra.rb = g_touch.Pressed(TC::kR);
+                extra.start = g_touch.Pressed(TC::kStart);
+                screen.EditorStep(app::GatherEditorKeys((sw - app::kScreenW * scale) / 2, (sh - app::kScreenH * scale) / 2, scale,
+                                                        g_touch.Enabled() ? &extra : nullptr));
             } else if (screen.TextEntry()) {                                          // escribiendo el nombre de red
                 for (int cp = GetCharPressed(); cp > 0; cp = GetCharPressed()) screen.TypeChar(cp);
+                for (int c : g_touch.Typed()) screen.TypeChar(c);                      // teclado en pantalla
+                if (g_touch.BackspacePressed()) screen.EraseChar();
+                if (g_touch.EnterPressed()) screen.MenuEvent(TestScreen::Ev::Accept, 0);
+                if (g_touch.BackKeyPressed()) screen.MenuEvent(TestScreen::Ev::Back, 0);
                 if (IsKeyPressed(KEY_BACKSPACE) || IsKeyPressedRepeat(KEY_BACKSPACE)) screen.EraseChar();
                 if ((IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) && IsKeyPressed(KEY_V)) screen.PasteText(GetClipboardText());
                 if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || AnyPadPressed(g_cfg.padFire) || AnyPadPressed(g_cfg.padStart)) screen.MenuEvent(TestScreen::Ev::Accept, 0);
-                else if (IsKeyPressed(KEY_ESCAPE) || AnyPadPressed(g_cfg.padCancel)) screen.MenuEvent(TestScreen::Ev::Back, 0);
+                else if (IsKeyPressed(KEY_ESCAPE) || AnyPadPressed(g_cfg.padCancel) || touchBack) screen.MenuEvent(TestScreen::Ev::Back, 0);
             } else if (screen.InHostRoom() && (IsKeyPressed(KEY_I) || IsKeyPressed(KEY_C))) {
                 if (IsKeyPressed(KEY_I)) screen.ToggleInternet();
                 if (IsKeyPressed(KEY_C) && !screen.RoomCodeText().empty()) SetClipboardText(screen.RoomCodeText().c_str());
@@ -1979,7 +2045,7 @@ int RunWindow(TestScreen& screen, double selfTestSeconds, const std::string& ass
                 }
                 if (IsKeyPressed(KEY_P) || IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || padStartPressed) screen.MenuEvent(TestScreen::Ev::Start, 0);
                 if (IsKeyPressed(KEY_SPACE)) screen.MenuEvent(TestScreen::Ev::Accept, 0);
-                if (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_BACKSPACE) || AnyPadPressed(g_cfg.padCancel)) {
+                if (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_BACKSPACE) || AnyPadPressed(g_cfg.padCancel) || touchBack) {
                     screen.MenuEvent(TestScreen::Ev::Back, 0);
                 }
             }
@@ -2003,6 +2069,7 @@ int RunWindow(TestScreen& screen, double selfTestSeconds, const std::string& ass
                 DrawTexturePro(tex, Rectangle{0, 0, static_cast<float>(app::kScreenW), static_cast<float>(app::kScreenH)},
                                Rectangle{(sw - dw) / 2, (sh - dh) / 2, dw, dh}, Vector2{0, 0}, 0.0f, WHITE);
             }
+            g_touch.Draw();
             EndDrawing();
             if (!screen.Capturing() && IsKeyPressed(KEY_M)) {
                 muted = !muted;
@@ -2060,7 +2127,7 @@ int RunWindow(TestScreen& screen, double selfTestSeconds, const std::string& ass
         // ---- bucle fijo a 60 Hz ----
         acc += std::min(GetFrameTime(), 0.1f);
         while (acc >= kStep) {
-            if (IsKeyPressed(KEY_P) || padStartPressed) screen.PressStart();   // Start: abre la pausa / continua en las pantallas
+            if (IsKeyPressed(KEY_P) || padStartPressed || IsKeyPressed(KEY_BACK)) screen.PressStart();   // Start: abre la pausa / continua en las pantallas
             for (int p = 0; p < 4; ++p) {
                 screen.SetPad(p, PadFromKeys(p));
             }
@@ -2109,6 +2176,7 @@ int RunWindow(TestScreen& screen, double selfTestSeconds, const std::string& ass
         const float dh = app::kScreenH * scale;
         DrawTexturePro(tex, Rectangle{0, 0, static_cast<float>(app::kScreenW), static_cast<float>(app::kScreenH)},
                        Rectangle{(sw - dw) / 2, (sh - dh) / 2, dw, dh}, Vector2{0, 0}, 0.0f, WHITE);
+        g_touch.Draw();
         EndDrawing();
     }
     if (selfTestSeconds > 0) {
@@ -2156,6 +2224,9 @@ int RunLanAuto(TestScreen& screen, bool host, const std::string& name, int frame
     int code = 2;
     bool shotTaken = false;
     while (std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() < 40.0) {
+#ifdef __ANDROID__
+        PollInputEvents();                                     // (sin esto Android cree que el programa se colgo)
+#endif
         if (!screen.InGame()) {
             if (screen.NetGame()) screen.Step(); else screen.TickMenu();
             if (host && online && !codeOut.empty() && !codeWritten && (screen.RoomInternetReady() || screen.RoomInternetFailed())) {
@@ -2165,6 +2236,10 @@ int RunLanAuto(TestScreen& screen, bool host, const std::string& name, int frame
                     std::fclose(f);
                 }
                 std::printf("%s\n", screen.LanStatusText().c_str());
+            }
+            if (!host && !codeIn.empty() && !joinedByCode && codeIn.size() == 14 && codeIn[4] == '-') {   // el codigo mismo (pruebas en el telefono)
+                joinedByCode = true;
+                screen.AutoJoinCode(codeIn);
             }
             if (!host && !codeIn.empty() && !joinedByCode) {                     // el cliente espera el codigo y entra con el
                 if (FILE* f = std::fopen(codeIn.c_str(), "r")) {
@@ -2220,6 +2295,9 @@ int RunLanAuto(TestScreen& screen, bool host, const std::string& name, int frame
         }
     }
     std::printf("%s\n", result.c_str());
+#ifdef __ANDROID__
+    __android_log_print(ANDROID_LOG_INFO, "BCNES", "%s", result.c_str());          // (en el telefono la salida va al logcat)
+#endif
     return code;
 }
 
@@ -2232,6 +2310,37 @@ int main(int argc, char** argv) {
         std::freopen("CONOUT$", "w", stderr);
     }
 #endif
+#ifdef __ANDROID__
+    SetConfigFlags(FLAG_VSYNC_HINT);
+    InitWindow(0, 0, "Battle City");                        // los archivos del APK solo se pueden leer con la ventana abierta
+    g_touch.SetEnabled(true);
+    const std::string androidBase = std::string(GetAndroidApp()->activity->internalDataPath) + "/";
+    // Pruebas: las opciones de linea de comandos se pueden pasar con la propiedad del sistema debug.bcnes.args (adb shell setprop).
+    std::vector<std::string> androidArgs{"raylib"};
+    std::vector<char*> androidArgv;
+    {
+        char prop[PROP_VALUE_MAX] = {0};
+        __system_property_get("debug.bcnes.args", prop);
+        std::stringstream ss{std::string(prop)};
+        std::string tok;
+        while (ss >> tok) androidArgs.push_back(tok);
+        for (std::string& a : androidArgs) androidArgv.push_back(a.data());
+        androidArgv.push_back(nullptr);
+        argc = static_cast<int>(androidArgs.size());
+        argv = androidArgv.data();
+    }
+#endif
+    for (int i = 1; i + 1 < argc; ++i) {                    // --make-code IP: imprime el codigo de sala de esa direccion (pruebas)
+        if (std::string(argv[i]) == "--make-code") {
+            const std::string code = app::MakeRoomCode(argv[i + 1], 47800);
+            if (i + 2 < argc) {
+                if (FILE* f = std::fopen(argv[i + 2], "w")) { std::fprintf(f, "%s\n", code.c_str()); std::fclose(f); }
+            } else {
+                std::printf("%s\n", code.c_str());
+            }
+            return 0;
+        }
+    }
     std::string shotFile;
     std::string wavFile;
     double selfTest = 0.0;
@@ -2257,6 +2366,7 @@ int main(int argc, char** argv) {
         else if (a == "--frames" && i + 1 < argc) frames = std::atoi(argv[++i]);
         else if (a == "--players" && i + 1 < argc) { players = std::atoi(argv[++i]); direct = true; }
         else if (a == "--menu") wantMenu = true;
+        else if (a == "--touch") g_touch.SetEnabled(true);                                  // controles en pantalla (prueba en la PC)
         else if (a == "--do" && i + 1 < argc) actionSpec = argv[++i];
         else if (a == "--scale" && i + 1 < argc) scale = std::atoi(argv[++i]);
         else if (a == "--wav" && i + 1 < argc) wavFile = argv[++i];
@@ -2284,6 +2394,9 @@ int main(int argc, char** argv) {
     {
         const size_t slash = std::string(argv[0]).find_last_of("/\\");
         g_cfgPath = (slash == std::string::npos ? std::string() : std::string(argv[0]).substr(0, slash + 1)) + "battlecitynes_settings.txt";
+#ifdef __ANDROID__
+        g_cfgPath = androidBase + "battlecitynes_settings.txt";
+#endif
         if (g_cfg.Load(g_cfgPath)) {
             if (g_cfg.version < 2) g_cfg.ResetPad();
             if (g_cfg.hiScore < 20000) g_cfg.hiScore = 20000;               // configuracion vieja: el mando vuelve a los valores por defecto (B vuelve)
@@ -2294,6 +2407,9 @@ int main(int argc, char** argv) {
         const std::string exe = argv[0];
         const size_t slash = exe.find_last_of("/\\");
         app::SetLevelRoot((slash == std::string::npos ? std::string() : exe.substr(0, slash + 1)) + "niveles/");     // niveles hechos a mano
+#ifdef __ANDROID__
+        app::SetLevelRoot(androidBase + "niveles/");
+#endif
     }
     TestScreen screen;
     screen.SetFriendlyFromConfig();

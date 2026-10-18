@@ -1,0 +1,36 @@
+BATTLE CITY NES - VERSIÓN ANDROID
+=================================
+
+APK listo para instalar: dist/BattleCityNES.apk  (arm64, Android 7.0 o más nuevo; firmado con clave de depuración)
+
+Instalar en el teléfono
+  1) Pasá el APK al teléfono (cable, Drive, WhatsApp...) o instalalo con:  adb install -r BattleCityNES.apk
+  2) Al abrirlo desde el administrador de archivos Android pide permitir "instalar apps de orígenes desconocidos" para esa app.
+  3) Se abre en horizontal y a pantalla completa. Los datos (configuración, niveles propios) quedan dentro de la app.
+
+Controles en pantalla
+  Izquierda: cruceta (se desliza el dedo).   Derecha: A = disparo / aceptar,  B = volver atrás (en los menús).
+  START (arriba a la derecha): pausa / empezar.   La tecla Atrás de Android también vuelve atrás (y en la partida abre la pausa).
+  Al escribir un nombre o un código de sala aparece un teclado en pantalla (letras, números, BORRAR, VOLVER y LISTO).
+  En CONSTRUCCIÓN aparecen además X, Y, L y R (Y cambia de herramienta, L/R el bloque).
+  Un mando Bluetooth también funciona (los textos de ayuda siguen hablando de A / B / START).
+
+Jugar en red con la PC (crossplay)
+  El teléfono y la PC usan el mismo protocolo: se pueden mezclar en la misma sala, también en MODO BATALLA VS.
+  - Misma red WiFi: JUGAR -> LAN -> UNIRSE (o CREAR PARTIDA si el anfitrión es el teléfono).
+  - Por internet: la PC elige JUGAR -> ONLINE -> CREAR PARTIDA y te pasa el código de 12 letras; en el teléfono:
+    JUGAR -> ONLINE -> UNIRSE CON CÓDIGO y lo escribís con el teclado en pantalla.
+  - El anfitrión conviene que sea la PC (con UPnP o el puerto UDP 47800 abierto). Un teléfono con datos móviles casi nunca puede ser
+    anfitrión (el operador no deja entrar conexiones), pero sí puede UNIRSE a una sala de la PC.
+  - Las dos versiones tienen que ser de la misma entrega (el juego lo avisa si no).
+  - Los niveles hechos a mano no se comparten por red (en red valen los 40 de fábrica y los mapas de batalla generados).
+
+Compilar de nuevo (Windows)
+  Hace falta: JDK 17, Android SDK (build-tools 34, plataforma 34) y NDK 26 en C:\android-dev (o la carpeta de ANDROID_DEV),
+  más MSYS2 con cmake y ninja. Después:   android/build_apk.sh      (ABI=x86_64 android/build_apk.sh arma un APK para el emulador)
+  El script compila la librería nativa con el NDK, arma el APK con aapt2, lo alinea y lo firma.
+
+Verificado
+  Se probó en un emulador Android 14 (x86_64): arranca, los menús responden a los controles táctiles, el teclado en pantalla escribe, se juega,
+  y una partida en red con el anfitrión de Windows terminó con el MISMO estado del juego (hash idéntico) en las dos plataformas.
+  Todavía no se probó en un teléfono real (arm64): si algo falla, avisá qué modelo es.

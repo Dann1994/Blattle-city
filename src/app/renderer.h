@@ -66,6 +66,7 @@ struct LobbyView {
     std::string meLine2[4];                 // segunda linea de ayuda en cada casilla propia (por ejemplo "F LISTO")
     std::string addHint;                    // como sumar otro jugador de esta PC
     std::string title;                      // titulo propio (si esta vacio, el de siempre)
+    std::string joinLine1, joinLine2;       // en las casillas libres (por defecto PRESIONA / DISPARO)
     std::string tag[4];                     // en lugar del nombre del color (por ejemplo "EQUIPO 1")
 };
 
@@ -108,6 +109,7 @@ class Renderer {
 public:
     // Carga los 8 KB de CHR (sacados de la ROM). Devuelve false si falla.
     bool LoadChr(const std::string& path);
+    bool LoadChrData(const uint8_t* data, size_t size);       // desde memoria (Android: viene dentro del APK)
 
     // Dibuja un cuadro 16:9 en rgba (kScreenW * kScreenH * 4 bytes).
     void Render(const nes::Battle& battle, const HudInfo& hud, std::vector<uint8_t>& rgba) const;
