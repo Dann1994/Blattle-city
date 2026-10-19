@@ -26,6 +26,7 @@ struct Config {
     int hiScore = 20000;                     // record guardado
     int friendlyFire = 1;                    // 0 desactivado, 1 paraliza, 2 daña
     bool useSamples = true;                  // sonido grabado (true) o sintetizador de la NES (false)
+    bool voiceChat = true;                   // chat de voz en las partidas en red
     bool autoUpdate = true;                  // al abrir el juego, buscar actualizaciones
 
     // Valores por defecto de teclas y mando: los carga el programa (conoce los codigos).

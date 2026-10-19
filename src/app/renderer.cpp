@@ -1194,7 +1194,10 @@ void Renderer::RenderMenu(const MenuView& m, std::vector<uint8_t>& rgba) const {
         const int sc = m.scrollY;
         auto text = [&](int col, int row, const std::string& t, uint32_t color) { DrawText(canvas, kScreenW, x0 + col * 8, row * 8 + sc, t, color); };
         text(2, 3, "I-" + PadLeft(std::to_string(m.p1Score), 6), 0xFCFCFC);
-        text(11, 3, "HI-" + PadLeft(std::to_string(m.hiScore), 7), 0xFCFCFC);
+        {                                                                  // el puntaje maximo, centrado en la pantalla
+            const std::string hi = "HI-" + PadLeft(std::to_string(m.hiScore), 7);
+            DrawText(canvas, kScreenW, (kScreenW - TextWidth(hi)) / 2, 3 * 8 + sc, hi, 0xFCFCFC);
+        }
         DrawBrickLetters(canvas, kScreenW, "BATTLE", x0 + 26, 46 + sc, 3);
         DrawBrickLetters(canvas, kScreenW, "CITY", x0 + 60, 86 + sc, 3);
         for (size_t i = 0; i < m.items.size(); ++i) {

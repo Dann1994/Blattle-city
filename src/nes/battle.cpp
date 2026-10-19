@@ -724,7 +724,7 @@ void Battle::RunFrame() {
         Sub_C2E6_main_battle_script();
     }
     Sub_E23B_display_bonus_on_screen();
-    if (IsRoyale()) RoyaleItemsDraw();
+    if (IsRoyale() || (wide_ && !IsVersus())) RoyaleItemsDraw();
     Sub_E0D8_bullets_status_handler();
     Sub_DEA6_tanks_handler();
     if (BTNPRESS(0) & con_btn_Start) {          // Start alterna la pausa
@@ -744,6 +744,7 @@ void Battle::Sub_C2E6_main_battle_script() {
     Sub_E1FA_clear_tank_marks();
     Sub_Lava();
     Sub_Extras();
+    CampaignItemsStep();
     Sub_E02E_bullets_status_handler();
     Sub_E2A9_HQ_handler();
     Sub_E27C_players_invincibility_sprites();
@@ -1030,7 +1031,9 @@ void Battle::Status_90(int x) {
 // pueden cambiar de objetivo con probabilidad 1/16.
 void Battle::Status_A0(int x) {
     if (x >= nPlayers_ && (TPOSX(x) & 0x07) == 0 && (TPOSY(x) & 0x07) == 0) {
-        if ((Sub_D44D_generate_random_number() & 0x0F) == 0) {
+        int ix, iy;
+        const bool seeking = wide_ && !IsVersus() && !IsAlly(x) && ((TTYPE(x) >> 5) & 3) == 0 && NearestItem(TankX(x), TankY(x), ix, iy);
+        if ((Sub_D44D_generate_random_number() & (seeking ? 0x03 : 0x0F)) == 0) {      // (el enemigo de tipo 1 que va por un item corrige el rumbo mucho mas seguido)
             Sub_DE72_pick_goal(x);
             return;
         }
@@ -1103,6 +1106,8 @@ void Battle::Status_FollowTarget(int x, u8 status) {
         const int opp = IsRoyale() ? 0 : 1 - TeamOf(x);           // batalla vs: rumbo al aguila del otro equipo
         DESTX = IsRoyale() ? 13 * 16 + 8 : spec_.vsEagleCol[opp] * 16 + 8;       // (battle royale: al centro del mapa)
         R(ram_enemy_destination_Y) = static_cast<u8>(IsRoyale() ? 7 * 16 + 8 : spec_.vsEagleRow[opp] * 16 + 8);
+    } else if (wide_ && x >= nPlayers_ && !IsAlly(x) && ((TTYPE(x) >> 5) & 3) == 0 && [&] { int ix, iy; if (!NearestItem(TankX(x), TankY(x), ix, iy)) return false; DESTX = ix; R(ram_enemy_destination_Y) = static_cast<u8>(iy); return true; }()) {
+        // enemigo de tipo 1: hay un item en el campo, va tras el
     } else if (IsBossLevel()) {
         DESTX = guardX_[x];                      // niveles del aguila enemiga: se queda cerca de ella
         R(ram_enemy_destination_Y) = static_cast<u8>(guardY_[x]);
@@ -1136,6 +1141,13 @@ void Battle::Sub_DE72_pick_goal(int x) {
     if (IsVersus()) {
         VersusPickGoal(x);
         return;
+    }
+    if (wide_ && x >= nPlayers_ && !IsAlly(x) && ((TTYPE(x) >> 5) & 3) == 0) {          // enemigo de tipo 1: va por el item
+        int ix, iy;
+        if (NearestItem(TankX(x), TankY(x), ix, iy)) {
+            Sub_E420_change_tank_status(x, con_tank_flag_follow_HQ);
+            return;
+        }
     }
     if (IsAlly(x)) {
         // aliado: se comporta como un enemigo (rumbo al azar o persecucion) pero su objetivo son los
@@ -2285,6 +2297,63 @@ void Battle::Sub_Extras() {
     }
 }
 
+// El item mas cercano: el principal (si esta en el campo) o el segundo (campania con 3 o 4 jugadores).
+bool Battle::NearestItem(int x, int y, int& ix, int& iy) const {
+    int best = 1 << 20;
+    bool found = false;
+    if (BonusActive() && R(ram_0062_bonus_timer) == 0 && (R(ram_bonus_id) & 0x80) == 0) {
+        ix = R(ram_bonus_pos_X) | (bonusXHi_ << 8);
+        iy = R(ram_bonus_pos_Y);
+        best = std::abs(ix - x) + std::abs(iy - y);
+        found = true;
+    }
+    if (!IsVersus() && rItems_[0].on) {
+        const int d = std::abs(rItems_[0].x - x) + std::abs(rItems_[0].y - y);
+        if (!found || d < best) { ix = rItems_[0].x; iy = rItems_[0].y; found = true; }
+    }
+    return found;
+}
+
+// Aparecio un item: los enemigos de tipo 1 que estan en juego van tras el.
+void Battle::EnemiesGoForItem() {
+    if (!wide_ || IsVersus()) return;
+    for (int x = nPlayers_; x <= lastEnemy_; ++x) {
+        const u8 f = TFLAGS(x);
+        if (!(f & 0x80) || f >= 0xE0 || IsAlly(x) || ((TTYPE(x) >> 5) & 3) != 0) continue;
+        Sub_E420_change_tank_status(x, con_tank_flag_follow_HQ);
+    }
+}
+
+// El segundo item de la campania con 3 o 4 jugadores: lo agarra quien lo toque (jugadores o enemigos).
+void Battle::CampaignItemsStep() {
+    if (!wide_ || IsVersus()) return;
+    RoyaleItem& it = rItems_[0];
+    if (!it.on) return;
+    for (int p = nPlayers_ - 1; p >= 0; --p) {
+        const u8 f = TFLAGS(p);
+        if (!(f & 0x80) || f >= 0xE0) continue;
+        if (std::abs(TankX(p) - it.x) >= 12 || std::abs(TankY(p) - it.y) >= 12) continue;
+        it.on = false;
+        Sub_D9E1_calculate_decimal_number(0x50);                 // 500 puntos
+        Sub_D9BE_add_score(p);
+        Sub_D138_gain_extra_life_for_20000_pts();
+        R(ram_sfx_bonus_pickup) = 1;
+        ++itemPickups_[p];
+        BonusHandler(it.id, p);
+        return;
+    }
+    for (int x = nPlayers_; x <= lastEnemy_; ++x) {
+        const u8 f = TFLAGS(x);
+        if (!(f & 0x80) || f >= 0xE0) continue;
+        if (std::abs(TankX(x) - it.x) >= 12 || std::abs(TankY(x) - it.y) >= 12) continue;
+        const int id = it.id;
+        it.on = false;
+        R(ram_sfx_bonus_pickup) = 1;
+        EnemyBonus(id, x);
+        return;
+    }
+}
+
 // Cantidad de puntos de aparicion de enemigos y su posicion (centro del bloque, en pixeles).
 int Battle::SpawnPointCount() const {
     if (spec_.active && spec_.nSpawns > 0) return spec_.nSpawns;
@@ -2391,6 +2460,10 @@ void Battle::Sub_E3B8_finish_respawn(int x) {
         TTYPE(x) = static_cast<u8>((a & 0xFC) | (kind == 3 ? (hp - 1 < 3 ? hp - 1 : 3) : 0));
     }
     TWHEELS(x) = 0;
+    if (wide_ && !IsVersus() && x >= nPlayers_ && !IsAlly(x) && ((TTYPE(x) >> 5) & 3) == 0) {     // enemigo de tipo 1 que sale con un item en el campo: va por el
+        int ix, iy;
+        if (NearestItem(TankX(x), TankY(x), ix, iy)) TFLAGS(x) = con_tank_flag_follow_HQ | 0x02;
+    }
 }
 
 // sub_DB48_enemy_spawn_handler (00:DB48)
@@ -2928,6 +3001,25 @@ void Battle::Sub_E910_check_bullets_collision_with_bullets() {
 
 // sub_E8BE_spawn_bonus (00:E8BE)
 void Battle::Sub_E8BE_spawn_bonus() {
+    if (SecondItemsAllowed() && BONUSX != 0 && !rItems_[0].on) {         // 3 o 4 jugadores: el nuevo item va al segundo lugar y el primero se queda
+        const int sx = R(ram_bonus_pos_X), shi = bonusXHi_, sy = R(ram_bonus_pos_Y), sid = R(ram_bonus_id), st = R(ram_0062_bonus_timer);
+        for (int tries = 0; tries < 8; ++tries) {
+            SpawnBonusCore();
+            if (std::abs((R(ram_bonus_pos_X) | (bonusXHi_ << 8)) - (sx | (shi << 8))) >= 16 || std::abs(R(ram_bonus_pos_Y) - sy) >= 16) break;     // en otro lugar
+        }
+        rItems_[0] = RoyaleItem{true, R(ram_bonus_pos_X) | (bonusXHi_ << 8), R(ram_bonus_pos_Y), R(ram_bonus_id), 1 << 30};
+        R(ram_bonus_pos_X) = static_cast<u8>(sx);
+        bonusXHi_ = static_cast<u8>(shi);
+        R(ram_bonus_pos_Y) = static_cast<u8>(sy);
+        R(ram_bonus_id) = static_cast<u8>(sid);
+        R(ram_0062_bonus_timer) = static_cast<u8>(st);
+    } else {
+        SpawnBonusCore();
+    }
+    EnemiesGoForItem();
+}
+
+void Battle::SpawnBonusCore() {
     R(ram_sfx_bonus_appear) = 1;
     do {
         auto toPos = [](u8 n) { return U8(((n * 3 * 2) + 6) << 3); };   // 0..3 -> 30, 60, 90, C0
@@ -4080,6 +4172,7 @@ uint32_t Battle::StateHash() const {
     }
     for (int i = 0; i <= lastTank_ && i < kMaxTanks; ++i) { mixInt(ghostT_[i]); mixInt(speedT_[i]); mixInt(portalCd_[i]); }
     mixInt(enemyGhostT_);
+    for (const RoyaleItem& it : rItems_) { mixInt(it.on ? 1 : 0); mixInt(it.x); mixInt(it.y); mixInt(it.id); }
     mixInt(mineSeq_);
     for (const Heli& h : heli_) { mixInt(h.on ? 1 : 0); mixInt(h.owner); mixInt(h.x); mixInt(h.y); mixInt(h.state); mixInt(h.timer); mixInt(h.life); mixInt(h.target); mixInt(h.dir); mixInt(h.acc); }
     for (const Mine& m : mines_) { mixInt(m.on ? 1 : 0); mixInt(m.owner); mixInt(m.col); mixInt(m.row); mixInt(m.age); mixInt(m.seq); }

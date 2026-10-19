@@ -39,9 +39,15 @@ target_link_libraries(nes_render PUBLIC nes_core)
 add_library(nes_audio STATIC src/app/apu.cpp)
 
 # Modo LAN (sockets UDP; en Windows usa Winsock)
-add_library(nes_lan STATIC src/app/lan.cpp src/app/nat.cpp)
+add_library(nes_lan STATIC src/app/lan.cpp src/app/nat.cpp src/app/voice.cpp)
+if (ANDROID)
+    target_sources(nes_lan PRIVATE src/app/mic_android.cpp)
+    target_include_directories(nes_lan PRIVATE ${ANDROID_NDK}/sources/android/native_app_glue)
+else()
+    target_sources(nes_lan PRIVATE src/app/mic_win.cpp)
+endif()
 if (WIN32)
-    target_link_libraries(nes_lan PUBLIC ws2_32 iphlpapi)
+    target_link_libraries(nes_lan PUBLIC ws2_32 iphlpapi winmm)
 endif()
 
 # Buscador de actualizaciones (releases de GitHub): WinINet en Windows, JNI en Android

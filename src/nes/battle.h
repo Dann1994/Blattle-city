@@ -193,6 +193,7 @@ public:
     int MineCount() const { int n = 0; for (const auto& m : mines_) n += m.on ? 1 : 0; return n; }
     struct ExtraIcon { int x, y, id; };                         // iconos de items nuevos que el renderer dibuja (parpadean como los demas)
     int ExtraIcons(ExtraIcon* out, int max) const;
+    void DebugSpawnRandomBonus() { Sub_E8BE_spawn_bonus(); }       // pruebas: aparece un item como al destruir un enemigo que parpadea
     void DebugSpawnHeli(int owner) { SpawnHeli(owner); }
     void DebugPlaceMines(int owner, int n) { PlaceMines(owner, n); }
     void DebugMakePortal() { MakePortal(); }
@@ -205,6 +206,8 @@ public:
     bool RoyaleTimed() const { return IsRoyale() && spec_.royaleTimed; }
     int RoyaleFramesLeft() const { return royaleFrames_; }       // por tiempo: cuadros que quedan
     int RoyaleKills(int id) const { return royaleKills_[id & 7]; }
+    bool ExtraItemAt(int& x, int& y, int& id) const { if (!rItems_[0].on) return false; x = rItems_[0].x; y = rItems_[0].y; id = rItems_[0].id; return true; }
+    int ExtraItemCount() const { return RoyaleItemCount(); }       // (campania: el segundo item de los 3 o 4 jugadores)
     int RoyaleItemCount() const { int n = 0; for (const auto& it : rItems_) n += it.on ? 1 : 0; return n; }     // items en el campo
     void DebugAi(int p, int& dir, int& gc, int& gr, int& stuck, int& timer, int& dodge) const { dir = aiDir_[p]; gc = aiGoalC_[p]; gr = aiGoalR_[p]; stuck = aiStuck_[p]; timer = aiTimer_[p]; dodge = aiDodgeT_[p]; }
     bool DebugFrozen(int p) const { return playerFreeze_[p] != 0; }
@@ -507,6 +510,12 @@ private:
     void Sub_E8BE_spawn_bonus();
     void BonusHandler(int id, int player);
     // items nuevos
+    // Campania con 3 o 4 jugadores: hasta 2 items a la vez (el segundo vive en rItems_[0]); los tanques enemigos de tipo 1 van tras los items.
+    bool SecondItemsAllowed() const { return wide_ && !IsVersus() && diffPlayers_ >= 3; }
+    void SpawnBonusCore();                                        // la aparicion de siempre de un item (en el lugar principal)
+    void CampaignItemsStep();                                     // el segundo item: lo agarran jugadores o enemigos
+    bool NearestItem(int x, int y, int& ix, int& iy) const;       // el item mas cercano (principal o segundo)
+    void EnemiesGoForItem();                                      // los enemigos de tipo 1 van por el item que aparecio
     void Sub_Extras();                                            // un cuadro de helicopteros, minas, portal y temporizadores
     void SpawnHeli(int owner);
     void PlaceMines(int owner, int count);

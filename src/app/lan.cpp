@@ -1,6 +1,7 @@
 #include "lan.h"
 
 #include "nat.h"
+#include "voice.h"
 
 #include <algorithm>
 #include <cctype>
@@ -8,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <atomic>
 #include <map>
 #include <memory>
@@ -117,6 +119,7 @@ struct Lan::Impl {
         bool mapsOk = false;               // ya tiene todos los mapas compartidos
     };
     double lastMapSend = 0;
+    std::deque<std::pair<int, std::vector<uint8_t>>> voiceIn;     // voz recibida (hablante, paquete)
     size_t nextMap = 0;
 
     SOCKET sock = INVALID_SOCKET;
@@ -263,7 +266,7 @@ struct Lan::Impl {
 // La version del programa para el juego en red: tiene que ser la misma en Windows y en Android (se compilan en momentos distintos),
 // asi que es una constante que se cambia a mano cada vez que cambia la simulacion o el protocolo.
 std::string Lan::BuildId() {
-    return "BCNES-2026.10.19-items";
+    return "BCNES-2026.10.20-voice";
 }
 
 Lan::Lan(uint16_t port) : impl_(new Impl) {
@@ -475,7 +478,27 @@ bool Lan::Join(const LanGame& game, const std::string& myName) {
     return true;
 }
 
+void Lan::SendVoice(const std::vector<uint8_t>& packet) {
+    if (impl_->sock == INVALID_SOCKET || packet.empty()) return;
+    const std::string b64 = Base64Encode(packet.data(), packet.size());
+    if (state_ == State::Hosting) {
+        const std::string out = "BCNES1a|0|" + b64;
+        for (const auto& m : impl_->members) impl_->Send(m.addr, out);
+    } else if (state_ == State::Joined) {
+        impl_->Send(impl_->hostAddr, "BCNES1A|" + b64);
+    }
+}
+
+bool Lan::PopVoice(int& speaker, std::vector<uint8_t>& packet) {
+    if (impl_->voiceIn.empty()) return false;
+    speaker = impl_->voiceIn.front().first;
+    packet = std::move(impl_->voiceIn.front().second);
+    impl_->voiceIn.pop_front();
+    return true;
+}
+
 void Lan::Leave() {
+    impl_->voiceIn.clear();
     CloseInternet();
     if (impl_->sock != INVALID_SOCKET) {
         if (state_ == State::Hosting) {
@@ -868,6 +891,15 @@ void Lan::Update() {
             } else if (member) {
                 member->lastSeen = now;
                 if (kind == 'H' && f.size() >= 2) member->mapsOk = f[1] == "1";
+                if (kind == 'A' && f.size() >= 2) {                                    // voz de un miembro: la oigo y la mando a los demas
+                    std::vector<uint8_t> pk;
+                    if (Base64Decode(f[1], pk) && !pk.empty() && pk.size() < 400) {
+                        impl_->voiceIn.emplace_back(member->id, pk);
+                        while (impl_->voiceIn.size() > 100) impl_->voiceIn.pop_front();
+                        const std::string out = "BCNES1a|" + std::to_string(member->id) + "|" + f[1];
+                        for (const auto& o : impl_->members) if (o.id != member->id) impl_->Send(o.addr, out);
+                    }
+                }
                 if (kind == 'X') {
                     if (!started_) {
                         RemovePlayersOf(member->id);
@@ -973,6 +1005,12 @@ void Lan::Update() {
                 } else if (kind == 'F' && state_ == State::Joining) {
                     state_ = State::Full;
                     error_ = "LA PARTIDA ESTÁ LLENA O YA EMPEZÓ";
+                } else if (kind == 'a' && f.size() >= 3 && state_ == State::Joined) {
+                    std::vector<uint8_t> pk;
+                    if (Base64Decode(f[2], pk) && !pk.empty() && pk.size() < 400) {
+                        impl_->voiceIn.emplace_back(ToInt(f[1]), pk);
+                        while (impl_->voiceIn.size() > 100) impl_->voiceIn.pop_front();
+                    }
                 } else if (kind == 'C') {
                     lost_ = true;
                     state_ = State::Closed;

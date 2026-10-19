@@ -163,6 +163,10 @@ public:
     // Comprobacion de sincronia (cada tanto, con el hash del estado del juego en ese cuadro).
     void ReportHash(int frame, uint32_t hash);
     bool Desynced() const { return desync_; }
+    // ---- chat de voz ----
+    // Paquetes de voz (ya codificados, ver voice.h): el miembro los manda al anfitrion y este los retransmite a los demas.
+    void SendVoice(const std::vector<uint8_t>& packet);
+    bool PopVoice(int& speaker, std::vector<uint8_t>& packet);       // llegado de la sala; speaker = id de PC (0 = anfitrion)
     bool Lost() const { return lost_; }                 // se perdio la conexion con el anfitrion (o la partida se cerro)
 
 private:

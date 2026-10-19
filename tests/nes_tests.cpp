@@ -3,6 +3,7 @@
 // en tests/rom_oracle_tests.cpp (cuando existe).
 
 #include <algorithm>
+#include <cmath>
 #include <cctype>
 #include <cstring>
 #include <functional>
@@ -21,6 +22,7 @@
 #include "../src/app/flow.h"
 #include "../src/app/lan.h"
 #include "../src/app/updater.h"
+#include "../src/app/voice.h"
 #include "../src/app/nat.h"
 #include "../src/app/levels.h"
 #include "../src/app/lobby.h"
@@ -3405,6 +3407,90 @@ void TestNewItems() {
 }
 
 // Buscador de actualizaciones: versiones, lectura de los releases de GitHub y eleccion del archivo
+void TestVoiceChat() {
+    std::printf("[voz] ADPCM, paquetes, deteccion de voz, mezcla y reenvio por la sala\n");
+    // ADPCM: un tono de 440 Hz vuelve casi igual
+    std::vector<int16_t> tone(app::kVoiceFrame * 6);
+    for (size_t i = 0; i < tone.size(); ++i) tone[i] = static_cast<int16_t>(8000 * std::sin(2 * 3.14159265 * 440 * static_cast<double>(i) / app::kVoiceRate));
+    app::AdpcmState enc, dec;
+    std::vector<uint8_t> bytes(tone.size() / 2);
+    app::AdpcmEncode(tone.data(), static_cast<int>(tone.size()), enc, bytes.data());
+    std::vector<int16_t> back(tone.size());
+    app::AdpcmDecode(bytes.data(), static_cast<int>(tone.size()), dec, back.data());
+    double err = 0, sig = 0;
+    for (size_t i = 0; i < tone.size(); ++i) { const double d = tone[i] - back[i]; err += d * d; sig += static_cast<double>(tone[i]) * tone[i]; }
+    CHECK(err < sig / 100);                                                     // mas de 20 dB de relacion senal/ruido
+    CHECK_EQ(enc.predictor, dec.predictor);
+    // base64
+    const uint8_t raw[] = {0, 1, 2, 250, 251, 252, 253};
+    std::vector<uint8_t> rt;
+    CHECK(app::Base64Decode(app::Base64Encode(raw, sizeof raw), rt));
+    CHECK(rt == std::vector<uint8_t>(raw, raw + sizeof raw));
+    CHECK(!app::Base64Decode("a|b", rt));
+    // paquete
+    uint16_t seq;
+    app::AdpcmState st;
+    int frames;
+    const uint8_t* ad;
+    const std::vector<uint8_t> pk = app::VoicePacketBuild(7, enc, 3, bytes.data());
+    CHECK(app::VoicePacketParse(pk.data(), pk.size(), seq, st, frames, ad));
+    CHECK_EQ(seq, 7);
+    CHECK_EQ(frames, 3);
+    CHECK(!app::VoicePacketParse(pk.data(), pk.size() - 1, seq, st, frames, ad));
+    // deteccion de voz: el silencio no genera paquetes, el tono si; en silencio (mute) tampoco
+    app::VoiceChat a, b;
+    std::vector<int16_t> quiet(app::kVoiceFrame * 30, 0);
+    a.PushMic(quiet.data(), static_cast<int>(quiet.size()));
+    std::vector<uint8_t> out;
+    CHECK(!a.PopPacket(out));
+    std::vector<int16_t> loud(app::kVoiceFrame * 30);
+    for (size_t i = 0; i < loud.size(); ++i) loud[i] = static_cast<int16_t>(8000 * std::sin(2 * 3.14159265 * 300 * static_cast<double>(i) / app::kVoiceRate));
+    a.SetMuted(true);
+    a.PushMic(loud.data(), static_cast<int>(loud.size()));
+    CHECK(!a.PopPacket(out));
+    a.SetMuted(false);
+    a.PushMic(loud.data(), static_cast<int>(loud.size()));
+    a.PushMic(quiet.data(), static_cast<int>(quiet.size()));
+    int count = 0;
+    while (a.PopPacket(out)) { b.Receive(3, out.data(), out.size()); b.Receive(3, out.data(), out.size()); ++count; }     // (el repetido se descarta)
+    CHECK(count >= 8);
+    CHECK(b.Speaking(3));
+    CHECK(!b.Speaking(4));
+    // mezcla: hay sonido y despues se vacia
+    std::vector<int16_t> mix(512);
+    int nonzero = 0;
+    for (int k = 0; k < 20; ++k) { b.Mix(mix.data(), 512); for (int16_t v : mix) nonzero += v != 0; }
+    CHECK(nonzero > 2000);
+    b.Mix(mix.data(), 512);
+    CHECK(std::all_of(mix.begin(), mix.end(), [](int16_t v) { return v == 0; }));
+    // por la sala: la voz de un miembro llega al anfitrion y al otro miembro; la del anfitrion llega a los dos
+    const uint16_t port = 47945;
+    app::Lan host(port), g1(port), g2(port);
+    CHECK(host.Host("Ana"));
+    CHECK(g1.Search());
+    CHECK(SpinLan({&host, &g1}, [&] { return !g1.Games().empty(); }));
+    CHECK(g1.Join(g1.Games()[0], "Beto"));
+    CHECK(g2.Search());
+    CHECK(SpinLan({&host, &g1, &g2}, [&] { return !g2.Games().empty(); }));
+    CHECK(g2.Join(g2.Games()[0], "Caro"));
+    CHECK(SpinLan({&host, &g1, &g2}, [&] { return g1.state() == app::Lan::State::Joined && g2.state() == app::Lan::State::Joined && host.Players().size() == 3; }));
+    g1.SendVoice(pk);
+    int who = -1;
+    std::vector<uint8_t> got;
+    bool atHost = false, atG2 = false;
+    SpinLan({&host, &g1, &g2}, [&] {
+        if (host.PopVoice(who, got)) atHost = who == g1.MyId() && got == pk;
+        if (g2.PopVoice(who, got)) atG2 = who == g1.MyId() && got == pk;
+        return atHost && atG2;
+    });
+    CHECK(atHost);
+    CHECK(atG2);
+    host.SendVoice(pk);
+    bool g1Got = false;
+    SpinLan({&host, &g1, &g2}, [&] { if (g1.PopVoice(who, got)) g1Got = who == 0 && got == pk; return g1Got; });
+    CHECK(g1Got);
+}
+
 void TestUpdater() {
     std::printf("[actualizaciones] comparar versiones, leer los releases (pc-vX / android-vX) y elegir el instalador o el APK\n");
     CHECK_EQ(app::CompareVersions("1.0.0", "1.0.0"), 0);
@@ -3442,6 +3528,71 @@ void TestUpdater() {
     CHECK(!app::ParseLatestRelease("no es json", "pc-", none));
     CHECK(!app::ParseLatestRelease("{}", "pc-", none));
     CHECK(!app::ParseLatestRelease("[]", "pc-", none));
+}
+
+// Campania: los enemigos de tipo 1 van por los items, y con 3 o 4 jugadores puede haber 2 items a la vez
+void TestCampaignItems() {
+    std::printf("[items campania] los enemigos de tipo 1 buscan los items; con 3 o 4 jugadores hay hasta 2 items a la vez\n");
+    auto make = [](int players) {
+        auto b = std::make_unique<nes::Battle>();
+        b->SetWide(true);
+        b->SetLevel(1);
+        b->NewGame(players, 1);
+        u8 blocks[14][27];
+        std::memset(blocks, 13, sizeof(blocks));
+        b->LoadWideStage(blocks);
+        b->StartStage();
+        b->R(nes::ram_enemy_spawn_cnt) = 0;
+        for (int f = 0; f < 160; ++f) b->RunFrame();
+        b->DebugClearEnemies();
+        b->DebugClearBullets();
+        return b;
+    };
+    // ---- dos items a la vez con 3 o 4 jugadores; con 1 o 2 sigue siendo uno solo ----
+    for (int players = 1; players <= 4; ++players) {
+        auto b = make(players);
+        b->DebugSpawnRandomBonus();
+        CHECK(b->BonusActive());
+        CHECK_EQ(b->ExtraItemCount(), 0);
+        b->DebugSpawnRandomBonus();                                           // aparece otro
+        CHECK(b->BonusActive());
+        CHECK_EQ(b->ExtraItemCount(), players >= 3 ? 1 : 0);                   // el segundo solo con 3 o 4 jugadores
+        b->DebugSpawnRandomBonus();                                           // un tercero reemplaza al primero (como siempre)
+        CHECK_EQ(b->ExtraItemCount(), players >= 3 ? 1 : 0);
+    }
+    // ---- el segundo item se agarra (un jugador lo toca y desaparece) ----
+    {
+        auto b = make(4);
+        b->DebugSpawnRandomBonus();
+        b->DebugSpawnRandomBonus();
+        int x, y, id;
+        CHECK(b->ExtraItemAt(x, y, id));
+        for (int p = 1; p < 4; ++p) b->SetTankPos(p, 30 + p * 40, 225);
+        b->SetTankPos(0, x, y);
+        const int score0 = b->Score(0);
+        b->RunFrame();
+        b->RunFrame();
+        CHECK_EQ(b->ExtraItemCount(), 0);
+        CHECK(b->Score(0) > score0);                                          // 500 puntos
+        CHECK(b->BonusActive());                                              // y el primero sigue ahi
+    }
+    // ---- los enemigos de tipo 1 van por el item ----
+    {
+        auto b = make(1);
+        b->SetTankPos(0, 20, 225);
+        b->SetBonus(380, 150, 3);                                              // una estrella lejos del enemigo
+        const int e = b->DebugSpawnEnemy(0, false);                            // tipo 1
+        for (int f = 0; f < 90; ++f) { b->SetTankPos(0, 20, 225); b->RunFrame(); }
+        b->SetTankPos(e, 64, 64);
+        b->R(nes::ram_clock_timer) = 0;
+        bool got = false;
+        for (int f = 0; f < 3500 && !got; ++f) {
+            b->SetTankPos(0, 20, 225);
+            b->RunFrame();
+            got = !b->BonusActive();
+        }
+        CHECK(got);                                                            // el enemigo llego solo y lo agarro
+    }
 }
 
 void TestGameOverScreen() {
@@ -3648,6 +3799,8 @@ int main() {
     TestRoyale();
     TestNewItems();
     TestUpdater();
+    TestVoiceChat();
+    TestCampaignItems();
     TestLanSharedMaps();
     TestAllyRules();
     TestSandBlock();

@@ -45,6 +45,7 @@
 #include "lan.h"
 #include "lobby.h"
 #include "updater.h"
+#include "voice.h"
 #include "version.h"
 #include "renderer.h"
 #include "samples.h"
@@ -756,7 +757,7 @@ public:
             case Scene::PlayMenu: return 2;
             case Scene::ModeMenu: return 5;
             case Scene::VsMenu: return 6;
-            case Scene::Settings: return 9;
+            case Scene::Settings: return 10;
             case Scene::UpdateCheck: return 1;
             case Scene::UpdatePrompt: return 2;
             case Scene::UpdateDownload: return 1;
@@ -777,8 +778,8 @@ public:
             case Scene::Title: scene_ = Scene::ConfirmExit; menuIndex_ = 0; break;            // Atras en el titulo: preguntar si se sale
             case Scene::ConfirmExit: scene_ = Scene::Title; menuIndex_ = 3; break;
             case Scene::UpdateCheck: scene_ = Scene::Title; menuIndex_ = 0; break;
-            case Scene::UpdatePrompt: scene_ = updateReturn_; menuIndex_ = updateReturn_ == Scene::Settings ? 7 : 0; break;
-            case Scene::UpdateDownload: updater_.Cancel(); scene_ = updateReturn_; menuIndex_ = updateReturn_ == Scene::Settings ? 7 : 0; break;
+            case Scene::UpdatePrompt: scene_ = updateReturn_; menuIndex_ = updateReturn_ == Scene::Settings ? 8 : 0; break;
+            case Scene::UpdateDownload: updater_.Cancel(); scene_ = updateReturn_; menuIndex_ = updateReturn_ == Scene::Settings ? 8 : 0; break;
             case Scene::Settings: scene_ = settingsReturn_; menuIndex_ = settingsReturn_ == Scene::Pause ? 1 : 2; break;
             case Scene::KeysPlayer: scene_ = Scene::Settings; menuIndex_ = 0; break;
             case Scene::KeysList: scene_ = Scene::KeysPlayer; menuIndex_ = keysPlayer_; break;
@@ -821,6 +822,16 @@ public:
     bool TextEntry() const { return scene_ == Scene::NameEntry || scene_ == Scene::CodeEntry; }
     bool InHostRoom() const { return scene_ == Scene::LanHost; }
     bool NetGame() const { return netGame_; }
+    // Chat de voz: la sala en uso (nullptr si no se esta en una sala ni en una partida en red) y el nombre de quien habla.
+    app::Lan* VoiceLan() {
+        const bool inRoom = scene_ == Scene::LanHost || (scene_ == Scene::LanJoined && lan_.state() == app::Lan::State::Joined);
+        const bool inGame = netGame_ && (lan_.state() == app::Lan::State::Hosting || lan_.state() == app::Lan::State::Joined);
+        return (inRoom || inGame) ? &lan_ : nullptr;
+    }
+    std::string SpeakerName(int ownerId) const {
+        for (size_t i = 0; i < lan_.Owners().size() && i < lan_.Players().size(); ++i) if (lan_.Owners()[i] == ownerId) return lan_.Players()[i];
+        return "?";
+    }
     void TypeChar(int cp) {
         if (cp < 32 || cp > 126) return;
         if (scene_ == Scene::CodeEntry) {                                      // el codigo: letras y numeros, hasta 12
@@ -1350,8 +1361,8 @@ public:
             case Scene::Settings:
                 if (index == 0) { scene_ = Scene::KeysPlayer; menuIndex_ = 0; }
                 else if (index == 1) { scene_ = Scene::PadSettings; menuIndex_ = 0; }
-                else if (index >= 2 && index <= 6) ChangeSetting(index);
-                else if (index == 7) { manualCheck_ = true; installLaunched_ = false; updater_.StartCheck(); }      // buscar ahora
+                else if (index >= 2 && index <= 7) ChangeSetting(index);
+                else if (index == 8) { manualCheck_ = true; installLaunched_ = false; updater_.StartCheck(); }      // buscar ahora
                 else GoBack();
                 break;
             case Scene::UpdateCheck:
@@ -1409,6 +1420,8 @@ public:
                 g_cfg.turbo = !g_cfg.turbo;
             } else if (index == 6) {
                 g_cfg.autoUpdate = !g_cfg.autoUpdate;
+            } else if (index == 7) {
+                g_cfg.voiceChat = !g_cfg.voiceChat;
             }
         } else if (scene_ == Scene::PadSettings && index == 3) {
             g_cfg.vibration = !g_cfg.vibration;
@@ -1728,7 +1741,7 @@ public:
                            std::string("SONIDO: ") + (g_useSamples ? "REMASTERIZADO" : "ORIGINAL"),
                            std::string("PANTALLA COMPLETA: ") + yesNo[IsWindowState(FLAG_BORDERLESS_WINDOWED_MODE) ? 1 : 0],
                            std::string("TURBO: ") + yesNo[g_cfg.turbo ? 1 : 0], std::string("ACTUALIZACIÓN AUTOMÁTICA: ") + yesNo[g_cfg.autoUpdate ? 1 : 0],
-                           "BUSCAR ACTUALIZACIONES", "VOLVER"};
+                           std::string("CHAT DE VOZ: ") + yesNo[g_cfg.voiceChat ? 1 : 0], "BUSCAR ACTUALIZACIONES", "VOLVER"};
                 v.note = UpdateStatusText();
                 v.footer = ChangeHint();
                 break;
@@ -2263,6 +2276,12 @@ int RunWindow(TestScreen& screen, double selfTestSeconds, const std::string& ass
         std::fprintf(stderr, "No se encontraron los sonidos en %ssounds/: se usa el sintetizador de la NES\n", assetsDir.c_str());
     }
     bool muted = false;
+    // ---- chat de voz ----
+    app::VoiceChat voice;
+    SetAudioStreamBufferSizeDefault(1024);
+    AudioStream voiceStream = LoadAudioStream(app::kVoiceRate, 16, 1);
+    PlayAudioStream(voiceStream);
+    double voiceRetry = 0;
     SetWindowMinSize(432, 240);
     SetExitKey(KEY_NULL);
     SetTargetFPS(60);
@@ -2291,6 +2310,29 @@ int RunWindow(TestScreen& screen, double selfTestSeconds, const std::string& ass
             for (int g = 0; g < 4; ++g) available[g] = IsGamepadAvailable(g);
             app::AssignPads(available, g_padOfSlot);                 // los mandos conectados toman a los jugadores solos
             screen.AutoJoinPads(g_padOfSlot);
+        }
+        {   // ---- chat de voz: se prende solo en una sala o partida en red ----
+            app::Lan* vl = g_noUpdate ? nullptr : screen.VoiceLan();
+            if (vl && g_cfg.voiceChat) {
+                if (!voice.Active() || (!voice.MicAvailable() && GetTime() > voiceRetry)) {
+                    voice.Start();                                             // (en Android la primera vez pide el permiso; se reintenta cada 3 s)
+                    voiceRetry = GetTime() + 3.0;
+                }
+                if (IsKeyPressed(KEY_TAB) || AnyPadPressed(GAMEPAD_BUTTON_MIDDLE_LEFT) ||
+                    (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && GetMouseX() < GetScreenWidth() / 5 && GetMouseY() < GetScreenHeight() / 12)) voice.ToggleMute();
+                std::vector<uint8_t> pk;
+                while (voice.PopPacket(pk)) vl->SendVoice(pk);
+                int who;
+                while (vl->PopVoice(who, pk)) voice.Receive(who, pk.data(), pk.size());
+            } else if (voice.Active()) {
+                voice.Stop();
+                voice.ClearSpeakers();
+            }
+            while (IsAudioStreamProcessed(voiceStream)) {
+                int16_t out[512];
+                voice.Mix(out, 512);
+                UpdateAudioStream(voiceStream, out, 512);
+            }
         }
         g_touch.SetExtras(screen.InEditor());
         g_touch.Update(GetScreenWidth(), GetScreenHeight(), screen.TextEntry());
@@ -2482,8 +2524,28 @@ int RunWindow(TestScreen& screen, double selfTestSeconds, const std::string& ass
         DrawTexturePro(tex, Rectangle{0, 0, static_cast<float>(app::kScreenW), static_cast<float>(app::kScreenH)},
                        Rectangle{(sw - dw) / 2, (sh - dh) / 2, dw, dh}, Vector2{0, 0}, 0.0f, WHITE);
         g_touch.Draw();
+        if (voice.Active()) {                                                 // indicador del chat de voz (arriba a la izquierda; tocarlo tambien silencia)
+            const int fs = std::max(14, GetScreenHeight() / 34);
+            const char* st = !voice.MicAvailable() ? "MIC: SIN MICROFONO" : (voice.Muted() ? "MIC: SILENCIADO" : (voice.TransmittingNow() ? "MIC: HABLANDO" : "MIC: ACTIVO"));
+            const Color col = !voice.MicAvailable() ? Color{255, 120, 80, 255} : (voice.Muted() ? Color{255, 90, 90, 255} : Color{120, 255, 120, 255});
+            DrawRectangle(4, 4, MeasureText(st, fs) + 12, fs + 8, Color{0, 0, 0, 150});
+            DrawText(st, 10, 8, fs, col);
+            int row = 1;
+            if (const app::Lan* vl = screen.VoiceLan()) {
+                for (int id = 0; id < 8; ++id) {
+                    if (id != vl->MyId() && voice.Speaking(id)) {
+                        const std::string who = "> " + screen.SpeakerName(id);
+                        DrawRectangle(4, 4 + row * (fs + 8), MeasureText(who.c_str(), fs) + 12, fs + 8, Color{0, 0, 0, 150});
+                        DrawText(who.c_str(), 10, 8 + row * (fs + 8), fs, Color{255, 230, 120, 255});
+                        ++row;
+                    }
+                }
+            }
+        }
         EndDrawing();
     }
+    voice.Stop();
+    UnloadAudioStream(voiceStream);
     if (selfTestSeconds > 0) {
         std::printf("audio: %d cortes (underruns), %d descartes\n", g_ring.Underruns(), g_ring.Dropped());
     }
