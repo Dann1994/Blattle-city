@@ -20,6 +20,7 @@ enum Id : uint8_t {
     kBrickRight = 0, kBrickBottom, kBrickLeft, kBrickTop, kBrick,
     kSteelRight, kSteelBottom, kSteelLeft, kSteelTop, kSteel,
     kWater, kForest, kIce, kEmpty, kSand,
+    kLava = 16,                      // (el motor la conoce como 16; en los niveles del editor es el 15)
 };
 
 struct Rng {
@@ -109,6 +110,108 @@ void EnsureReachable(uint8_t out[kLevelRows][kLevelCols], int bossLayers) {
     }
 }
 
+
+// Tematica por tandas de 5 niveles: 1-5 ladrillos, 6-10 arbustos, 11-15 agua, 16-20 arena, 21-25 hielo, 26-30 hierro, 31-35 lava, 36-40 mezcla.
+// Cada tanda convierte parte de los ladrillos al bloque que predomina, suma parches de ese bloque en las zonas vacias y deja un poco
+// de los bloques de las tandas anteriores. Los costados son simetricos; el centro (la construccion original) no.
+struct ThemeRule { int convert[16]; int patch[16]; };      // por id de bloque: % de ladrillos que pasan a ese bloque / % de celdas vacias donde empieza un parche
+
+ThemeRule ThemeFor(int theme) {
+    ThemeRule t{};
+    auto cv = [&](int id, int pct) { t.convert[id] = pct; };
+    auto pa = [&](int id, int pct) { t.patch[id] = pct; };
+    switch (theme) {
+        case 1: cv(kForest, 30); pa(kForest, 14); break;
+        case 2: cv(kWater, 30); pa(kWater, 10); cv(kForest, 6); pa(kForest, 3); break;
+        case 3: cv(kSand, 35); pa(kSand, 18); cv(kForest, 6); pa(kForest, 3); cv(kWater, 5); pa(kWater, 2); break;
+        case 4: cv(kIce, 35); pa(kIce, 18); cv(kSand, 8); pa(kSand, 4); cv(kWater, 4); pa(kWater, 2); cv(kForest, 5); pa(kForest, 3); break;
+        case 5: cv(kSteel, 45); pa(kSteel, 8); cv(kIce, 7); pa(kIce, 3); cv(kSand, 6); pa(kSand, 3); cv(kWater, 4); pa(kWater, 2); cv(kForest, 4); pa(kForest, 2); break;
+        case 6: cv(kSteel, 22); pa(kSteel, 4); cv(kIce, 4); pa(kIce, 2); cv(kSand, 4); pa(kSand, 2); cv(kWater, 3); pa(kWater, 2); cv(kForest, 3); pa(kForest, 2); break;
+        case 7: cv(kForest, 8); pa(kForest, 5); cv(kWater, 8); pa(kWater, 4); cv(kSand, 8); pa(kSand, 5); cv(kIce, 8); pa(kIce, 5); cv(kSteel, 10); pa(kSteel, 3); break;
+        default: break;
+    }
+    return t;
+}
+
+void ApplyTheme(uint8_t out[kLevelRows][kLevelCols], int l) {
+    const int theme = (l - 1) / 5;
+    if (theme == 0) return;
+    const ThemeRule rule = ThemeFor(theme);
+    Rng rng(static_cast<uint32_t>(l) * 15485863u + 101u);
+    static const int kIds[] = {kForest, kWater, kSand, kIce, kSteel};
+    // 1) parte de los ladrillos pasa al bloque del tema
+    for (int row = 1; row < kLevelRows; ++row) {
+        for (int col = 0; col <= 19; ++col) {
+            if (out[row][col] > kBrick) continue;                       // solo ladrillos (enteros o mitades)
+            int roll = static_cast<int>(rng.Next() % 100u);
+            for (int id : kIds) {
+                if (roll < rule.convert[id]) { out[row][col] = static_cast<uint8_t>(id); break; }
+                roll -= rule.convert[id];
+            }
+            if (col <= 6) out[row][kLevelCols - 1 - col] = out[row][col];
+        }
+    }
+    // 2) parches en las celdas vacias: de 1 a 3 bloques seguidos
+    for (int row = 1; row <= 12; ++row) {
+        for (int col = 0; col <= 19; ++col) {
+            if (out[row][col] != kEmpty) continue;
+            int roll = static_cast<int>(rng.Next() % 100u);
+            int pick = -1;
+            for (int id : kIds) {
+                if (roll < rule.patch[id]) { pick = id; break; }
+                roll -= rule.patch[id];
+            }
+            if (pick < 0) continue;
+            const int len = 1 + static_cast<int>(rng.Next() % 3u);
+            for (int k = 0; k < len && col + k <= 19; ++k) {
+                if (out[row][col + k] != kEmpty) break;
+                out[row][col + k] = static_cast<uint8_t>(pick);
+                if (col + k <= 6) out[row][kLevelCols - 1 - (col + k)] = static_cast<uint8_t>(pick);
+            }
+        }
+    }
+}
+
+// Lava contenida: 1 o 2 celdas de lava rodeadas de ladrillo y hierro (mientras no se rompa el borde no se mueve). Va al final, sobre celdas
+// que no sean agua ni hierro, lejos de las apariciones, la base y el aguila enemiga, y despues de garantizar los caminos (rodear con bloques no los cierra).
+void PlaceLavaPools(uint8_t out[kLevelRows][kLevelCols], int l, int attempts) {
+    Rng rng(static_cast<uint32_t>(l) * 49979687u + 7u);
+    const bool boss = l % 10 == 0;
+    auto zoneOk = [&](int r0, int r1, int c0, int c1) {
+        for (int r = r0; r <= r1; ++r) {
+            for (int c = c0; c <= c1; ++c) {
+                if (r < 2 || r > 10 || c < 3 || c > kLevelCols - 4) return false;                 // lejos de los bordes, las apariciones y la base
+                if (boss && r <= 5 && c >= 7 && c <= 19) return false;                            // la fortaleza del aguila enemiga
+                if (out[r][c] == kLava) return false;                                                    // lo demas se reemplaza
+            }
+        }
+        return true;
+    };
+    auto pool = [&](int r, int c, int w) {                      // lava de w celdas con su borde
+        for (int rr = r - 1; rr <= r + 1; ++rr)
+            for (int cc = c - 1; cc <= c + w; ++cc) {
+                const bool inner = rr == r && cc >= c && cc < c + w;
+                if (inner) { out[rr][cc] = kLava; continue; }
+                const bool corner = (rr != r) && (cc == c - 1 || cc == c + w);
+                out[rr][cc] = (corner && rng.Chance(60)) ? kSteel : kBrick;
+            }
+    };
+    int placed = 0;
+    for (int i = 0; i < attempts * 40 && placed < attempts; ++i) {
+        const int w = rng.Chance(40) ? 2 : 1;
+        const int r = 3 + static_cast<int>(rng.Next() % 7u);
+        const int c = 4 + static_cast<int>(rng.Next() % 18u);
+        if (!zoneOk(r - 1, r + 1, c - 1, c + w)) continue;
+        // los costados se reflejan: cuenta como dos pozos
+        const int mc = kLevelCols - c - w;
+        const bool mirror = c <= 6 && mc != c && zoneOk(r - 1, r + 1, mc - 1, mc + w);
+        if (c <= 6 && !(c + w + 1 < mc - 1)) continue;
+        pool(r, c, w);
+        if (mirror) pool(r, mc, w);
+        ++placed;
+    }
+}
+
 } // namespace
 
 int DifficultyTier(int level) {
@@ -180,6 +283,8 @@ void GenerateWideLevel(int level, uint8_t out[kLevelRows][kLevelCols]) {
         }
     }
 
+    ApplyTheme(out, l);
+
     // 3) Zonas que quedan libres: fila de arriba, aparicion lateral a mitad del mapa y los lugares de los jugadores
     for (int c = 0; c < kLevelCols; ++c) out[0][c] = kEmpty;
     for (int r = 5; r <= 7; ++r)
@@ -196,6 +301,9 @@ void GenerateWideLevel(int level, uint8_t out[kLevelRows][kLevelCols]) {
             for (int c = 13 - gc - 2; c <= 13 + gc + 2; ++c) out[r][c] = kEmpty;
     }
     EnsureReachable(out, layers);
+    const int theme = (l - 1) / 5;
+    if (theme == 6) PlaceLavaPools(out, l, 7);
+    else if (theme == 7) PlaceLavaPools(out, l, 3);
 }
 
 void GenerateTopStrip(int level, uint8_t out[kLevelCols]) {
@@ -300,7 +408,7 @@ LevelDef BuiltinLevelDef(int level) {
     uint8_t body[kLevelRows][kLevelCols];
     GenerateWideLevel(l, body);
     for (int r = 0; r < kLevelRows; ++r)
-        for (int c = 0; c < kLevelCols; ++c) d.cells[r + 1][c] = body[r][c];
+        for (int c = 0; c < kLevelCols; ++c) d.cells[r + 1][c] = body[r][c] == kLava ? 15 : body[r][c];
     d.boss = l % 10 == 0;
     d.tier = DifficultyTier(l);
     d.rank = std::max(1, std::min(4, l / 10));

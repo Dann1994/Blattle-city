@@ -713,7 +713,7 @@ void TestLevelsAreValid() {
                     if (!cleared && !(boss && wr <= 4) && g[wr][wc] != v) ++diff;
                 }
             }
-            CHECK(diff <= 2);                                              // sin cambios (a lo sumo un paso abierto)
+            if (level <= 5) CHECK(diff <= 2);                              // 1-5: la construccion original sin cambios (a lo sumo un paso abierto); despues la tematica la modifica
         }
         // alcanzabilidad desde el frente de la base
         bool reach[14][27] = {};
@@ -742,6 +742,48 @@ void TestLevelsAreValid() {
     std::sort(seen.begin(), seen.end());
     CHECK_EQ(std::unique(seen.begin(), seen.end()) - seen.begin(), 40);  // ninguno repetido
     CHECK(steelLate > steelEarly);                                       // mas hierro con la dificultad
+    {   // tematica por tandas de 5 niveles: predomina un bloque y siguen apareciendo los anteriores
+        auto count = [](int level, auto pred) {
+            u8 g[app::kLevelRows][app::kLevelCols];
+            app::GenerateWideLevel(level, g);
+            int n = 0;
+            for (auto& row : g) for (u8 v : row) n += pred(v) ? 1 : 0;
+            return n;
+        };
+        auto tier = [&](int t, auto pred) { int n = 0; for (int l = t * 5 + 1; l <= t * 5 + 5; ++l) n += count(l, pred); return n; };
+        auto isBrick = [](u8 v) { return v <= 4; };
+        auto isSteel = [](u8 v) { return v >= 5 && v <= 9; };
+        auto isWater = [](u8 v) { return v == 10; };
+        auto isForest = [](u8 v) { return v == 11; };
+        auto isIce = [](u8 v) { return v == 12; };
+        auto isSand = [](u8 v) { return v == 14; };
+        auto isLava = [](u8 v) { return v == 16; };
+        CHECK(tier(1, isForest) > tier(0, isForest) + 20);                   // 6-10: arbustos
+        CHECK(tier(2, isWater) > tier(1, isWater) + 20);                     // 11-15: agua
+        CHECK(tier(3, isSand) > tier(2, isSand) + 20);                       // 16-20: arena
+        CHECK(tier(4, isIce) > tier(3, isIce) + 20);                         // 21-25: hielo
+        CHECK(tier(5, isSteel) > tier(4, isSteel) + 20);                     // 26-30: hierro
+        CHECK(tier(6, isLava) >= 10);                                        // 31-35: lava
+        CHECK(tier(7, isLava) >= 1 && tier(7, isLava) < tier(6, isLava));    // 36-40: mezcla (poca lava)
+        for (int t = 0; t < 6; ++t) CHECK_EQ(tier(t, isLava), 0);
+        // siguen apareciendo los anteriores
+        CHECK(tier(2, isForest) > 0 && tier(3, isWater) > 0 && tier(4, isSand) > 0 && tier(5, isIce) > 0 && tier(6, isWater) > 0);
+        for (int l = 1; l <= app::kLevelCount; ++l) CHECK(count(l, isBrick) > 0);
+        // la lava siempre esta contenida: sus vecinas son lava, ladrillo o hierro (nunca un lugar abierto)
+        for (int l = 31; l <= app::kLevelCount; ++l) {
+            u8 g[app::kLevelRows][app::kLevelCols];
+            app::GenerateWideLevel(l, g);
+            for (int r = 0; r < app::kLevelRows; ++r)
+                for (int c = 0; c < app::kLevelCols; ++c) {
+                    if (g[r][c] != 16) continue;
+                    const int dr[4] = {-1, 1, 0, 0}, dc[4] = {0, 0, -1, 1};
+                    for (int k = 0; k < 4; ++k) {
+                        const u8 v = g[r + dr[k]][c + dc[k]];
+                        CHECK(v == 16 || v <= 4 || isSteel(v));
+                    }
+                }
+        }
+    }
     CHECK_EQ(app::DifficultyTier(1), 0);
     CHECK_EQ(app::DifficultyTier(5), 0);
     CHECK_EQ(app::DifficultyTier(6), 1);
