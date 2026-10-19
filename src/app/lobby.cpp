@@ -54,8 +54,8 @@ int Lobby::TeamCount(int team) const {
     return n;
 }
 
-bool Lobby::VersusReady() const {
-    return TeamCount(0) >= 1 && TeamCount(0) <= 2 && TeamCount(1) >= 1 && TeamCount(1) <= 2;
+bool Lobby::VersusReady(int maxPerTeam) const {
+    return TeamCount(0) >= 1 && TeamCount(0) <= maxPerTeam && TeamCount(1) >= 1 && TeamCount(1) <= maxPerTeam;
 }
 
 int Lobby::SlotOfPlayer(int index) const {

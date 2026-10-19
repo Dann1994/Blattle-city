@@ -301,7 +301,11 @@ public:
 #endif
     }
 
+    // Jugadores de la partida: la batalla vs y el royale siempre tienen todos los lugares (los que no ocupa una persona los juega la IA).
+    int VsTotal() const { return royale_ ? 8 : 2 * vsSize_; }
+
     void Reset(int players) {
+        if (vsMode_) players = VsTotal();
         players_ = players;
         showHelp_ = false;
         app::UseCustomLevels(!netGame_);                    // en red solo valen los 40 niveles de fabrica (todas las PC juegan lo mismo)
@@ -312,19 +316,20 @@ public:
             if (g_useSamples && !catchingUp_) g_samples.Trigger(sfx);
         };
         battle_->SetWide(wide_);
-        battle_->SetPlayerColors(colors_);
+        battle_->SetPlayerColors(colors_, nes::kMaxPlayers);
         u8 customBlocks[nes::Battle::kWideBlocksY][nes::Battle::kWideBlocksX];
         u8 customStrip[app::kLevelCols];
         const bool custom = wide_ && level_ > 0 && PrepareCustomLevel(level_, customBlocks, customStrip);   // nivel hecho a mano (o de la serie propia)
         if (!custom) battle_->SetStageSpec(nes::Battle::StageSpec{});
         battle_->SetLevel(wide_ ? level_ : 0);
         battle_->SetFriendlyFire(friendly_);
-        for (int i = 0; i < 4; ++i) { prevAlive_[i] = false; prevUpgrade_[i] = 0; prevFire_[i] = false; prevHits_[i] = prevPickups_[i] = prevKills_[i] = 0; }
+        for (int i = 0; i < nes::kMaxPlayers; ++i) { prevAlive_[i] = false; prevUpgrade_[i] = 0; prevFire_[i] = false; prevHits_[i] = prevPickups_[i] = prevKills_[i] = 0; }
         prevBlasts_ = prevEagles_ = 0;
         rumble_.clear();
         battle_->NewGame(players_, level_ > 0 ? level_ : 1);
-        if (vsMode_) battle_->SetTeams(vsTeams_);                          // batalla vs: equipos (y el color de cada uno)
-        if (netGame_) battle_->SetPresentMask(lan_.StartMask());          // la partida en red siempre tiene 4 lugares; los que no estan, ausentes
+        if (vsMode_ && !royale_) { battle_->SetVersusSize(vsSize_); battle_->SetTeams(vsTeams_, nes::kMaxPlayers); }   // batalla vs: tamano de los equipos, quien va con quien (y el color de cada uno)
+        if (vsMode_) battle_->SetHumanMask(humanMask_);                   // los lugares sin persona los juega la IA
+        else if (netGame_) battle_->SetPresentMask(lan_.StartMask());     // la partida en red siempre tiene 4 lugares; los que no estan, ausentes
         if (wide_) {
             u8 blocks[nes::Battle::kWideBlocksY][nes::Battle::kWideBlocksX];
             if (custom) {
@@ -409,6 +414,11 @@ public:
         }
         nes::Battle::StageSpec spec;
         app::LevelDefToStage(def, blocks, strip, spec);
+        if (vsMode_ && royale_) {                                              // battle royale: a muerte o por tiempo
+            spec.royale = true;
+            spec.royaleTimed = royaleOpt_ > 0;
+            spec.royaleMinutes = royaleOpt_ == 1 ? 3 : (royaleOpt_ == 3 ? 10 : 5);
+        }
         battle_->SetStageSpec(spec);
         return true;
     }
@@ -422,6 +432,7 @@ public:
     // El mapa de la batalla vs segun lo elegido en el menu: al azar (con la semilla de esta partida), uno generado por su numero o
     // uno propio hecho en el editor.
     app::LevelDef VersusMapDef() const {
+        if (royale_) return app::GenerateRoyaleLevel(netGame_ ? vsSeed_ : (vsMapKind_ == 1 ? static_cast<uint32_t>(vsMapNum_) : vsSeed_));
         if (netGame_) {
             if (vsOwnNet_ && ownNet_.count(0)) return ownNet_.at(0);
             return app::GenerateVersusLevel(vsSeed_);
@@ -437,7 +448,7 @@ public:
         std::vector<std::pair<int, int>> v;
         v.push_back({0, 0});
         for (int i = 1; i <= 99; ++i) v.push_back({1, i});
-        for (int s = 1; s <= app::kOwnSlots; ++s) {
+        for (int s = 1; s <= app::kOwnSlots && !royale_; ++s) {                  // (el battle royale usa mapas generados)
             app::LevelDef d;
             if (app::LoadOwnLevelDef(s, d) && d.versus) v.push_back({2, s});
         }
@@ -548,6 +559,7 @@ public:
     void CollectRumble() {
         if (flow_->mode() != app::GameFlow::Mode::Playing) return;
         for (int i = 0; i < battle_->Players(); ++i) {
+            if (battle_->IsBot(i) || (!netGame_ && i >= 4)) continue;   // la IA no tiene mando
             if (netGame_ && !lan_.IsMine(i)) continue;                  // en red solo vibran los mandos de los jugadores de esta PC
             const int slot = netGame_ ? lan_.LocalIndexOf(i) : slotOf_[i];
             const u8 flags = battle_->TankFlags(i);
@@ -651,9 +663,22 @@ public:
         titleScroll_ = 240;
     }
 
+    // Royale: los lugares de la IA toman los colores que no usa ninguna persona.
+    void FillAiColors() {
+        bool used[8] = {};
+        for (int i = 0; i < 8; ++i) if ((humanMask_ >> i) & 1) used[colors_[i] & 7] = true;
+        for (int i = 0; i < 8; ++i) {
+            if ((humanMask_ >> i) & 1) continue;
+            int c = i & 7;
+            for (int k = 0; k < 8 && used[c]; ++k) c = (c + 1) & 7;
+            used[c] = true;
+            colors_[i] = c;
+        }
+    }
+
     void StartLocalGame() {
         const int n = lobby_.Count();
-        if (vsMode_ && !lobby_.VersusReady()) return;                 // hace falta 1 o 2 jugadores en cada equipo
+        if (vsMode_ && !royale_ && !lobby_.VersusReady(vsSize_)) return;          // hace falta al menos 1 jugador en cada equipo (hasta el tamano del equipo; el resto lo juega la IA)
         for (int i = 0; i < 4; ++i) {
             const int slot = i < n ? lobby_.SlotOfPlayer(i) : i;
             slotOf_[i] = slot;
@@ -662,6 +687,13 @@ public:
         }
         if (vsMode_) {
             vsSeed_ = static_cast<uint32_t>(std::chrono::steady_clock::now().time_since_epoch().count() % 99991) + 1;   // el mapa al azar de esta partida
+        }
+        if (vsMode_) {                                                  // el resto de los lugares, IA: equipos parejos y colores sin repetir
+            humanMask_ = (1 << n) - 1;
+            int cnt[2] = {0, 0};
+            for (int i = 0; i < n; ++i) ++cnt[vsTeams_[i] & 1];
+            for (int i = n; i < VsTotal(); ++i) vsTeams_[i] = cnt[0] < vsSize_ ? (++cnt[0], 0) : (++cnt[1], 1);
+            FillAiColors();
         }
         level_ = ownMode_ ? ownStart_ : 1;
         scene_ = Scene::Game;
@@ -673,8 +705,8 @@ public:
             case Scene::Title: return 4;
             case Scene::ConfirmExit: return 2;
             case Scene::PlayMenu: return 2;
-            case Scene::ModeMenu: return 4;
-            case Scene::VsMenu: return 5;
+            case Scene::ModeMenu: return 5;
+            case Scene::VsMenu: return 6;
             case Scene::Settings: return 7;
             case Scene::KeysPlayer: return 5;
             case Scene::KeysList: return 8;
@@ -703,7 +735,7 @@ public:
                 else { scene_ = Scene::PlayMenu; menuIndex_ = 0; }
                 break;
             case Scene::OwnLevels: ownMode_ = false; scene_ = Scene::ModeMenu; menuIndex_ = 1; break;
-            case Scene::VsMenu: vsMode_ = false; scene_ = Scene::ModeMenu; menuIndex_ = 2; break;
+            case Scene::VsMenu: vsMode_ = false; scene_ = Scene::ModeMenu; menuIndex_ = royale_ ? 3 : 2; royale_ = false; break;
             case Scene::LanMenu: netMode_ = false; scene_ = Scene::PlayMenu; menuIndex_ = 1; break;
             case Scene::JoinMenu: scene_ = Scene::LanMenu; menuIndex_ = 1; break;
             case Scene::NameEntry: {
@@ -807,6 +839,7 @@ public:
         lanNote_.clear();
         roomFrom_ = Scene::LanMenu;
         if (lan_.Host(g_cfg.playerName)) {
+            lan_.SetCapacity(vsMode_ ? (royale_ ? 8 : 2 * vsSize_) : 4);                                  // batalla vs: 3 vs 3 = 6 lugares, 4 vs 4 = 8
             lan_.SetOptions((vsMode_ ? VersusNetOptions(0, 0) : 0) | (ownMode_ ? 4 : 0) | (vsMode_ && vsMapKind_ == 2 ? 8 : 0));   // la sala ya muestra el modo
             lan_.SetNoLateJoin(vsMode_ || ownMode_);
             lan_.SetSharedMaps(pendingMaps_);                                        // mapas propios: la sala se los manda a los que entren
@@ -835,17 +868,20 @@ public:
         else lanNote_ = lan_.Error();
     }
     // Opciones de la sala en un entero (viaja en el mensaje de la sala): bits 0-1 fuego amigo, 4 batalla vs, 5-7 dificultad de la IA,
-    // 8-9 bombardeo, 11+ semilla del mapa (todos generan el mismo).
+    // 8-9 bombardeo, 10-11 tamano de los equipos (menos 2; 3 = battle royale), 12-13 modo del royale, 14+ semilla del mapa (todos generan el mismo).
     int VersusNetOptions(int ff, int seed) const {
-        return (ff & 3) | 16 | (vsTier_ << 5) | ((vsRank_ - 1) << 8) | (seed << 11);
+        return (ff & 3) | 16 | (vsTier_ << 5) | ((vsRank_ - 1) << 8) | ((royale_ ? 3 : vsSize_ - 2) << 10) | (royaleOpt_ << 12) | (seed << 14);
     }
     void TryStartLan() {
         if (lan_.NumPlayers() < 2) { lanNote_ = "SE NECESITAN 2 JUGADORES O MÁS"; return; }
         int options = friendly_ == nes::Battle::FriendlyFire::Off ? 0 : (friendly_ == nes::Battle::FriendlyFire::Stun ? 1 : 2);
-        if (vsMode_) {
+        if (vsMode_ && royale_) {
+            const int seed = vsMapKind_ == 1 ? vsMapNum_ : static_cast<int>(std::chrono::steady_clock::now().time_since_epoch().count() % 99991) + 1;
+            options = VersusNetOptions(options, seed);
+        } else if (vsMode_) {
             int inTeam[2] = {0, 0};                                                  // el equipo es la paridad del lugar en la sala
-            for (int i = 0; i < 4 && static_cast<size_t>(i) < lan_.Owners().size(); ++i) if (lan_.Owners()[static_cast<size_t>(i)] >= 0) ++inTeam[i & 1];
-            if (inTeam[0] == 0 || inTeam[1] == 0) { lanNote_ = "HACEN FALTA JUGADORES EN LOS DOS EQUIPOS (LUGARES 1 Y 3 / 2 Y 4)"; return; }
+            for (int i = 0; i < nes::kMaxPlayers && static_cast<size_t>(i) < lan_.Owners().size(); ++i) if (lan_.Owners()[static_cast<size_t>(i)] >= 0) ++inTeam[i & 1];
+            if (inTeam[0] == 0 || inTeam[1] == 0) { lanNote_ = "HACEN FALTA JUGADORES EN LOS DOS EQUIPOS (LOS LUGARES IMPARES SON DEL EQUIPO 1 Y LOS PARES DEL 2)"; return; }
             const int seed = vsMapKind_ == 1 ? vsMapNum_ : static_cast<int>(std::chrono::steady_clock::now().time_since_epoch().count() % 99991) + 1;
             options = VersusNetOptions(options, seed) | (vsMapKind_ == 2 ? 8 : 0);
         }
@@ -855,8 +891,8 @@ public:
         StartNetGame();
     }
     void StartNetGame() {
-        for (int i = 0; i < 4; ++i) {
-            slotOf_[i] = i;
+        for (int i = 0; i < nes::kMaxPlayers; ++i) {
+            if (i < 4) slotOf_[i] = i;
             colors_[i] = lan_.StartColor(i);                    // los colores del principio; los que entran despues traen el suyo
         }
         const int raw = lan_.FriendlyFire();
@@ -864,6 +900,7 @@ public:
         friendly_ = ff == 0 ? nes::Battle::FriendlyFire::Off : (ff == 2 ? nes::Battle::FriendlyFire::Damage : nes::Battle::FriendlyFire::Stun);
         ownMode_ = ((raw >> 2) & 1) != 0;                         // serie de niveles propios (los manda el anfitrion)
         vsMode_ = ((raw >> 4) & 1) != 0;                          // el anfitrion decide el modo, la dificultad, el bombardeo y el mapa
+        if (!vsMode_) royale_ = false;
         vsOwnNet_ = vsMode_ && ((raw >> 3) & 1) != 0;             // batalla vs con un mapa propio del anfitrion
         ownNet_.clear();
         ownOrder_.clear();
@@ -881,8 +918,13 @@ public:
         if (vsMode_) {
             vsTier_ = (raw >> 5) & 7;
             vsRank_ = ((raw >> 8) & 3) + 1;
-            vsSeed_ = static_cast<uint32_t>(raw >> 11);
-            for (int i = 0; i < 4; ++i) vsTeams_[i] = i & 1;
+            royale_ = ((raw >> 10) & 3) == 3;
+            if (!royale_) vsSize_ = std::min(4, ((raw >> 10) & 3) + 2);
+            royaleOpt_ = (raw >> 12) & 3;
+            vsSeed_ = static_cast<uint32_t>(raw >> 14);
+            for (int i = 0; i < nes::kMaxPlayers; ++i) vsTeams_[i] = i & 1;
+            humanMask_ = lan_.StartMask();
+            FillAiColors();
         }
         level_ = ownMode_ && !ownOrder_.empty() ? ownOrder_.front() : 1;
         ownStart_ = level_;
@@ -892,12 +934,21 @@ public:
         netFrame_ = 0;
         netStall_ = 0;
         startRequested_ = false;
-        Reset(4);                                              // siempre 4 lugares de jugador (los ausentes no tienen tanque)
+        Reset(vsMode_ ? (royale_ ? 8 : 2 * vsSize_) : 4);                      // 4 lugares de jugador (o los de la batalla vs: 2 por cada tanque del equipo); los ausentes no tienen tanque
     }
     // Prueba automatica por red (sin ventana): arma o busca la partida, la empieza y avanza solo.
     int MySlot() const { return lan_.MySlot(); }
     const std::vector<int>& LocalPlayers() const { return lan_.MyPlayers(); }
     void SetAutoLan(int local, int expect) { autoLocal_ = local; autoExpect_ = expect; }
+    void SetOwnDirect(int slot) { ownMode_ = true; ownStart_ = slot; level_ = slot; }       // pruebas: jugar un casillero propio sin pasar por los menus
+    // Nombre del combatiente `id` del battle royale (para el cartel del ganador).
+    std::string RoyaleName(int id) const {
+        if (!battle_ || battle_->RoyaleIsBot(id)) return "LA IA " + std::to_string(id + 1);
+        if (netGame_ && static_cast<size_t>(id) < lan_.Players().size() && !lan_.Players()[static_cast<size_t>(id)].empty()) return lan_.Players()[static_cast<size_t>(id)];
+        return "EL JUGADOR " + std::to_string(id + 1);
+    }
+    void SetRoyaleDirect(int opt) { vsMode_ = true; royale_ = true; royaleOpt_ = opt; vsSeed_ = 7; level_ = 1; humanMask_ = 3; }     // pruebas: battle royale (0 = a muerte, 1..3 = por tiempo)
+    void SetVersusDirect(int size) { vsMode_ = true; vsSize_ = size; vsSeed_ = 7; level_ = 1; humanMask_ = 3; }     // pruebas: batalla vs 1 persona por equipo con IA hasta `size`
     void SetVersusForTest(int tier, int rank) { vsMode_ = true; vsTier_ = tier; vsRank_ = rank; }
     void SetOwnForTest() {
         netMode_ = true;
@@ -997,12 +1048,12 @@ public:
         lan_.SubmitLocal(netFrame_, local, nLocal);
         if (!lan_.FrameReady(netFrame_)) { ++netStall_; return false; }                       // faltan botones de alguien: espera
         netStall_ = 0;
-        u8 in[4];
+        u8 in[nes::kMaxPlayers];
         lan_.FrameInputs(netFrame_, in);
         int hostPlayer = 0;
         for (size_t i = 0; i < lan_.Owners().size(); ++i) { if (lan_.Owners()[i] == 0) { hostPlayer = static_cast<int>(i); break; } }
         bool startNow = false;
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < nes::kMaxPlayers; ++i) {
             u8 b = in[i];
             if (app::Lan::IsMark(b)) {                                                         // marcas: alguien entro o se fue
                 if (app::Lan::IsJoinMark(b)) {
@@ -1097,12 +1148,12 @@ public:
         if (scene_ == Scene::Lobby) {
             if (ev == Ev::Fire) lobby_.Join(slot);
             else if (ev == Ev::Up || ev == Ev::Down) {
-                if (vsMode_) lobby_.ToggleTeam(slot);                          // batalla vs: arriba/abajo cambia de equipo
+                if (vsMode_ && !royale_) lobby_.ToggleTeam(slot);              // batalla vs: arriba/abajo cambia de equipo (el battle royale elige color)
                 else lobby_.CycleColor(slot, ev == Ev::Up ? -1 : +1);
             }
             else if (ev == Ev::Start) StartLocalGame();
             else if (ev == Ev::Back) {
-                if (vsMode_) { scene_ = Scene::VsMenu; menuIndex_ = 3; }
+                if (vsMode_) { scene_ = Scene::VsMenu; menuIndex_ = 4; }
                 else if (ownMode_) { scene_ = Scene::OwnLevels; }
                 else { scene_ = Scene::ModeMenu; menuIndex_ = 0; }
             }
@@ -1114,6 +1165,10 @@ public:
             if (menuIndex_ == 0) CycleVersusMap(d);
             else if (menuIndex_ == 1) vsTier_ = (vsTier_ + 8 + d) % 8;
             else if (menuIndex_ == 2) vsRank_ = (vsRank_ - 1 + 4 + d) % 4 + 1;
+            else if (menuIndex_ == 3) {
+                if (royale_) royaleOpt_ = (royaleOpt_ + 4 + d) % 4;
+                else vsSize_ = (vsSize_ - 2 + 3 + d) % 3 + 2;
+            }
             return;
         }
         if (scene_ == Scene::OwnLevels) {
@@ -1174,7 +1229,10 @@ public:
             case Scene::VsMenu:
                 if (index == 0) {
                     CycleVersusMap(1);
-                } else if (index == 3) {                                       // empezar: en esta PC se eligen los equipos; en red se crea la sala
+                } else if (index == 3) {
+                    if (royale_) royaleOpt_ = (royaleOpt_ + 1) % 4;            // a muerte -> 3 min -> 5 min -> 10 min
+                    else vsSize_ = vsSize_ % 3 + 2;                            // 2 VS 2 -> 3 VS 3 -> 4 VS 4
+                } else if (index == 4) {                                       // empezar: en esta PC se eligen los equipos; en red se crea la sala
                     vsMode_ = true;
                     ownMode_ = false;
                     if (netMode_) {
@@ -1189,13 +1247,14 @@ public:
                         lobby_ = app::Lobby();
                         scene_ = Scene::Lobby;
                     }
-                } else if (index == 4) {
+                } else if (index == 5) {
                     GoBack();
                 }
                 break;
             case Scene::ModeMenu:                                              // el modo de juego (en esta PC o para crear una sala)
                 ownMode_ = false;
                 vsMode_ = false;
+                royale_ = false;
                 pendingMaps_.clear();
                 if (index == 0) {                                              // campania: los 40 niveles
                     if (netMode_) StartHost(true);
@@ -1204,8 +1263,10 @@ public:
                     scene_ = Scene::OwnLevels;
                     ownSel_ = 1;
                     for (int s = 1; s <= app::kOwnSlots; ++s) if (OwnIsPlayable(s)) { ownSel_ = s; break; }
-                } else if (index == 2) {
-                    scene_ = Scene::VsMenu;                                    // MODO BATALLA VS
+                } else if (index == 2 || index == 3) {
+                    royale_ = index == 3;                                      // MODO BATALLA VS / BATTLE ROYALE
+                    vsMapKind_ = 0;
+                    scene_ = Scene::VsMenu;
                     menuIndex_ = 0;
                 } else {
                     GoBack();
@@ -1367,7 +1428,10 @@ public:
                 lv.hint = "TOQUE A PARA UNIRSE   CRUCETA: COLOR";
                 lv.startText = "TOQUE START PARA EMPEZAR";
             }
-            if (vsMode_) {
+            if (vsMode_ && royale_) {
+                lv.title = "BATTLE ROYALE";
+                lv.note = "LA IA COMPLETA HASTA 8 COMBATIENTES";
+            } else if (vsMode_) {
                 lv.title = "MODO BATALLA VS";
                 lv.hint = usingPad_ ? PadButtonName(g_cfg.padFire) + " PARA UNIRSE  {DPAD} CAMBIAR DE EQUIPO" : "DISPARO PARA UNIRSE  ARRIBA ABAJO EQUIPO";
                 if (touch_) lv.hint = "TOQUE A PARA UNIRSE   CRUCETA: EQUIPO";
@@ -1375,7 +1439,7 @@ public:
                     lv.color[sl] = app::Lobby::TeamColor(lobby_.Team(sl));
                     lv.tag[sl] = lobby_.Team(sl) == 0 ? "EQUIPO 1" : "EQUIPO 2";
                 }
-                if (!lobby_.VersusReady()) lv.note = "HACE FALTA 1 O 2 JUGADORES EN CADA EQUIPO";
+                if (!lobby_.VersusReady(vsSize_)) lv.note = "HACE FALTA DE 1 A " + std::to_string(vsSize_) + " JUGADORES EN CADA EQUIPO (LOS DEMÁS LOS JUEGA LA IA)";
             }
             lv.backText = BackHint();
             lv.upDownText = usingPad_ ? "{DPAD}" : "ARRIBA ABAJO";
@@ -1385,7 +1449,7 @@ public:
         if (scene_ == Scene::LateJoin || scene_ == Scene::LanHost || (scene_ == Scene::LanJoined && lan_.state() == app::Lan::State::Joined)) {
             app::LobbyView lv;                                                       // sala de espera: como la seleccion de color
             lv.net = true;
-            for (size_t i = 0; i < 4 && i < lan_.Players().size(); ++i) {
+            for (size_t i = 0; i < static_cast<size_t>(app::LobbyView::kSlots) && i < lan_.Players().size(); ++i) {
                 if (lan_.Owners()[i] < 0) continue;                                  // lugar libre
                 lv.joined[i] = true;
                 lv.name[i] = lan_.Players()[i];
@@ -1399,15 +1463,21 @@ public:
             }
             lv.upDownText = "ELEGÍ COLOR";
             const bool vsRoom = vsMode_ || ((lan_.FriendlyFire() >> 4) & 1) != 0;
-            if (vsRoom) {                                                           // batalla vs: el equipo sale del orden en la sala
+            const bool royRoom = vsRoom && ((lan_.FriendlyFire() >> 10) & 3) == 3;
+            if (royRoom) {                                                          // battle royale: 8 lugares sueltos, cada uno con su color
+                lv.title = "BATTLE ROYALE - SALA DE ESPERA";
+                lv.grid8 = true;
+                lv.teamSize = 4;
+            } else if (vsRoom) {                                                    // batalla vs: el equipo sale del orden en la sala
                 lv.title = "BATALLA VS - SALA DE ESPERA";
                 lv.upDownText = "EQUIPO FIJO";
-                for (int i = 0; i < 4; ++i) {
+                for (int i = 0; i < app::LobbyView::kSlots; ++i) {
                     lv.color[i] = app::Lobby::TeamColor(i & 1);
                     lv.tag[i] = (i & 1) ? "EQUIPO 2" : "EQUIPO 1";
                 }
+                lv.teamSize = lan_.Capacity() / 2;                                  // 2 vs 2 = 4 tanques, 3 vs 3 = 6, 4 vs 4 = 8; los lugares libres los juega la IA
             }
-            if (!touch_ && lan_.NumPlayers() < 4 && lan_.LocalCount() < 4) {
+            if (!touch_ && lan_.NumPlayers() < lan_.Capacity() && lan_.LocalCount() < app::Lan::kMaxLocal) {
                 const int next = lan_.LocalCount();
                 lv.addHint = "OTRO JUGADOR EN ESTA PC: DISPARO J" + std::to_string(next + 1) + " (" +
                              ((usingPad_ && g_padOfSlot[next] >= 0) ? PadButtonName(g_cfg.padFire) : KeyName(g_cfg.key[next][app::Config::Fire])) + ")";
@@ -1466,11 +1536,16 @@ public:
                 v.footer = NavHint();
                 break;
             case Scene::VsMenu: {
-                v.title = "MODO BATALLA VS";
+                v.title = royale_ ? "BATTLE ROYALE" : "MODO BATALLA VS";
                 v.items = {"MAPA: " + VersusMapText(), "DIFICULTAD IA: " + std::to_string(vsTier_ + 1) + "/8",
                            "BOMBARDEO CADA: " + std::to_string(5 - vsRank_) + (vsRank_ == 4 ? " MINUTO" : " MINUTOS"),
+                           royale_ ? "MODO: " + std::string(royaleOpt_ == 0 ? "A MUERTE (3 VIDAS)" : "POR TIEMPO " + std::to_string(royaleOpt_ == 1 ? 3 : (royaleOpt_ == 3 ? 10 : 5)) + " MIN")
+                                   : "EQUIPOS: " + std::to_string(vsSize_) + " VS " + std::to_string(vsSize_),
                            netMode_ ? "CREAR SALA" : "EMPEZAR", "VOLVER"};
-                v.note = lanNote_;
+                v.note = !lanNote_.empty() ? lanNote_
+                       : (royale_ ? std::string(royaleOpt_ == 0 ? "QUEDA UNO SOLO" : "GANA QUIEN MÁS DESTRUYE") + " - LA IA COMPLETA HASTA 8"
+                       : netMode_ ? "EN RED: HASTA " + std::to_string(royale_ ? 8 : 2 * vsSize_) + " JUGADORES - LA IA COMPLETA LOS CUPOS"
+                                   : "EN ESTA PC: HASTA 4 JUGADORES - LA IA COMPLETA LOS CUPOS");
                 v.footer = touch_ ? "CRUCETA: ELEGIR Y CAMBIAR   TOQUE A PARA ACEPTAR"
                                   : (usingPad_ ? "{DPAD} ELEGIR Y CAMBIAR  " + PadButtonName(g_cfg.padFire) + " ACEPTAR" : "ARRIBA ABAJO ELEGIR  IZQUIERDA DERECHA CAMBIAR");
                 break;
@@ -1494,7 +1569,7 @@ public:
                 break;
             case Scene::ModeMenu:
                 v.title = netMode_ ? "EN RED: MODO DE JUEGO" : "LOCAL: MODO DE JUEGO";
-                v.items = {"CAMPAÑA", "NIVELES PROPIOS", "MODO BATALLA VS", "VOLVER"};
+                v.items = {"CAMPAÑA", "NIVELES PROPIOS", "MODO BATALLA VS", "BATTLE ROYALE", "VOLVER"};
                 v.footer = NavHint();
                 break;
             case Scene::JoinMenu:
@@ -1611,16 +1686,16 @@ public:
             hud.pauseSelected = menuIndex_;
         }
         hud.introLevel = level_;
-        if (vsMode_) hud.introText = "BATALLA VS";
+        if (vsMode_) hud.introText = royale_ ? "BATTLE ROYALE" : "BATALLA VS";
         if (vsMode_ && flow_->mode() == app::GameFlow::Mode::VersusResult) {
             const int w = battle_->VersusWinner();
-            hud.banner = w == 2 ? "EMPATE" : (w == 0 ? "GANA EL EQUIPO 1 (AMARILLO)" : "GANA EL EQUIPO 2 (ROJO)");
+            hud.banner = w == 2 ? "EMPATE" : (w >= 10 ? "GANA " + RoyaleName(w - 10) : (w == 0 ? "GANA EL EQUIPO 1 (AMARILLO)" : "GANA EL EQUIPO 2 (ROJO)"));
         }
         if (netGame_ && flow_->WaitingForStart()) hud.introPrompt = lan_.IsHost() ? (touch_ ? "TOQUE START PARA EMPEZAR EL NIVEL" : "APRETÁ START PARA EMPEZAR EL NIVEL") : "ESPERANDO AL ANFITRIÓN...";
         if (netGame_ && lan_.Desynced()) hud.banner = "DESINCRONIZADO";
         else if (netGame_ && netStall_ > 20) hud.banner = "ESPERANDO A LOS DEMÁS...";
         if (battle_->IsBossLevel()) hud.introSubtitle = "DESTRUYE LA BASE ENEMIGA";
-        if (vsMode_) hud.introSubtitle = "DESTRUYE EL ÁGUILA RIVAL";
+        if (vsMode_) hud.introSubtitle = royale_ ? (royaleOpt_ == 0 ? "QUEDA UNO SOLO: 3 VIDAS CADA UNO" : "GANA QUIEN MÁS TANQUES DESTRUYE") : "DESTRUYE EL ÁGUILA RIVAL";
         hud.paused = battle_->R(nes::ram_pause_flag) != 0;
         hud.overlay = showHelp_;
         hud.leftLines = {
@@ -1847,17 +1922,17 @@ private:
     bool usingPad_ = false;
     bool touch_ = false;
     std::vector<Rumble> rumble_;
-    bool prevAlive_[4] = {false, false, false, false};
-    int prevUpgrade_[4] = {0, 0, 0, 0};
-    bool prevFire_[4] = {false, false, false, false};
-    int prevHits_[4] = {0, 0, 0, 0}, prevPickups_[4] = {0, 0, 0, 0}, prevKills_[4] = {0, 0, 0, 0}, prevBlasts_ = 0, prevEagles_ = 0;
+    bool prevAlive_[nes::kMaxPlayers] = {};
+    int prevUpgrade_[nes::kMaxPlayers] = {};
+    bool prevFire_[nes::kMaxPlayers] = {};
+    int prevHits_[nes::kMaxPlayers] = {}, prevPickups_[nes::kMaxPlayers] = {}, prevKills_[nes::kMaxPlayers] = {}, prevBlasts_ = 0, prevEagles_ = 0;
     int menuIndex_ = 0;
     int titleScroll_ = 0;
     int lastScore_ = 0;
     int hiScore_ = 20000;
     app::Lobby lobby_;
     int slotOf_[4] = {0, 1, 2, 3};
-    int colors_[4] = {0, 1, 2, 3};
+    int colors_[nes::kMaxPlayers] = {0, 1, 2, 3, 4, 5, 6, 0};
     std::unique_ptr<app::GameFlow> flow_;
     bool showHelp_ = false;
     nes::Battle::FriendlyFire friendly_ = nes::Battle::FriendlyFire::Stun;
@@ -1866,16 +1941,20 @@ private:
     mutable std::unique_ptr<nes::Battle> slotsPreview_;      // fondo vacio de la lista de niveles propios
     bool ownMode_ = false;                                   // jugando la serie de niveles propios (casilleros)
     bool quit_ = false;
+    bool royale_ = false;                                    // battle royale (sobre el modo batalla vs): todos contra todos
+    int humanMask_ = 3;                                      // batalla vs / royale: bit p = el jugador p es una persona (los demas, IA)
+    int royaleOpt_ = 2;                                      // 0 = a muerte, 1 = por tiempo 3 min, 2 = 5 min, 3 = 10 min
     bool vsMode_ = false;                                    // modo batalla vs
     bool netMode_ = false;                                   // se esta armando una sala en red (el modo se elige para crearla)
     bool vsOwnNet_ = false;                                  // batalla vs en red con un mapa propio del anfitrion
     std::map<int, app::LevelDef> ownNet_;                    // en red: los niveles propios que mando el anfitrion (por numero de casillero)
     std::vector<int> ownOrder_;                              // y su orden
     std::vector<std::string> pendingMaps_;                   // anfitrion: lo que la sala va a mandar (numero#texto)
+    int vsSize_ = 2;                                          // jugadores por equipo en la batalla vs (2, 3 o 4); los que faltan los juega la IA
     int vsTier_ = 2, vsRank_ = 3;                            // dificultad de la IA (0..7) y tiempo entre bombardeos (rank 3 = cada 2 minutos)
     int vsMapKind_ = 0, vsMapNum_ = 1;                       // mapa: 0 al azar, 1 generado por numero, 2 casillero propio
     uint32_t vsSeed_ = 1;
-    int vsTeams_[4] = {0, 1, 0, 1};
+    int vsTeams_[nes::kMaxPlayers] = {0, 1, 0, 1, 0, 1, 0, 1};
     int ownStart_ = 1, ownSel_ = 1;
     bool wide_ = true;                  // campo panoramico (por defecto) o el clasico de 13x13
     bool pulseStart_ = false;
@@ -2448,7 +2527,7 @@ int main(int argc, char** argv) {
     std::string wavFile;
     double selfTest = 0.0;
     bool classic = false;
-    int level = 0;
+    int level = 0, ownSlot = 0, vsDirect = 0, royaleDirect = -1;
     int frames = 120;
     int players = 1;
     bool direct = false;                                   // con --players/--level/--classic salta los menus
@@ -2490,6 +2569,9 @@ int main(int argc, char** argv) {
         else if (a == "--lan-code-in" && i + 1 < argc) lanCodeIn = argv[++i];
         else if (a == "--lan-expect" && i + 1 < argc) lanExpect = std::atoi(argv[++i]);
         else if (a == "--level" && i + 1 < argc) { level = std::atoi(argv[++i]); direct = true; }
+        else if (a == "--vs-size" && i + 1 < argc) { vsDirect = std::atoi(argv[++i]); level = 1; direct = true; players = 2; }      // batalla vs de prueba
+        else if (a == "--royale" && i + 1 < argc) { royaleDirect = std::atoi(argv[++i]); level = 1; direct = true; players = 2; }      // battle royale de prueba
+        else if (a == "--propio" && i + 1 < argc) { ownSlot = std::atoi(argv[++i]); level = ownSlot; direct = true; }      // arranca un casillero propio (pruebas)
     }
 
     const std::string chrPath = FindChr(argv[0]);
@@ -2520,6 +2602,9 @@ int main(int argc, char** argv) {
     screen.SetHiScore(g_cfg.hiScore);
     screen.SetWide(!classic);
     screen.SetLevel(level);
+    if (ownSlot > 0) screen.SetOwnDirect(ownSlot);
+    if (vsDirect > 0) screen.SetVersusDirect(vsDirect);
+    if (royaleDirect >= 0) screen.SetRoyaleDirect(royaleDirect);
     if (!screen.Init(chrPath)) {
         std::fprintf(stderr, "No se encontro assets/chr.bin (los graficos de la ROM)\n");
         return 2;

@@ -49,18 +49,19 @@ constexpr int kOwnSlots = 40;                 // casilleros de la seccion "nivel
 constexpr int kMaxMainLevel = 99;             // el modo principal puede crecer hasta el nivel 99
 
 struct LevelDef {
-    uint8_t cells[kGridRows][kLevelCols];     // ids de bloque 0..13 (ver GenerateWideLevel)
+    uint8_t cells[kGridRows][kLevelCols];     // ids de bloque 0..15 (ver GenerateWideLevel; 14 = arena, 15 = lava)
     bool boss = false;                        // nivel especial: aguila enemiga, enemigos sin fin y bombardeos
     int tier = 0;                             // dificultad 0..7 (mas enemigos, mas fuertes y mas agresivos)
     int rank = 1;                             // fuerza del aguila enemiga 1..4 (capas de hierro, salud, premio, bombardeos)
     int eagleCol = 13, eagleRow = 1;          // lugar del aguila enemiga (bloque; la fila 0 es la franja de arriba)
     int nSpawns = 0;                          // puntos de aparicion de enemigos
     uint8_t spawnCol[kMaxSpawns] = {}, spawnRow[kMaxSpawns] = {};
-    // MODO BATALLA VS: dos equipos, una aguila a cada lado. Las apariciones son los puntos de los tanques con IA (2 por equipo: los de la
-    // izquierda del centro son del equipo 1 y los de la derecha del equipo 2); tier = fuerza de la IA y de los bombardeos, rank = tiempo
+    // MODO BATALLA VS: dos equipos, una aguila en cada esquina opuesta. Las apariciones son los puntos de los tanques con IA (2 por equipo:
+    // cada punto es del equipo de la aguila que tiene mas cerca); tier = fuerza de la IA y de los bombardeos, rank = tiempo
     // entre bombardeos (1: cada 4 minutos ... 4: cada minuto).
     bool versus = false;
-    int vsEagleCol[2] = {1, 25}, vsEagleRow[2] = {7, 7};
+    bool royale = false;                      // battle royale (sobre un mapa de batalla vs): todos contra todos
+    int vsEagleCol[2] = {1, 25}, vsEagleRow[2] = {13, 1};      // aguilas en esquinas opuestas (abajo a la izquierda y arriba a la derecha)
     int vsLayers = 1;                         // capas de hierro de cada aguila (1 o 2)
     LevelDef();
 };
@@ -69,6 +70,9 @@ LevelDef BlankVersusDef();                               // mapa vacio de batall
 // Mapa de batalla vs al azar (mismo numero = mismo mapa): parte de una de las construcciones originales, es simetrico entre los dos
 // equipos y deja un camino entre las aguilas.
 LevelDef GenerateVersusLevel(uint32_t seed);
+// Mapa de battle royale: uno de batalla vs con los 8 puntos de salida despejados y conectados.
+LevelDef GenerateRoyaleLevel(uint32_t seed);
+int VsSpawnTeam(const int eagleCol[2], const int eagleRow[2], int col, int row);   // equipo (0/1) de un punto de aparicion: el de la aguila mas cercana (-1 si empata)
 void ClearVersusZones(LevelDef& def);                    // despeja las aguilas, los lugares de los jugadores y las apariciones
 
 LevelDef BlankLevelDef(bool boss = false);              // vacio, con aguila/apariciones por defecto

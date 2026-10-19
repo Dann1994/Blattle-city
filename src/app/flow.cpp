@@ -2,6 +2,8 @@
 
 #include "levels.h"
 
+#include <algorithm>
+
 namespace app {
 
 GameFlow::GameFlow(nes::Battle& battle, Hooks hooks) : battle_(battle), hooks_(std::move(hooks)) {}
@@ -49,7 +51,7 @@ void GameFlow::SkipToNextLevel() {
 
 void GameFlow::StartScore() {
     tally_ = ScoreTally{};
-    tally_.players = battle_.Players();
+    tally_.players = std::min(4, battle_.Players());      // (la pantalla de puntos muestra hasta 4)
     tally_.level = level_;
     for (int p = 0; p < tally_.players; ++p) {
         tally_.score[p] = battle_.Score(p);

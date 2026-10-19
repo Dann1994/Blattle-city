@@ -9,7 +9,7 @@ namespace app {
 namespace {
 
 // Orden de la paleta (ids de bloque): ladrillo entero y sus cuatro mitades, hierro entero y sus mitades, agua, arbusto, hielo y vacio.
-const std::vector<int> kPalette = {4, 0, 1, 2, 3, 9, 5, 6, 7, 8, 10, 11, 12, 13};
+const std::vector<int> kPalette = {4, 0, 1, 2, 3, 9, 5, 6, 7, 8, 10, 11, 12, 14, 15, 13};      // ... hielo, arena (14), lava (15) y vacio
 
 enum MenuId { kMiContinue, kMiType, kMiDifficulty, kMiRank, kMiBomb, kMiLayers, kMiSave, kMiSaveAs, kMiLoad, kMiNew, kMiExit };
 
@@ -109,7 +109,7 @@ void LevelEditor::PlaceBlock(int id) {
 }
 
 void LevelEditor::ToggleSpawn(bool removeOnly) {
-    if (def_.versus && col_ == 13 && !removeOnly) return;                  // el centro no es de ningun equipo
+    if (def_.versus && !removeOnly && VsSpawnTeam(def_.vsEagleCol, def_.vsEagleRow, col_, row_) < 0) return;   // a igual distancia de las dos aguilas: no es de ningun equipo
     for (int i = 0; i < def_.nSpawns; ++i) {
         if (def_.spawnCol[i] == col_ && def_.spawnRow[i] == row_) {
             for (int j = i; j + 1 < def_.nSpawns; ++j) {
@@ -122,9 +122,10 @@ void LevelEditor::ToggleSpawn(bool removeOnly) {
         }
     }
     if (removeOnly || def_.nSpawns >= kMaxSpawns || IsProtected(col_, row_)) return;
-    if (def_.versus) {                                                     // 2 por equipo: izquierda = equipo 1, derecha = equipo 2
+    if (def_.versus) {                                                     // 2 por equipo: el de la aguila que tenga mas cerca
+        const int me = VsSpawnTeam(def_.vsEagleCol, def_.vsEagleRow, col_, row_);
         int mine = 0;
-        for (int i = 0; i < def_.nSpawns; ++i) mine += ((def_.spawnCol[i] < 13) == (col_ < 13)) ? 1 : 0;
+        for (int i = 0; i < def_.nSpawns; ++i) mine += VsSpawnTeam(def_.vsEagleCol, def_.vsEagleRow, def_.spawnCol[i], def_.spawnRow[i]) == me ? 1 : 0;
         if (mine >= 2) return;
     }
     def_.spawnCol[def_.nSpawns] = static_cast<uint8_t>(col_);
@@ -137,7 +138,7 @@ void LevelEditor::ToggleSpawn(bool removeOnly) {
 void LevelEditor::PlaceEagle() {
     if (def_.versus) {                                                     // mueve el aguila del equipo de ese lado
         if (col_ == 13) return;
-        const int t = col_ < 13 ? 0 : 1;
+        const int t = col_ < 13 ? 0 : 1;                                   // la aguila del equipo de ese lado (izquierda = equipo 1)
         def_.vsEagleCol[t] = t == 0 ? std::max(1, std::min(11, col_)) : std::max(15, std::min(25, col_));
         def_.vsEagleRow[t] = std::max(1, std::min(13, row_));
         ClearVersusZones(def_);

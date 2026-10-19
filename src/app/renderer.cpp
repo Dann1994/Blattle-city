@@ -1,6 +1,7 @@
 #include "renderer.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstdlib>
 #include <cstdio>
@@ -24,17 +25,18 @@ constexpr uint32_t kNesRgb[64] = {
 
 // Paletas de sprites extra del campo ancho (el atributo usa los bits 2-4, libres en la NES):
 // 4 = jugador 3 (azul), 5 = jugador 4 (rojizo).
-constexpr uint8_t kExtraSpritePalettes[5][4] = {
+constexpr uint8_t kExtraSpritePalettes[6][4] = {
     {0x0F, 0x02, 0x21, 0x31},   // 4 azul
     {0x0F, 0x05, 0x16, 0x35},   // 5 rojo
     {0x0F, 0x03, 0x13, 0x33},   // 6 violeta
     {0x0F, 0x17, 0x27, 0x37},   // 7 naranja
     {0x0F, 0x08, 0x07, 0x17},   // 8 marron
+    {0x0F, 0x15, 0x25, 0x35},   // 9 rosa
 };
 
 uint8_t SpritePaletteColor(int palette, int idx) {
     if (palette >= 4) {
-        return kExtraSpritePalettes[(palette - 4) % 5][idx];
+        return kExtraSpritePalettes[(palette - 4) % 6][idx];
     }
     return nes::tbl_D555_sprites_palette[palette * 4 + idx];
 }
@@ -110,6 +112,29 @@ uint32_t NesColor(uint8_t index) {
     return kNesRgb[index & 0x3F];
 }
 
+// La arena es el mosaico de la nieve con una paleta amarillenta (los colores de la nieve son gris claro; estos, tonos de arena).
+uint32_t SandColor(int idx) {
+    static const uint8_t kIdx[4] = {0x0F, 0x28, 0x38, 0x37};
+    return NesColor(kIdx[idx & 3]);
+}
+constexpr int kSnowTile = 0x21;
+
+// Piedra de lava: cada mosaico de 8x8 lleva el dibujo de 4x4 del diseno ampliado al doble (morado oscuro, marcas negras y
+// dos brasas que cambian de color). Alterna los cuadros 1 y 2 al mismo ritmo que el agua y la lava.
+uint32_t RockPixel(int px, int py, int step) {
+    static const uint8_t kPat[4][4] = {{1, 0, 0, 0}, {0, 2, 1, 0}, {0, 0, 2, 1}, {0, 0, 0, 1}};   // 0 morado, 1 negro, 2 brasa
+    static const uint32_t kEmber[2] = {0xED0707, 0xED6B0B};
+    const uint8_t v = kPat[(py >> 1) & 3][(px >> 1) & 3];
+    return v == 1 ? 0x000000 : (v == 2 ? kEmber[step & 1] : 0x331940);
+}
+constexpr int kWaterTile = 0x12;
+// La lava es el mosaico del agua con una paleta roja que va cambiando (como el agua).
+uint32_t LavaColor(int idx, int phase) {
+    static const uint8_t kA[4] = {0x0F, 0x16, 0x27, 0x06};
+    static const uint8_t kB[4] = {0x0F, 0x27, 0x06, 0x16};
+    return NesColor((phase ? kB : kA)[idx & 3]);
+}
+
 } // namespace
 
 bool Renderer::LoadChr(const std::string& path) {
@@ -161,12 +186,18 @@ void Renderer::RenderNesScreen(const nes::Battle& battle, std::vector<uint32_t>&
                         ty >= 2 * battle.VsEagleRow(t) && ty < 2 * battle.VsEagleRow(t) + 2) eagleTeam = t;
                 }
             }
+            const bool sand = tile == nes::Battle::kSandTile;
+            const bool lava = tile == nes::Battle::kLavaTile;
+            const bool rock = tile == 0x10 && battle.RockAt(tx, ty);
+            const int rockStep = (battle.R(nes::ram_frm_cnt_lo) >> 5) & 1;
+            const int lavaPhase = (battle.R(nes::ram_frm_cnt_lo) >> 5) & 1;
             for (int py = 0; py < 8; ++py) {
                 for (int px = 0; px < 8; ++px) {
-                    const int idx = ChrPixel(1, tile, px, py);
+                    const int idx = ChrPixel(1, sand ? kSnowTile : (lava ? kWaterTile : tile), px, py);
                     const size_t o = static_cast<size_t>(ty * 8 + py) * kNesW + (tx * 8 + px);
                     bgIndex[o] = static_cast<uint8_t>(idx);
-                    rgb[o] = eagleTeam >= 0 ? NesColor(SpritePaletteColor(battle.TeamPaletteIndex(eagleTeam), idx)) : bgColor(palette, idx);
+                    rgb[o] = eagleTeam >= 0 ? NesColor(SpritePaletteColor(battle.TeamPaletteIndex(eagleTeam), idx))
+                                            : (sand ? SandColor(idx) : (lava ? LavaColor(idx, lavaPhase) : (rock ? RockPixel(px, py, rockStep) : bgColor(palette, idx))));
                 }
             }
         }
@@ -415,19 +446,40 @@ void Renderer::DrawWideHudOverlay(std::vector<uint32_t>& world, int w, const nes
     static const char* const kLabels[4] = {"IP", "IIP", "IIIP", "IVP"};
     const int xr = w - 3;                                         // borde derecho visible (se recortan 3 px por lado)
     const int x0 = xr - 34;
-    if (battle.IsVersus()) {
+    if (battle.IsRoyale()) {
+        // battle royale: los 8 combatientes en dos filas arriba a la izquierda (vidas en la batalla a muerte, destrucciones por tiempo)
+        for (int id = 0; id < 8; ++id) {
+            const int px = 6 + (id & 3) * 52, py = 3 + (id >> 2) * 11;
+            const int pal = battle.RoyalePaletteIndex(id);
+            const uint32_t color = NesColor(SpritePaletteColor(pal, 2));
+            const uint32_t colors[4] = {0, NesColor(SpritePaletteColor(pal, 1)), color, NesColor(SpritePaletteColor(pal, 3))};
+            const bool out = !battle.RoyaleAlive(id);
+            const std::string label = battle.RoyaleIsBot(id) ? std::string("IA") : std::to_string(id + 1);
+            DrawText(layer, w, px, py, label, out ? 0x7C7C7C : color);
+            DrawColoredTile(layer, w, px + 19, py, nes::tbl_D341_tile___player_icon[0], out ? std::array<uint32_t, 4>{0, 0x4C4C4C, 0x7C7C7C, 0x4C4C4C}.data() : colors);
+            const int n = battle.RoyaleTimed() ? battle.RoyaleKills(id) : battle.RoyaleLives(id);
+            DrawText(layer, w, px + 30, py, std::to_string(n % 100), out ? 0x7C7C7C : color);
+        }
+        if (battle.RoyaleTimed()) {                              // el reloj de la partida, bajo el del bombardeo
+            const int secs = (battle.RoyaleFramesLeft() + 59) / 60;
+            char buf[16];
+            std::snprintf(buf, sizeof buf, "%d:%02d", secs / 60, secs % 60);
+            DrawText(layer, w, xr - TextWidth(buf), 14, buf, 0xF8D878);
+        }
+    } else if (battle.IsVersus()) {
         // batalla vs: las vidas de cada equipo en su esquina de arriba (equipo 1 a la izquierda, equipo 2 a la derecha)
         int cnt[2] = {0, 0};
-        for (int p = 0; p < 4 && p < hud.players; ++p) {
+        for (int p = 0; p < nes::kMaxPlayers && p < hud.players; ++p) {
             if (!battle.PlayerPresent(p)) continue;
             const int t = battle.PlayerTeam(p), k = cnt[t]++;
-            const int px = t == 0 ? 6 + k * 34 : xr - 30 - k * 34, py = t == 0 ? 3 : 14;
+            const int px = t == 0 ? 6 + k * 42 : xr - 38 - k * 42, py = t == 0 ? 3 : 229;     // cada equipo en la esquina de su aguila: el 1 arriba a la izquierda, el 2 abajo a la derecha
             const uint32_t color = NesColor(SpritePaletteColor(battle.PlayerPaletteIndex(p), 2));
             const uint32_t colors[4] = {0, NesColor(SpritePaletteColor(battle.PlayerPaletteIndex(p), 1)), color,
                                         NesColor(SpritePaletteColor(battle.PlayerPaletteIndex(p), 3))};
-            DrawText(layer, w, px, py, std::to_string(p + 1), color);
-            DrawColoredTile(layer, w, px + 9, py, nes::tbl_D341_tile___player_icon[0], colors);
-            DrawHudTileT(layer, w, px + 19, py, 0x6E + (battle.Lives(p) % 10), battle, 0);
+            const std::string label = battle.IsBot(p) ? std::string("IA") : std::to_string(p + 1);
+            DrawText(layer, w, px, py, label, color);
+            DrawColoredTile(layer, w, px + 9 + (label.size() > 1 ? 8 : 0), py, nes::tbl_D341_tile___player_icon[0], colors);
+            DrawHudTileT(layer, w, px + 19 + (label.size() > 1 ? 8 : 0), py, 0x6E + (battle.Lives(p) % 10), battle, 0);
         }
     } else {
     // enemigos que faltan por aparecer: dos columnas de hasta 10, arriba a la derecha
@@ -1017,12 +1069,46 @@ void Renderer::RenderMenu(const MenuView& m, std::vector<uint8_t>& rgba) const {
 
 void Renderer::RenderLobby(const LobbyView& l, std::vector<uint8_t>& rgba) const {
     std::vector<uint32_t> canvas(static_cast<size_t>(kScreenW) * kScreenH, 0x000000);
-    static const int kPaletteOf[7] = {0, 1, 4, 5, 6, 7, 8};
-    static const char* const kNames[7] = {"AMARILLO", "VERDE", "AZUL", "ROJO", "VIOLETA", "NARANJA", "MARRON"};
+    static const int kPaletteOf[8] = {0, 1, 4, 5, 6, 7, 8, 9};
+    static const char* const kNames[8] = {"AMARILLO", "VERDE", "AZUL", "ROJO", "VIOLETA", "NARANJA", "MARRON", "ROSA"};
     const std::string title = !l.title.empty() ? l.title : (l.net ? "SALA DE ESPERA" : "SELECCIÓN DE JUGADORES");
     DrawText(canvas, kScreenW, (kScreenW - TextWidth(title)) / 2, 14, title, 0xFCA044);
     DrawText(canvas, kScreenW, (kScreenW - TextWidth(l.hint)) / 2, 30, l.hint, 0x7C7C7C);
     if (!l.addHint.empty()) DrawText(canvas, kScreenW, (kScreenW - TextWidth(l.addHint)) / 2, 42, l.addHint, 0x58A8F8);
+    if (l.teamSize > 0) {                                      // batalla vs en red: un renglon por equipo (los lugares sin persona los juega la IA)
+        for (int t = 0; t < 2; ++t) {
+            const int rowY = 50 + t * 74;
+            const std::string head = l.grid8 ? std::string() : (t == 0 ? "EQUIPO 1" : "EQUIPO 2");
+            if (!head.empty()) DrawText(canvas, kScreenW, 22, rowY - 2, head, NesColor(SpritePaletteColor(kPaletteOf[t == 0 ? 0 : 3], 2)));
+            for (int k = 0; k < l.teamSize; ++k) {
+                const int s = l.grid8 ? t * 4 + k : k * 2 + t;   // el equipo sale de la paridad del lugar en la sala (battle royale: dos filas de 4 lugares)
+                const int x0 = 22 + (4 - l.teamSize) * 50 + k * 100;
+                const int y0 = rowY + 10;
+                const bool in = l.joined[s];
+                const uint32_t frame = in ? 0xFCFCFC : 0x4C4C4C;
+                FillRect(canvas, kScreenW, x0, y0, x0 + 92, y0 + 2, frame);
+                FillRect(canvas, kScreenW, x0, y0 + 60, x0 + 92, y0 + 62, frame);
+                FillRect(canvas, kScreenW, x0, y0, x0 + 2, y0 + 62, frame);
+                FillRect(canvas, kScreenW, x0 + 90, y0, x0 + 92, y0 + 62, frame);
+                const int pal = kPaletteOf[l.color[s] % 8];
+                std::string name = in ? l.name[s].substr(0, 11) : std::string("IA");
+                DrawText(canvas, kScreenW, x0 + (92 - TextWidth(name)) / 2, y0 + 6, name, in ? (l.mine[s] ? 0xF8D878 : 0xFCFCFC) : 0x7C7C7C);
+                if (in) {
+                    DrawSprite16(canvas, kScreenW, x0 + 30, y0 + 15, 0x00, pal, 2);
+                    std::string st = l.ready[s] ? "LISTO" : (l.mine[s] ? l.meLine2[s] : std::string("ELIGIENDO"));
+                    DrawText(canvas, kScreenW, x0 + (92 - TextWidth(st)) / 2, y0 + 51, st, l.ready[s] ? 0x58D854 : 0x7C7C7C);
+                } else {                                       // sin jugador: un tanque gris de la IA
+                    DrawSprite16(canvas, kScreenW, x0 + 30, y0 + 15, 0x00, 8, 2);
+                    DrawText(canvas, kScreenW, x0 + (92 - TextWidth("LIBRE")) / 2, y0 + 51, "LIBRE", 0x4C4C4C);
+                }
+            }
+        }
+        if (!l.note.empty()) DrawText(canvas, kScreenW, (kScreenW - TextWidth(l.note)) / 2, 200, l.note, 0xF83800);
+        DrawText(canvas, kScreenW, (kScreenW - TextWidth(l.startText)) / 2, 212, l.startText, 0xF8D878);
+        DrawText(canvas, kScreenW, (kScreenW - TextWidth(l.backText)) / 2, 226, l.backText, 0x7C7C7C);
+        ToRgba(canvas, rgba);
+        return;
+    }
     for (int s = 0; s < 4; ++s) {
         const int x0 = 22 + s * 100;
         const int y0 = 56;
@@ -1035,9 +1121,9 @@ void Renderer::RenderLobby(const LobbyView& l, std::vector<uint8_t>& rgba) const
         if (l.net && l.joined[s]) name = l.name[s].substr(0, 11);
         DrawText(canvas, kScreenW, x0 + (l.net ? (92 - TextWidth(name)) / 2 : 10), y0 + 10, name, l.joined[s] ? (l.mine[s] ? 0xF8D878 : 0xFCFCFC) : 0x7C7C7C);
         if (l.joined[s]) {
-            const int pal = kPaletteOf[l.color[s] % 7];
+            const int pal = kPaletteOf[l.color[s] % 8];
             DrawSprite16(canvas, kScreenW, x0 + 22, y0 + 34, 0x00, pal, 3);          // el tanque en su color
-            const std::string cn = !l.tag[s].empty() ? l.tag[s] : std::string(kNames[l.color[s] % 7]);
+            const std::string cn = !l.tag[s].empty() ? l.tag[s] : std::string(kNames[l.color[s] % 8]);
             const int tw = TextWidth(cn);
             DrawText(canvas, kScreenW, x0 + (92 - tw) / 2, y0 + 92, cn, NesColor(SpritePaletteColor(pal, 2)));
             if (l.net) {                                                           // sala en red: "LISTO" o lo que falta
@@ -1110,6 +1196,18 @@ void Shade(std::vector<uint32_t>& c, int x0, int y0, int x1, int y1, uint32_t co
 }  // namespace
 
 void Renderer::DrawBlockIcon(std::vector<uint32_t>& canvas, int x, int y, int id, const nes::Battle& battle) const {
+    if (id == 15) {                                                  // lava (en los niveles es el 15)
+        const uint32_t colors[4] = {LavaColor(0, 0), LavaColor(1, 0), LavaColor(2, 0), LavaColor(3, 0)};
+        FillRect(canvas, kScreenW, x, y, x + 16, y + 16, colors[0]);
+        for (int k = 0; k < 4; ++k) DrawColoredTile(canvas, kScreenW, x + (k & 1) * 8, y + (k >> 1) * 8, kWaterTile, colors);
+        return;
+    }
+    if (id == nes::Battle::kSandBlockId) {                          // arena: los cuatro mosaicos de la nieve en tonos de arena
+        FillRect(canvas, kScreenW, x, y, x + 16, y + 16, SandColor(0));
+        const uint32_t colors[4] = {SandColor(0), SandColor(1), SandColor(2), SandColor(3)};
+        for (int k = 0; k < 4; ++k) DrawColoredTile(canvas, kScreenW, x + (k & 1) * 8, y + (k >> 1) * 8, kSnowTile, colors);
+        return;
+    }
     const int attr = nes::tbl_DABB_nametable_attribute[id & 15] & 3;
     for (int k = 0; k < 4; ++k) {
         DrawHudTile(canvas, kScreenW, x + (k & 1) * 8, y + (k >> 1) * 8, nes::tbl_DACB_block_data[(id & 15) * 4 + k], battle, attr);
@@ -1147,9 +1245,10 @@ void Renderer::RenderEditor(const nes::Battle& stage, const EditorView& v, std::
     // la fortaleza del aguila enemiga (el motor ya la dibuja; aca se marca su alcance en la herramienta ÁGUILA)
     if (v.versus) {                                                   // donde empiezan los jugadores de cada equipo (no se mueven)
         for (int t = 0; t < 2; ++t) {
-            const int pc = v.vsEagleCol[t] + (t == 0 ? 2 : -2);
-            for (int k = 0; k < 2; ++k) {
-                const int x0 = pc * 16, y0 = (v.vsEagleRow[t] + (k == 0 ? -1 : 1)) * 16;
+            for (int k = 0; k < 4; ++k) {                                 // los 4 lugares de los miembros del equipo (personas o IA)
+                int pc, pr;
+                nes::Battle::VsSideBlock(v.vsEagleCol[t], v.vsEagleRow[t], k, pc, pr);
+                const int x0 = pc * 16, y0 = pr * 16;
                 Frame(canvas, x0 + 1, y0 + 1, x0 + 15, y0 + 15, 0x58A8F8);
                 DrawText(canvas, kScreenW, x0 + 4, y0 + 4, "J", 0x58A8F8);
             }
@@ -1163,7 +1262,7 @@ void Renderer::RenderEditor(const nes::Battle& stage, const EditorView& v, std::
     // puntos de aparicion de enemigos
     for (int i = 0; i < v.nSpawns; ++i) {
         const int x0 = v.spawnCol[i] * 16, y0 = v.spawnRow[i] * 16;
-        Rect(canvas, x0 + 2, y0 + 2, x0 + 14, y0 + 14, v.versus ? (v.spawnCol[i] < 13 ? 0xB08800 : 0xD82800) : 0xD82800);
+        Rect(canvas, x0 + 2, y0 + 2, x0 + 14, y0 + 14, v.versus ? ((std::abs(v.spawnCol[i] - v.vsEagleCol[0]) + std::abs(v.spawnRow[i] - v.vsEagleRow[0]) <= std::abs(v.spawnCol[i] - v.vsEagleCol[1]) + std::abs(v.spawnRow[i] - v.vsEagleRow[1])) ? 0xB08800 : 0xD82800) : 0xD82800);
         Frame(canvas, x0 + 2, y0 + 2, x0 + 14, y0 + 14, 0xFCFCFC);
         const std::string n = std::to_string(i + 1);
         DrawText(canvas, kScreenW, x0 + 8 - TextWidth(n) / 2, y0 + 4, n, 0xFCFCFC);
@@ -1195,7 +1294,8 @@ void Renderer::RenderEditor(const nes::Battle& stage, const EditorView& v, std::
                 if (v.paletteIds[i] == 13) Frame(canvas, x, y0 + 12, x + 16, y0 + 28, 0x404040);
                 if (static_cast<int>(i) == v.palette) Frame(canvas, x - 1, y0 + 11, x + 17, y0 + 29, 0xF8D878);
             }
-            DrawText(canvas, kScreenW, kEditorPalX + static_cast<int>(v.paletteIds.size()) * kEditorPalStep + 4, y0 + 16, v.help, 0x7C7C7C);
+            const int helpX = kEditorPalX + static_cast<int>(v.paletteIds.size()) * kEditorPalStep + 4;
+            if (helpX + TextWidth(v.help) <= kScreenW) DrawText(canvas, kScreenW, helpX, y0 + 16, v.help, 0x7C7C7C);       // (si no entra, no se muestra)
         } else if (v.tool == 1) {
             DrawText(canvas, kScreenW, 4, y0 + 17, v.versus ? "APARICIONES DE LA IA: 2 POR EQUIPO (" + std::to_string(v.nSpawns) + "/4)  PONER/QUITAR"
                                                           : "APARICIONES: " + std::to_string(v.nSpawns) + "/" + std::to_string(kMaxSpawns) + "  PONER/QUITAR EN EL CURSOR", 0xB8F8B8);

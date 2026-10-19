@@ -19,7 +19,7 @@ namespace {
 enum Id : uint8_t {
     kBrickRight = 0, kBrickBottom, kBrickLeft, kBrickTop, kBrick,
     kSteelRight, kSteelBottom, kSteelLeft, kSteelTop, kSteel,
-    kWater, kForest, kIce, kEmpty,
+    kWater, kForest, kIce, kEmpty, kSand,
 };
 
 struct Rng {
@@ -233,10 +233,10 @@ void SetDefaultSpawns(LevelDef& d) {
         ++d.nSpawns;
     };
     if (d.versus) {
-        add(4, 2);
-        add(4, 12);
-        add(22, 2);
-        add(22, 12);
+        add(1, 7);                                                 // equipo 1: en el medio a la izquierda y en el medio abajo
+        add(13, 13);
+        add(25, 7);                                                // equipo 2: en el medio a la derecha y en el medio arriba
+        add(13, 1);
         return;
     }
     if (d.boss) {
@@ -309,13 +309,15 @@ LevelDef BuiltinLevelDef(int level) {
 }
 
 void LevelDefToStage(const LevelDef& d, uint8_t blocks[kLevelRows][kLevelCols], uint8_t strip[kLevelCols], nes::Battle::StageSpec& spec) {
-    for (int c = 0; c < kLevelCols; ++c) strip[c] = d.cells[0][c];
+    // (en los niveles la lava es el id 15; el motor la conoce como 16 porque el 15 es "borrar" en la ROM)
+    for (int c = 0; c < kLevelCols; ++c) strip[c] = d.cells[0][c] == 15 ? 16 : d.cells[0][c];
     for (int r = 0; r < kLevelRows; ++r)
-        for (int c = 0; c < kLevelCols; ++c) blocks[r][c] = d.cells[r + 1][c];
+        for (int c = 0; c < kLevelCols; ++c) blocks[r][c] = d.cells[r + 1][c] == 15 ? 16 : d.cells[r + 1][c];
     spec = nes::Battle::StageSpec{};
     spec.active = true;
     if (d.versus) {
         spec.versus = true;
+        spec.royale = d.royale;
         spec.boss = false;
         spec.tier = std::max(0, std::min(7, d.tier));
         spec.rank = std::max(1, std::min(4, d.rank));
@@ -327,16 +329,15 @@ void LevelDefToStage(const LevelDef& d, uint8_t blocks[kLevelRows][kLevelCols], 
         // 2 puntos por equipo (el equipo 1 a la izquierda del centro, el 2 a la derecha); si falta alguno se repite o se usa el de siempre
         int a[2][2], cnt[2] = {0, 0};
         for (int i = 0; i < d.nSpawns; ++i) {
-            const int c = d.spawnCol[i];
-            const int t = c < 13 ? 0 : (c > 13 ? 1 : -1);
+            const int t = VsSpawnTeam(spec.vsEagleCol, spec.vsEagleRow, d.spawnCol[i], d.spawnRow[i]);
             if (t < 0 || cnt[t] >= 2) continue;
             a[t][cnt[t]++] = i;
         }
         for (int t = 0; t < 2; ++t) {
             for (int k = 0; k < 2; ++k) {
                 if (cnt[t] == 0) {
-                    spec.spawnCol[t * 2 + k] = t == 0 ? 4 : 22;
-                    spec.spawnRow[t * 2 + k] = k == 0 ? 2 : 12;
+                    spec.spawnCol[t * 2 + k] = k == 0 ? (t == 0 ? 1 : 25) : 13;
+                    spec.spawnRow[t * 2 + k] = k == 0 ? 7 : (t == 0 ? 13 : 1);
                 } else {
                     const int i = a[t][k < cnt[t] ? k : 0];
                     spec.spawnCol[t * 2 + k] = std::min<int>(d.spawnCol[i], kLevelCols - 1);
@@ -373,9 +374,9 @@ void WriteLevel(std::ostream& f, const LevelDef& d) {
     f << "apariciones=";
     for (int i = 0; i < d.nSpawns; ++i) f << (i ? ";" : "") << static_cast<int>(d.spawnCol[i]) << "," << static_cast<int>(d.spawnRow[i]);
     f << "\nmapa\n";
-    static const char kHex[] = "0123456789ABCD";
+    static const char kHex[] = "0123456789ABCDEF";
     for (int r = 0; r < kGridRows; ++r) {
-        for (int c = 0; c < kLevelCols; ++c) f << kHex[d.cells[r][c] % 14];
+        for (int c = 0; c < kLevelCols; ++c) f << kHex[d.cells[r][c] % 16];
         f << "\n";
     }
 }
@@ -394,7 +395,7 @@ bool ReadLevel(std::istream& f, LevelDef& out) {
             if (static_cast<int>(line.size()) < kLevelCols) return false;
             for (int c = 0; c < kLevelCols; ++c) {
                 const char ch = line[static_cast<size_t>(c)];
-                const int v = ch >= '0' && ch <= '9' ? ch - '0' : (ch >= 'A' && ch <= 'D' ? ch - 'A' + 10 : (ch >= 'a' && ch <= 'd' ? ch - 'a' + 10 : -1));
+                const int v = ch >= '0' && ch <= '9' ? ch - '0' : (ch >= 'A' && ch <= 'F' ? ch - 'A' + 10 : (ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : -1));
                 if (v < 0) return false;
                 d.cells[rows][c] = static_cast<uint8_t>(v);
             }
@@ -477,8 +478,8 @@ std::vector<std::string> CheckLevelDef(const LevelDef& d) {
     if (d.versus) {
         int cnt[2] = {0, 0};
         for (int i = 0; i < d.nSpawns; ++i) {
-            if (d.spawnCol[i] < 13) ++cnt[0];
-            else if (d.spawnCol[i] > 13) ++cnt[1];
+            const int t = VsSpawnTeam(d.vsEagleCol, d.vsEagleRow, d.spawnCol[i], d.spawnRow[i]);
+            if (t >= 0) ++cnt[t];
         }
         if (cnt[0] < 2 || cnt[1] < 2) warn.push_back("HACEN FALTA 2 APARICIONES POR EQUIPO (" + std::to_string(cnt[0]) + " Y " + std::to_string(cnt[1]) + ")");
     } else if (d.nSpawns == 0) {
@@ -487,7 +488,8 @@ std::vector<std::string> CheckLevelDef(const LevelDef& d) {
     // alcanzables desde la base (sin cruzar agua ni hierro)
     bool reach[kGridRows][kLevelCols] = {};
     std::queue<std::pair<int, int>> q;
-    const int startR = d.versus ? d.vsEagleRow[0] : kGridRows - 1, startC = d.versus ? d.vsEagleCol[0] + 2 : 13;
+    int startR = kGridRows - 1, startC = 13;
+    if (d.versus) nes::Battle::VsSideBlock(d.vsEagleCol[0], d.vsEagleRow[0], 0, startC, startR);
     q.push({startR, startC});
     reach[startR][startC] = true;
     while (!q.empty()) {
@@ -502,7 +504,11 @@ std::vector<std::string> CheckLevelDef(const LevelDef& d) {
             q.push({nr, nc});
         }
     }
-    if (d.versus && !reach[d.vsEagleRow[1]][d.vsEagleCol[1] - 2]) warn.push_back("NO HAY CAMINO ENTRE LAS DOS ÁGUILAS");
+    if (d.versus) {
+        int c1, r1;
+        nes::Battle::VsSideBlock(d.vsEagleCol[1], d.vsEagleRow[1], 0, c1, r1);
+        if (!reach[r1][c1]) warn.push_back("NO HAY CAMINO ENTRE LAS DOS ÁGUILAS");
+    }
     const int zone = EagleReachBlocks(d.rank);
     for (int i = 0; i < d.nSpawns; ++i) {
         const int c = d.spawnCol[i], r = d.spawnRow[i];
@@ -581,6 +587,11 @@ bool DeleteLevelFile(const std::string& path) {
 // Batalla vs: mapas
 // ---------------------------------------------------------------------------
 
+int VsSpawnTeam(const int ec[2], const int er[2], int col, int row) {
+    const int d0 = std::abs(col - ec[0]) + std::abs(row - er[0]), d1 = std::abs(col - ec[1]) + std::abs(row - er[1]);
+    return d0 < d1 ? 0 : (d1 < d0 ? 1 : -1);
+}
+
 void ClearVersusZones(LevelDef& d) {
     auto clear = [&](int r, int c) {
         if (r >= 0 && r < kGridRows && c >= 0 && c < kLevelCols) d.cells[r][c] = kEmpty;
@@ -589,10 +600,11 @@ void ClearVersusZones(LevelDef& d) {
         const int ec = d.vsEagleCol[t], er = d.vsEagleRow[t];
         for (int r = er - 1; r <= er + 1; ++r)
             for (int c = ec - 1; c <= ec + 1; ++c) clear(r, c);
-        const int pc = ec + (t == 0 ? 2 : -2);                 // donde empiezan los jugadores del equipo
-        clear(er - 1, pc);
-        clear(er, pc);
-        clear(er + 1, pc);
+        for (int k = 0; k < 4; ++k) {                          // donde empiezan los miembros del equipo
+            int c, r;
+            nes::Battle::VsSideBlock(ec, er, k, c, r);
+            clear(r, c);
+        }
     }
     for (int i = 0; i < d.nSpawns; ++i) clear(d.spawnRow[i], d.spawnCol[i]);
 }
@@ -634,7 +646,7 @@ LevelDef GenerateVersusLevel(uint32_t seed) {
     // franja de arriba: almenas de ladrillo
     for (int c = 2; c <= 12; ++c) d.cells[0][c] = ((c * 5 + static_cast<int>(seed % 7u)) % 7) < 3 ? kBrick : kEmpty;
     // 2) un rasgo por mapa para que no se parezcan todos
-    switch (rng.Next() % 5u) {
+    switch (rng.Next() % 6u) {
         case 1: {                                                       // un rio en el medio con dos puentes
             const int b1 = 2 + static_cast<int>(rng.Next() % 5u), b2 = 8 + static_cast<int>(rng.Next() % 5u);
             for (int r = 1; r <= 14; ++r) {
@@ -664,6 +676,12 @@ LevelDef GenerateVersusLevel(uint32_t seed) {
                     if (d.cells[r][c] == kEmpty) d.cells[r][c] = kIce;
             break;
         }
+        case 5: {                                                       // un desierto de arena en el centro
+            for (int r = 3; r <= 11; ++r)
+                for (int c = 8; c <= 13; ++c)
+                    if (d.cells[r][c] == kEmpty) d.cells[r][c] = kSand;
+            break;
+        }
         default: break;
     }
     // 3) un poco de hierro mas segun la dificultad
@@ -673,7 +691,8 @@ LevelDef GenerateVersusLevel(uint32_t seed) {
     ClearVersusZones(d);
     // 4) camino: desde el frente de la aguila izquierda hasta el centro y hasta las dos apariciones de ese lado
     {
-        const int er = d.vsEagleRow[0], ec = d.vsEagleCol[0] + 2;
+        int ec, er;
+        nes::Battle::VsSideBlock(d.vsEagleCol[0], d.vsEagleRow[0], 0, ec, er);
         const int targets[3][2] = {{7, 13}, {d.spawnRow[0], d.spawnCol[0]}, {d.spawnRow[1], d.spawnCol[1]}};
         for (const auto& tg : targets) {
             for (int guard = 0; guard < 6; ++guard) {
@@ -725,9 +744,54 @@ LevelDef GenerateVersusLevel(uint32_t seed) {
             }
         }
     }
-    // 5) la otra mitad es el espejo (todo lo justo para los dos equipos)
+    // 5) la otra mitad es el mismo mapa girado media vuelta (las aguilas estan en esquinas opuestas): justo para los dos equipos
     for (int r = 0; r < kGridRows; ++r)
-        for (int c = 0; c < 13; ++c) d.cells[r][kLevelCols - 1 - c] = d.cells[r][c];
+        for (int c = 0; c < 13; ++c) d.cells[kGridRows - 1 - r][kLevelCols - 1 - c] = d.cells[r][c];
+    for (int r = 0; r < 7; ++r) {                                                    // la columna del centro, con la misma simetria (si uno de los dos es transitable, los dos)
+        uint8_t& a = d.cells[r][13];
+        uint8_t& b = d.cells[kGridRows - 1 - r][13];
+        if (LevelCellPassable(a)) b = a;
+        else if (LevelCellPassable(b)) a = b;
+        else b = a;
+    }
+    d.cells[7][13] = kEmpty;
+    return d;
+}
+
+LevelDef GenerateRoyaleLevel(uint32_t seed) {
+    LevelDef d = GenerateVersusLevel(seed * 2654435761u + 12345u);
+    d.royale = true;
+    int sp[8][2];
+    for (int id = 0; id < 8; ++id) nes::Battle::RoyaleSpawnBlock(id, sp[id][0], sp[id][1]);     // (col, fila)
+    auto clear = [&](int r, int c) {
+        if (r >= 0 && r < kGridRows && c >= 0 && c < kLevelCols) d.cells[r][c] = kEmpty;
+    };
+    for (int id = 0; id < 8; ++id) {                                      // cada salida y su alrededor, libres
+        const int c = sp[id][0], r = sp[id][1];
+        clear(r, c); clear(r - 1, c); clear(r + 1, c); clear(r, c - 1); clear(r, c + 1);
+    }
+    // todos los puntos de salida tienen que poder llegar al centro: si no, se abre un camino en L hacia el centro
+    for (int id = 0; id < 8; ++id) {
+        bool reach[kGridRows][kLevelCols] = {};
+        std::queue<std::pair<int, int>> q;
+        q.push({7, 13});
+        reach[7][13] = true;
+        while (!q.empty()) {
+            const auto [r, c] = q.front();
+            q.pop();
+            const int dr[4] = {-1, 1, 0, 0}, dc[4] = {0, 0, -1, 1};
+            for (int k = 0; k < 4; ++k) {
+                const int nr = r + dr[k], nc = c + dc[k];
+                if (nr < 0 || nr >= kGridRows || nc < 0 || nc >= kLevelCols || reach[nr][nc] || !LevelCellPassable(d.cells[nr][nc])) continue;
+                reach[nr][nc] = true;
+                q.push({nr, nc});
+            }
+        }
+        int r = sp[id][1], c = sp[id][0];
+        if (reach[r][c]) continue;
+        while (c != 13) { c += c < 13 ? 1 : -1; if (!LevelCellPassable(d.cells[r][c])) d.cells[r][c] = kEmpty; if (reach[r][c]) break; }
+        while (r != 7 && !reach[r][c]) { r += r < 7 ? 1 : -1; if (!LevelCellPassable(d.cells[r][c])) d.cells[r][c] = kEmpty; }
+    }
     d.cells[7][13] = kEmpty;
     return d;
 }

@@ -21,8 +21,10 @@ namespace nes {
 
 using u8 = uint8_t;
 
-constexpr int kMaxTanks = 20;    // modo clasico: 2 jugadores + 6 enemigos; ancho: hasta 4 jugadores + 8 enemigos
-constexpr int kMaxBullets = 24;  // un slot por tanque (indice del tanque) + una segunda bala por jugador
+constexpr int kMaxPlayers = 8;   // jugadores a la vez (solo la batalla vs en red pasa de 4: 3 vs 3 y 4 vs 4)
+constexpr int kMaxTanks = 24;    // modo clasico: 2 jugadores + 6 enemigos; ancho: hasta 8 jugadores + 12 enemigos + 4 aliados
+constexpr int kMaxBullets = 32;  // un slot por tanque (indice del tanque) + una segunda bala por jugador
+constexpr int kSecondBulletBase = kMaxTanks;
 
 // Una entrada de la OAM tal como la deja el juego (sprites de 8x16).
 struct Sprite {
@@ -42,6 +44,29 @@ public:
     // Prueba: la zona de arriba (16 px, donde iba la barra del HUD) pasa a ser parte del campo y el HUD se dibuja encima, con
     // transparencia. Poner en false para volver a la barra gris de antes (el renderer usa la misma constante).
     static constexpr bool kOpenTopStrip = true;
+    // Bloque de arena (id 14 en los mapas): se ve como la nieve pero amarillenta, se pisa y las balas pasan por encima, y los tanques
+    // que estan sobre ella avanzan a la mitad de la velocidad. En el mapa es este mosaico (el renderer lo dibuja con los graficos de la nieve).
+    // Bloque de lava (id 16 interno; en los niveles es el 15): se ve como el agua con paleta roja. Una fuente rodeada de ladrillo o hierro
+    // se queda como esta; si tiene salida, de a poco esparce lava en hasta 6 bloques vacios al azar, cada uno dura 15 segundos hasta que se
+    // enfria y desaparece (y despues de un rato vuelve a empezar). Quema los arbustos que toca. Quien la pisa recibe 1 de dano, y otro mas
+    // por cada segundo que se quede encima.
+    static constexpr u8 kLavaTile = 0x24;
+    static constexpr int kLavaBlockId = 16;
+    static constexpr int kMaxLavaSources = 24;
+    static constexpr int kLavaMaxFlow = 8;
+    static constexpr int kLavaSpreadFrames = 90;        // una celda nueva cada 1,5 segundos
+    static constexpr int kLavaFlowLife = 900;           // 15 segundos
+    static constexpr int kLavaCooldownFrames = 300;     // descanso antes de volver a esparcir
+    static constexpr int kLavaDamageFrames = 60;        // dano cada 1 segundo
+    int LavaFlowCells() const;                          // celdas de lava esparcida que hay ahora (sin contar las fuentes)
+    int LavaSourceCount() const { return nLava_; }
+    bool LavaAtBlock(int col, int row) const;           // el bloque es lava (fuente o esparcida)
+    static constexpr int kRockHealth = 3;               // piedra de lava: 3 de salud por mosaico
+    bool RockAt(int tx, int ty) const;                  // el mosaico (tx, ty) es piedra de lava (se dibuja morado; para el motor es hierro)
+    bool RockBlockAt(int col, int row) const;           // el bloque (col, row) es de piedra
+    static constexpr u8 kSandTile = 0x23;
+    static constexpr int kSandBlockId = 14;
+    bool OnSand(int tank) const { return tank >= 0 && tank < kMaxTanks && onSand_[tank]; }
     static constexpr int kWideBlocksX = 27;
     static constexpr int kWideBlocksY = 14;
     static constexpr int kWideMapCols = 54;
@@ -65,7 +90,7 @@ public:
 
     // Entrada del host: botones con los bits de con_btn_* (A=01, B=02,
     // Select=04, Start=08, Arriba=10, Abajo=20, Izq=40, Der=80).
-    void SetButtons(int player, u8 buttons) { pad_[player & 3] = buttons; }
+    void SetButtons(int player, u8 buttons) { pad_[player & 7] = buttons; }
 
     // Un cuadro completo: NMI + cuerpo del bucle de la partida (C1F9).
     void RunFrame();
@@ -79,10 +104,10 @@ public:
     FriendlyFire GetFriendlyFire() const { return friendlyFire_; }
     int Players() const { return nPlayers_; }
     // Colores de los jugadores (0 amarillo, 1 verde, 2 azul, 3 rojo, 4 violeta, 5 naranja, 6 marron). Solo campo ancho.
-    void SetPlayerColors(const int colors[4]) {
-        for (int i = 0; i < 4; ++i) playerColor_[i] = colors[i] < 0 ? 0 : (colors[i] > 6 ? 6 : colors[i]);
+    void SetPlayerColors(const int* colors, int n = 4) {      // (los jugadores 5 a 8 de la batalla vs usan el color de su equipo)
+        for (int i = 0; i < n && i < kMaxPlayers; ++i) playerColor_[i] = colors[i] < 0 ? 0 : (colors[i] > 7 ? 7 : colors[i]);
     }
-    void SetPlayerColor(int p, int color) { playerColor_[p] = color < 0 ? 0 : (color > 6 ? 6 : color); }
+    void SetPlayerColor(int p, int color) { playerColor_[p] = color < 0 ? 0 : (color > 7 ? 7 : color); }
     // ---- partida en red: jugadores que entran y salen ----
     // La partida en red siempre se crea con 4 lugares de jugador; los que no estan quedan "ausentes" (sin tanque, sin vidas).
     // La dificultad (enemigos totales y en pantalla, ritmo de aparicion, puntos de aparicion) se calcula con los jugadores
@@ -90,7 +115,7 @@ public:
     void SetPresentMask(int mask);                       // antes de StartStage: quienes estan al empezar (bit p = jugador p)
     void MarkPlayerGone(int p);                          // se fue: su tanque desaparece y no vuelve
     void AddPlayerLate(int p, int color);                // entro en medio de la partida: aparece con 3 vidas
-    bool PlayerPresent(int p) const { return p >= 0 && p < 4 && present_[p]; }
+    bool PlayerPresent(int p) const { return p >= 0 && p < kMaxPlayers && present_[p]; }
     int ActivePlayers() const;                           // jugadores presentes (al menos 1)
     int DifficultyPlayers() const { return diffPlayers_; }
     int PlayerPaletteIndex(int p) const { return wide_ ? kColorPalette[playerColor_[p]] : (p < 2 ? p : p + 2); }
@@ -131,8 +156,13 @@ public:
         // MODO BATALLA VS: dos equipos con su aguila a cada lado. Las apariciones son los 4 puntos de los tanques con IA de cada equipo
         // (0 y 1: equipo izquierdo, 2 y 3: equipo derecho); tier = fuerza de los tanques con IA y de los bombardeos; rank = tiempo entre bombardeos.
         bool versus = false;
-        int vsEagleCol[2] = {1, 25}, vsEagleRow[2] = {7, 7};
+        int vsEagleCol[2] = {1, 25}, vsEagleRow[2] = {13, 1};      // las aguilas, en esquinas opuestas
         int vsLayers = 1;             // capas de hierro de cada aguila
+        // BATTLE ROYALE (sobre la batalla vs): todos contra todos, 8 combatientes (personas y IA), sin aguilas. A muerte (queda uno solo,
+        // 3 vidas cada uno) o por tiempo (reaparecen siempre; gana el que mas destruye).
+        bool royale = false;
+        bool royaleTimed = false;
+        int royaleMinutes = 5;
     };
     void SetStageSpec(const StageSpec& s) { spec_ = s; }
     const StageSpec& GetStageSpec() const { return spec_; }
@@ -142,21 +172,54 @@ public:
     // Fuerza del aguila enemiga 1..4 (niveles 10/20/30/40; en un nivel hecho a mano, la que se eligio).
     // ---- MODO BATALLA VS (dos equipos; el equipo 0 es el amarillo de la izquierda y el 1 el rojo de la derecha) ----
     bool IsVersus() const { return wide_ && level_ > 0 && spec_.active && spec_.versus; }
+    bool IsRoyale() const { return IsVersus() && spec_.royale; }
+    static constexpr int kRoyaleSize = 8;                        // combatientes de un battle royale
+    int RoyaleWinner() const { return vsWinner_ >= 10 ? vsWinner_ - 10 : -1; }     // quien gano (si fue uno solo)
+    bool RoyaleTimed() const { return IsRoyale() && spec_.royaleTimed; }
+    int RoyaleFramesLeft() const { return royaleFrames_; }       // por tiempo: cuadros que quedan
+    int RoyaleKills(int id) const { return royaleKills_[id & 7]; }
+    int RoyaleItemCount() const { int n = 0; for (const auto& it : rItems_) n += it.on ? 1 : 0; return n; }     // items en el campo
+    void DebugAi(int p, int& dir, int& gc, int& gr, int& stuck, int& timer, int& dodge) const { dir = aiDir_[p]; gc = aiGoalC_[p]; gr = aiGoalR_[p]; stuck = aiStuck_[p]; timer = aiTimer_[p]; dodge = aiDodgeT_[p]; }
+    bool DebugFrozen(int p) const { return playerFreeze_[p] != 0; }
+    int DebugBlockCost(int c, int r) const { return AiBlockCost(c, r); }
+    int RoyaleItemId(int i) const { return rItems_[i].on ? rItems_[i].id : -1; }
+    void DebugClearRoyaleItems() { for (auto& it : rItems_) it.on = false; }
+    int RoyalePaletteIndex(int id) const { return kColorPalette[RoyaleColor(id) & 7]; }
+    int RoyaleColor(int id) const;                               // color (0..7) del combatiente
+    bool RoyaleIsBot(int id) const { return IsBot(id); }         // lo juega la IA
+    int RoyaleLives(int id) const;                               // vidas que le quedan (a muerte)
+    bool RoyaleAlive(int id) const;                              // sigue en carrera (vivo o con vidas)
+    static void RoyaleSpawnBlock(int id, int& col, int& row);    // donde aparece el combatiente (bloque)
     static constexpr int kTeamColor[2] = {0, 3};                 // amarillo y rojo (los colores de las dos aguilas)
-    void SetTeams(const int team[4]) {                           // equipo (0/1) de cada jugador; tambien les pone el color del equipo
-        for (int i = 0; i < 4; ++i) {
-            playerTeam_[i] = team[i] ? 1 : 0;
+    void SetTeams(const int* team, int n = 4) {                  // equipo (0/1) de cada jugador (los que faltan, por paridad); tambien les pone el color del equipo
+        for (int i = 0; i < kMaxPlayers; ++i) {
+            playerTeam_[i] = i < n ? (team[i] ? 1 : 0) : (i & 1);
             playerColor_[i] = kTeamColor[playerTeam_[i]];
         }
     }
-    int TeamOf(int tank) const { return tank >= 0 && tank < nPlayers_ ? playerTeam_[tank] : vsTeam_[tank < 0 || tank >= kMaxTanks ? 0 : tank]; }
-    int PlayerTeam(int p) const { return playerTeam_[p & 3]; }
+    int TeamOf(int tank) const {
+        if (IsRoyale()) return tank >= 0 && tank < nPlayers_ ? tank : vsTeam_[tank < 0 || tank >= kMaxTanks ? 0 : tank];     // todos contra todos: cada uno es su propio equipo
+        return tank >= 0 && tank < nPlayers_ ? playerTeam_[tank] : vsTeam_[tank < 0 || tank >= kMaxTanks ? 0 : tank];
+    }
+    u8 VsTankAttr(int tank) const;                               // atributo de color del tanque (o de su bala) en la batalla vs
+    int PlayerTeam(int p) const { return playerTeam_[p & 7]; }
+    // Tamano de cada equipo (2, 3 o 4): los lugares que no ocupa una persona los juega la IA (bots, mas listos que los tanques con IA).
+    void SetVersusSize(int n) { vsSize_ = n < 1 ? 1 : (n > 4 ? 4 : n); }          // (el menu ofrece 2 a 4; 1 = sin IA, para pruebas)
+    int VersusSize() const { return vsSize_; }
+    // Los lugares sin persona los juega la IA: son JUGADORES como los demas (empiezan en nivel 0, con casco, 3 vidas, suben con las
+    // estrellas, agarran items...) pero sus botones los genera la IA en cada cuadro.
+    bool IsBot(int x) const { return IsVersus() && x >= 0 && x < nPlayers_ && aiPlayer_[x]; }
+    void SetHumanMask(int mask);                                 // batalla vs / royale, antes de StartStage: bit p = el jugador p es una persona
+    int VsBotCount(int team) const;                              // jugadores con IA de ese equipo
+    int VsBotLives(int team) const;                              // vidas que les quedan en total
+    // El k-esimo lugar donde aparecen los miembros del equipo (bloque): a los lados de la aguila, hacia el centro del mapa.
+    static void VsSideBlock(int eagleCol, int eagleRow, int k, int& col, int& row);
     int TeamPaletteIndex(int t) const { return kColorPalette[kTeamColor[t & 1]]; }   // paleta de sprites del color del equipo
     int VersusWinner() const { return vsWinner_; }               // -1 sigue la partida, 0 / 1 gano ese equipo, 2 empate
     bool VsEagleAlive(int team) const { return vsEagleAlive_[team & 1]; }
     int VsEagleCol(int team) const { return spec_.vsEagleCol[team & 1]; }
     int VsEagleRow(int team) const { return spec_.vsEagleRow[team & 1]; }
-    int VsTeamClock(int team) const { return teamClock_[team & 1]; }    // cuadros-por-64 que le quedan congelado a ese equipo
+    int VsTeamClock(int team) const { return teamClock_[team & 7]; }    // cuadros-por-64 que le quedan congelado a ese equipo
     int Rank() const { return spec_.active ? spec_.rank : (level_ / 10 < 1 ? 1 : (level_ / 10 > 4 ? 4 : level_ / 10)); }
     int EagleCol() const { return spec_.active ? spec_.eagleCol : 13; }     // bloque del aguila enemiga
     int EagleRow() const { return spec_.active ? spec_.eagleRow : 1; }
@@ -279,6 +342,7 @@ public:
     u8 TankXHi(int tank) const { return tankXHi_[tank]; }
     void SetXHi(bool tank, int index, u8 hi) { (tank ? tankXHi_ : bulletXHi_)[index] = hi; }
     void SetBonusXHi(u8 hi) { bonusXHi_ = hi; }
+    void DebugClearBonus() { R(ram_bonus_pos_X) = 0; bonusXHi_ = 0; }          // pruebas: el item desaparece (o lo agarraron)
     bool BonusActive() const { return (R(ram_bonus_pos_X) | bonusXHi_) != 0; }
     void DebugPlaySound(int which);      // 0 arranque de etapa, 1 record, 2 game over (las melodias del juego)
 
@@ -308,12 +372,12 @@ private:
     int NearestEnemy(int x) const;
     void Sub_AllyFire();
     int BulletShooter(int b) const;                  // indice del tanque que la disparo
-    int SecondBullet(int player) const { return wide_ ? 20 + player : 8 + player; }
+    int SecondBullet(int player) const { return wide_ ? kSecondBulletBase + player : 8 + player; }
     // Atributo de paleta del tanque de un jugador. En el campo ancho se elige entre 7 colores
     // (0 amarillo, 1 verde, 2 azul, 3 rojo, 4 violeta, 5 naranja, 6 marron): los bancos 4-8 salen de
     // los bits 2 y 4 del atributo (libres en la NES).
-    static constexpr u8 kColorAttr[7] = {0, 1, 4, 5, 6, 7, 0x10};
-    static constexpr u8 kColorPalette[7] = {0, 1, 4, 5, 6, 7, 8};   // indice de paleta de sprites que usa el renderer
+    static constexpr u8 kColorAttr[8] = {0, 1, 4, 5, 6, 7, 0x10, 0x11};
+    static constexpr u8 kColorPalette[8] = {0, 1, 4, 5, 6, 7, 8, 9};   // indice de paleta de sprites que usa el renderer
     u8 PlayerPalette(int x) const { return wide_ ? kColorAttr[playerColor_[x]] : static_cast<u8>(x < 2 ? x : x + 2); }
     int ShiftX() const { return wide_ ? 96 : 0; }
     int ShiftY() const { return wide_ ? 16 : 0; }                    // el campo ancho tiene una fila de bloques mas (sin borde inferior)                    // desplazamiento de la base al centro del campo ancho
@@ -428,6 +492,10 @@ private:
     bool AimsAtEagleAt(int x, int col, int row, int layers);
     // modo batalla vs
     void VersusSpawnHandler();
+    void VersusAiInputs();                                       // botones de los jugadores con IA (antes de leer los controles)
+    u8 AiButtons(int p);
+    int VsMemberIndex(int x) const;                              // lugar (0..3) donde aparece el tanque x de su equipo
+    bool LineOfFirePoint(int x, int px, int py, int range);      // el tanque x apunta (de frente) a ese punto
     void VersusPickGoal(int x);
     void VersusCollisions();
     void VersusCheckEnd();
@@ -465,38 +533,52 @@ private:
         u8 tflags[kMaxTanks], ttype[kMaxTanks], tposX[kMaxTanks], tposY[kMaxTanks], twheels[kMaxTanks];
         u8 tstLo[kMaxTanks], tstHi[kMaxTanks];
         u8 bstatus[kMaxBullets], bposX[kMaxBullets], bposY[kMaxBullets], bprop[kMaxBullets];
-        u8 upgrade[4], plrflags[kMaxTanks], helmet[4], stun[4], lives[4], btnHold[4], btnPress[4], extra[4];
+        u8 upgrade[kMaxPlayers], plrflags[kMaxTanks], helmet[kMaxPlayers], stun[kMaxPlayers], lives[kMaxPlayers], btnHold[kMaxPlayers], btnPress[kMaxPlayers], extra[kMaxPlayers];
         u8 hp[kMaxTanks];                         // salud de los enemigos (campo ancho)
-        u8 score[4 * 8];
-        u8 kill[4 * 4];
+        u8 score[kMaxPlayers * 8];
+        u8 kill[kMaxPlayers * 4];
     };
     WideData wd_ = {};
     FriendlyFire friendlyFire_ = FriendlyFire::Stun;
-    int playerColor_[4] = {0, 1, 2, 3};
+    int playerColor_[kMaxPlayers] = {0, 1, 2, 3, 4, 5, 6, 0};
     bool inputLocked_ = false;
     bool enemyEagleAlive_ = false;
     int bossSpawned_ = 0;
     int enemyEagleHp_ = 0;
-    int playerHits_[4] = {}, itemPickups_[4] = {}, blastCount_ = 0, eaglesDestroyed_ = 0;
-    bool present_[4] = {true, true, true, true};
+    int playerHits_[kMaxPlayers] = {}, itemPickups_[kMaxPlayers] = {}, blastCount_ = 0, eaglesDestroyed_ = 0;
+    bool present_[kMaxPlayers] = {true, true, true, true, true, true, true, true};
     int diffPlayers_ = 1;                                // jugadores con los que se calcula la dificultad del nivel en curso
     BombingState bomb_;
     int bomberSounds_ = 0;
     int shake_ = 0;
     u8 shieldHp_[kMaxTanks] = {};
-    uint16_t playerFreeze_[4] = {};
+    uint16_t playerFreeze_[kMaxPlayers] = {};
     bool extraEnemy_[kMaxTanks] = {};
-    int stealTarget_[4] = {-1, -1, -1, -1};
+    int stealTarget_[kMaxPlayers] = {-1, -1, -1, -1, -1, -1, -1, -1};
     int nPlayers_ = 2;
     int enemyTotal_ = 20;
     int level_ = 0;
     StageSpec spec_;
     bool allyAutoFire_ = true;
-    int playerTeam_[4] = {0, 1, 0, 1};
+    int playerTeam_[kMaxPlayers] = {0, 1, 0, 1, 0, 1, 0, 1};
+    int vsSize_ = 2;
+    int royaleKills_[8] = {};
+    int royaleFrames_ = 0;
+    int royaleBonusT_ = 0;
+    bool aiPlayer_[kMaxPlayers] = {};                     // jugador manejado por la IA
+    int aiDir_[kMaxPlayers] = {}, aiTimer_[kMaxPlayers] = {}, aiStuck_[kMaxPlayers] = {}, aiLastX_[kMaxPlayers] = {}, aiLastY_[kMaxPlayers] = {};
+    int aiGoalC_[kMaxPlayers] = {}, aiGoalR_[kMaxPlayers] = {}, aiGoalT_[kMaxPlayers] = {}, aiFireCool_[kMaxPlayers] = {}, aiDodgeT_[kMaxPlayers] = {}, aiWanderT_[kMaxPlayers] = {};
+    int AiBlockCost(int col, int row) const;                      // cuanto cuesta pasar por un bloque (255 = no se puede, ladrillo = hay que romperlo)
+    int AiPathDir(int fromCol, int fromRow, int toCol, int toRow, int& nextCost);   // primer paso del camino mas barato (-1 = ninguno)
+    // Battle royale: tres items a la vez cada 20 segundos
+    struct RoyaleItem { bool on = false; int x = 0, y = 0, id = 0, life = 0; };
+    RoyaleItem rItems_[3];
+    void RoyaleItemsStep();                                       // aparecen, se agarran y vencen
+    void RoyaleItemsDraw();
     int vsTeam_[kMaxTanks] = {};                          // equipo de cada tanque con IA (los jugadores usan playerTeam_)
     bool vsEagleAlive_[2] = {false, false};
     int vsWinner_ = -1;
-    int vsAiTimer_[2] = {0, 0}, vsSpawned_[2] = {0, 0}, teamClock_[2] = {0, 0};
+    int vsAiTimer_[2] = {0, 0}, vsSpawned_[2] = {0, 0}, teamClock_[8] = {};
     int tier_ = 0;
     int lastTank_ = 7;
     int lastEnemy_ = 7;
@@ -513,6 +595,7 @@ private:
     u8 bulletLevel_[kMaxBullets] = {};
     u8 bulletPierced_[kMaxBullets] = {};
     u8 steelHp_[64 * 34] = {};
+    u8 rock_[64 * 34] = {};                              // 1 = el mosaico de hierro es piedra de lava
     static constexpr int kSteelHealth = 20;
     static constexpr int kWideEnemySlots = 12;
 
@@ -525,9 +608,28 @@ private:
     u8 bonusXHi_ = 0, msgXHi_ = 0, destXHi_ = 0;
     uint16_t oamX_[64] = {};
     int markPtr_[kMaxTanks] = {};
+    bool onSand_[kMaxTanks] = {};                          // el tanque esta pisando arena
+    struct LavaCell { int col = 0, row = 0, timer = 0; };
+    struct LavaSource {
+        int col = 0, row = 0;                          // bloque (la fila 0 es la franja de arriba)
+        int phase = 0;                                 // 0 descanso, 1 esparciendo, 2 esperando que se enfrie todo
+        int timer = 0, placed = 0, n = 0;
+        LavaCell flow[kLavaMaxFlow];
+    };
+    LavaSource lava_[kMaxLavaSources];
+    int nLava_ = 0;
+    int lavaTick_[kMaxTanks] = {};                        // cuadros hasta el proximo dano de lava a ese tanque (0 = no esta en lava)
+    void Sub_Lava();
+    void LavaHit(int x);
+    bool BlockTilesAre(int col, int row, u8 tile, bool all) const;
+    bool BlockEmptyAt(int col, int row) const;
+    bool BlockOccupied(int col, int row);
+    void SetRockBlock(int col, int row);
+    void SetBlockTiles(int col, int row, u8 tile);
+    bool LavaForbidden(int col, int row) const;
 
     u8 ram_[0x800];
-    u8 pad_[4] = {0, 0, 0, 0};
+    u8 pad_[kMaxPlayers] = {};
     u8 bgPalette_ = 0;
     bool skipRestOfScript_ = false;
     int debugForcedType_[kMaxTanks];

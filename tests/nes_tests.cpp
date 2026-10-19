@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <functional>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -1483,7 +1484,7 @@ void TestLanLockstep() {
             if (side.frame >= kFrames) return;
             lan.SubmitLocal(side.frame, script(me, side.frame));
             if (!lan.FrameReady(side.frame)) { ++stalls; return; }
-            u8 in[4];
+            u8 in[8];
             lan.FrameInputs(side.frame, in);
             for (int i = 0; i < 4; ++i) side.fx->battle->SetButtons(i, static_cast<u8>(in[i] & ~nes::con_btn_Start));
             side.fx->flow->Step();
@@ -1579,7 +1580,7 @@ void TestLanSeveralPlayersPerPc() {
             for (int k = 0; k < n; ++k) local[k] = script(lan.MyPlayers()[static_cast<size_t>(k)], side.frame);
             lan.SubmitLocal(side.frame, local, n);
             if (!lan.FrameReady(side.frame)) return;
-            u8 in[4];
+            u8 in[8];
             lan.FrameInputs(side.frame, in);
             for (int i = 0; i < 4; ++i) side.fx->battle->SetButtons(i, static_cast<u8>(in[i] & ~nes::con_btn_Start));
             side.fx->flow->Step();
@@ -1704,7 +1705,7 @@ void TestOnlineCodeAndHybridRoom() {
             if (side.frame >= kFrames) return;
             lan.SubmitLocal(side.frame, script(lan.MyPlayers()[0], side.frame));
             if (!lan.FrameReady(side.frame)) return;
-            u8 in[4];
+            u8 in[8];
             lan.FrameInputs(side.frame, in);
             for (int i = 0; i < 4; ++i) side.fx->battle->SetButtons(i, static_cast<u8>(in[i] & ~nes::con_btn_Start));
             side.fx->flow->Step();
@@ -1753,7 +1754,7 @@ std::unique_ptr<FlowFixture> MakeNetFlow(int level, int presentMask, bool requir
 }
 
 // La misma logica que la partida en red del programa: marcas de entrada/salida, Start del anfitrion y botones.
-void ApplyNetFrame(FlowFixture& fx, const uint8_t in[4], int hostPlayer) {
+void ApplyNetFrame(FlowFixture& fx, const uint8_t in[8], int hostPlayer) {
     bool startNow = false;
     for (int i = 0; i < 4; ++i) {
         uint8_t b = in[i];
@@ -1866,7 +1867,7 @@ void TestLanLateJoin() {
         if (&lan == &host && side.fx->flow->WaitingForStart()) local |= nes::con_btn_Start;     // el anfitrion empieza cada nivel
         lan.SubmitLocal(side.frame, local);
         if (!lan.FrameReady(side.frame)) return;
-        uint8_t in[4];
+        uint8_t in[8];
         lan.FrameInputs(side.frame, in);
         for (int i = 0; i < 4; ++i) {
             if (app::Lan::IsJoinMark(in[i]) && !sawJoinMark) { sawJoinMark = true; joinFrame = side.frame; joinColor = app::Lan::JoinColor(in[i]); }
@@ -2112,7 +2113,7 @@ void TestCustomLevels() {
         // la vista tiene lo necesario para dibujar
         app::EditorView view;
         ed2.BuildView(view);
-        CHECK(view.boss && view.nSpawns == ed2.def().nSpawns && view.paletteIds.size() == 14);
+        CHECK(view.boss && view.nSpawns == ed2.def().nSpawns && view.paletteIds.size() == 16);
         std::vector<uint8_t> rgba;
         app::Renderer renderer;
         (void)renderer;                                                    // (el dibujo necesita los graficos de la ROM: se prueba a mano)
@@ -2169,7 +2170,7 @@ void TestCustomLevels() {
 // Modo batalla vs
 // ---------------------------------------------------------------------------
 
-std::unique_ptr<nes::Battle> MakeVersus(int players, const int teams[4], int tier = 0, int rank = 3) {
+std::unique_ptr<nes::Battle> MakeVersus(int players, const int teams[4], int tier = 0, int rank = 3, int size = 1) {
     auto b = std::make_unique<nes::Battle>();
     b->SetWide(true);
     nes::Battle::StageSpec sp;
@@ -2178,11 +2179,12 @@ std::unique_ptr<nes::Battle> MakeVersus(int players, const int teams[4], int tie
     sp.tier = tier;
     sp.rank = rank;
     sp.nSpawns = 4;
-    const int sc[4] = {4, 4, 22, 22}, sr[4] = {2, 12, 2, 12};
+    const int sc[4] = {1, 13, 25, 13}, sr[4] = {7, 13, 7, 1};
     for (int i = 0; i < 4; ++i) { sp.spawnCol[i] = sc[i]; sp.spawnRow[i] = sr[i]; }
     b->SetStageSpec(sp);
     b->SetLevel(1);
     b->NewGame(players, 1);
+    b->SetVersusSize(size);
     b->SetTeams(teams);
     u8 blocks[14][27];
     u8 strip[27];
@@ -2199,8 +2201,8 @@ void TestVersusMode() {
     auto b = MakeVersus(2, teams);
     CHECK(b->IsVersus() && !b->IsBossLevel() && !b->EnemyEagleAlive());
     CHECK(b->VsEagleAlive(0) && b->VsEagleAlive(1) && b->VersusWinner() == -1);
-    CHECK((b->Tile(2, 14) & 0xFC) == 0xC8 && (b->Tile(50, 14) & 0xFC) == 0xC8);        // las dos aguilas
-    CHECK(b->Tile(1, 14) != 0 && b->Tile(4, 14) != 0 && b->Tile(2, 13) != 0 && b->Tile(2, 16) != 0);   // y su cubierta de hierro
+    CHECK((b->Tile(2, 26) & 0xFC) == 0xC8 && (b->Tile(50, 2) & 0xFC) == 0xC8);          // las dos aguilas, en esquinas opuestas
+    CHECK(b->Tile(1, 26) != 0 && b->Tile(4, 26) != 0 && b->Tile(2, 25) != 0 && b->Tile(2, 28) != 0);   // y su cubierta de hierro
     CHECK(b->TeamOf(0) == 0 && b->TeamOf(1) == 1);
     CHECK(b->PlayerPaletteIndex(0) == 0 && b->PlayerPaletteIndex(1) == 5);             // amarillo y rojo
     CHECK(b->BombingActive() && b->BombInterval() == 2 * 60 * 60);
@@ -2217,13 +2219,13 @@ void TestVersusMode() {
     // un equipo tira al aguila rival con balas de 3 estrellas (rompen el hierro) hasta destruirla
     for (int e = b->Players(); e <= b->LastEnemy(); ++e) b->DebugSetTankFlags(e, 0);   // sin tanques de por medio
     b->SetUpgrade(0, 0x60);
-    b->SetTankPos(0, 330, 120);
+    b->SetTankPos(0, 330, 24);
     b->DebugSetTankFlags(0, 0xA3);                                                      // mirando a la derecha
     for (int f = 0; f < 400 && b->VsEagleAlive(1); ++f) {
         b->SetButtons(0, (f % 20) < 2 ? nes::con_btn_A : 0);
         b->RunFrame();
         for (int e = b->Players(); e <= b->LastEnemy(); ++e) b->DebugSetTankFlags(e, 0);
-        b->SetTankPos(0, 330, 120);
+        b->SetTankPos(0, 330, 24);
     }
     CHECK(!b->VsEagleAlive(1));
     CHECK(b->VsEagleAlive(0));
@@ -2271,8 +2273,8 @@ void TestVersusMode() {
             if (!g.versus || g.nSpawns != 4) ++bad;
             for (int r = 0; r < app::kGridRows; ++r)
                 for (int c = 0; c < 13; ++c)
-                    if (g.cells[r][c] != g.cells[r][26 - c]) ++asym;
-            if (!app::CheckLevelDef(g).empty()) ++bad;
+                    if (g.cells[r][c] != g.cells[app::kGridRows - 1 - r][26 - c]) ++asym;   // girado media vuelta
+            if (!app::CheckLevelDef(g).empty()) { ++bad; for (const auto& w : app::CheckLevelDef(g)) std::printf("seed %u: %s\n", seed, w.c_str()); }
             if (std::memcmp(g.cells, first.cells, sizeof(g.cells)) != 0) differ = true;
             const app::LevelDef again = app::GenerateVersusLevel(seed);
             if (std::memcmp(g.cells, again.cells, sizeof(g.cells)) != 0) ++bad;       // mismo numero, mismo mapa
@@ -2293,13 +2295,13 @@ void TestVersusMode() {
         u8 blocks[14][27];
         u8 strip[27];
         app::LevelDefToStage(back, blocks, strip, spec);
-        CHECK(spec.active && spec.versus && spec.nSpawns == 4 && spec.spawnCol[0] < 13 && spec.spawnCol[3] > 13);
+        CHECK(spec.active && spec.versus && spec.nSpawns == 4 && spec.spawnCol[0] == 1 && spec.spawnCol[2] == 25 && spec.spawnCol[1] == 13 && spec.spawnRow[3] == 1);
         app::LevelDef few = back;                                              // con una sola aparicion por equipo se avisa y se repite
         few.nSpawns = 2;
-        few.spawnCol[0] = 4; few.spawnRow[0] = 2; few.spawnCol[1] = 22; few.spawnRow[1] = 2;
+        few.spawnCol[0] = 1; few.spawnRow[0] = 7; few.spawnCol[1] = 25; few.spawnRow[1] = 7;
         CHECK(!app::CheckLevelDef(few).empty());
         app::LevelDefToStage(few, blocks, strip, spec);
-        CHECK(spec.nSpawns == 4 && spec.spawnCol[1] == 4 && spec.spawnCol[3] == 22);
+        CHECK(spec.nSpawns == 4 && spec.spawnCol[1] == 1 && spec.spawnCol[3] == 25);
         fs::remove_all(vt);
         app::SetLevelRoot("");
     }
@@ -2324,7 +2326,7 @@ void TestVersusMode() {
     }
 
     // dos PC que reciben lo mismo dan el mismo resultado
-    auto h1 = MakeVersus(2, teams, 4), h2 = MakeVersus(2, teams, 4);
+    auto h1 = MakeVersus(2, teams, 4, 3, 3), h2 = MakeVersus(2, teams, 4, 3, 3);
     for (int f = 0; f < 1500; ++f) {
         const u8 in0 = static_cast<u8>(((f / 25) % 4 == 0 ? nes::con_btn_Right : (f / 25) % 4 == 1 ? nes::con_btn_Up : (f / 25) % 4 == 2 ? nes::con_btn_Left : nes::con_btn_Down) | ((f % 9) < 2 ? nes::con_btn_A : 0));
         h1->SetButtons(0, in0); h2->SetButtons(0, in0);
@@ -2522,6 +2524,41 @@ void TestAllyRules() {
         CHECK_EQ(b.Score(0), before + 100);
         CHECK_EQ(b.KillCount(0, 0), kills + 1);
     }
+    // ---- 6) los aliados aguantan tantos tiros como su tipo (el nivel de arma del jugador al agarrar el item): 1, 2, 3 o 4 ----
+    for (int kind = 0; kind < 4; ++kind) {
+        nes::Battle b;
+        b.SetWide(true);
+        b.SetLevel(1);
+        b.NewGame(1, 1);
+        u8 blocks[14][27];
+        ArenaBlocks(blocks);
+        b.LoadWideStage(blocks);
+        b.StartStage();
+        for (int f = 0; f < 160; ++f) b.RunFrame();
+        b.SetUpgrade(0, static_cast<u8>(kind * 0x20));
+        b.SpawnAllies(0);
+        for (int f = 0; f < 160; ++f) b.RunFrame();
+        const int a0 = b.LastEnemy() + 1;
+        CHECK_EQ(b.EnemyHealth(a0), kind + 1);
+        CHECK_EQ(b.EnemyHealth(a0 + 1), kind + 1);
+        b.DebugAllyAutoFire(false);
+        // los enemigos les disparan: cada impacto cuenta uno, y al ultimo mueren
+        for (int shot = 1; shot <= kind + 1; ++shot) {
+            b.DebugClearBullets();
+            const int e = b.DebugSpawnEnemy(0, false);
+            for (int f = 0; f < 120; ++f) { b.R(nes::ram_clock_timer) = 0x0A; b.RunFrame(); }
+            b.DebugSetTankFlags(0, 0);
+            b.SetTankPos(e, 300, 100);
+            b.DebugSetTankFlags(e, 0xA1);                                     // mirando a la izquierda
+            b.SetTankPos(a0, 200, 100);
+            b.R(nes::ram_clock_timer) = 0x0A;
+            b.DebugFire(e);
+            for (int f = 0; f < 110; ++f) { b.SetTankPos(a0, 200, 100); b.R(nes::ram_clock_timer) = 0x0A; b.RunFrame(); b.DebugSetTankFlags(e, 0xA1); }
+            if (shot <= kind) CHECK(b.TankFlags(a0) >= 0x80 && b.TankFlags(a0) < 0xE0);      // todavia en pie
+            b.DebugSetTankFlags(e, 0);
+        }
+        CHECK(b.TankFlags(a0) < 0x80 || b.TankFlags(a0) == 0);                // con el ultimo tiro cae
+    }
     // ---- el escenario de prueba jugable arma todo esto ----
     {
         nes::Battle b;
@@ -2539,6 +2576,615 @@ void TestAllyRules() {
         for (int x = b.LastEnemy() + 1; x <= b.LastTank(); ++x) allies += b.TankFlags(x) != 0 ? 1 : 0;
         CHECK_EQ(allies, 2);
         CHECK(EagleStands(b));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bloque de arena
+// ---------------------------------------------------------------------------
+
+void TestSandBlock() {
+    std::printf("[arena] el bloque de arena (id 14): ralentiza a los tanques, se pisa, las balas pasan y se guarda en los niveles\n");
+    // se guarda y se lee (archivo y texto) y el editor lo ofrece
+    app::LevelDef d = app::BlankLevelDef(false);
+    d.cells[5][5] = 14;
+    d.cells[6][7] = 14;
+    app::LevelDef back;
+    CHECK(app::LevelDefFromText(app::LevelDefToText(d), back));
+    CHECK(back.cells[5][5] == 14 && back.cells[6][7] == 14 && back.cells[5][6] == 13);
+    const auto& pal = app::LevelEditor::PaletteIds();
+    CHECK(std::find(pal.begin(), pal.end(), 14) != pal.end());
+    CHECK(app::LevelCellPassable(14));
+    // el campo: el bloque son cuatro mosaicos de arena
+    auto run = [](bool sand, int frames, int* onSandFrames) {
+        nes::Battle b;
+        b.SetWide(true);
+        b.SetLevel(1);
+        b.NewGame(1, 1);
+        u8 blocks[14][27];
+        std::memset(blocks, 13, sizeof(blocks));
+        if (sand) for (int c = 0; c < 12; ++c) blocks[13][c] = 14;          // la fila de abajo (por donde va el jugador hacia la izquierda)
+        b.LoadWideStage(blocks);
+        b.StartStage();
+        for (int f = 0; f < 160; ++f) b.RunFrame();                         // el jugador aparece
+        const int x0 = b.TankX(0);
+        if (sand) CHECK(b.Tile(2, 28) == nes::Battle::kSandTile && b.Tile(3, 29) == nes::Battle::kSandTile);
+        int on = 0;
+        for (int f = 0; f < frames; ++f) {
+            b.SetButtons(0, nes::con_btn_Left);
+            b.RunFrame();
+            on += b.OnSand(0) ? 1 : 0;
+        }
+        if (onSandFrames) *onSandFrames = on;
+        return x0 - b.TankX(0);                                             // cuanto avanzo hacia la izquierda
+    };
+    int onPlain = 0, onSand = 0;
+    const int plain = run(false, 100, &onPlain);
+    const int slow = run(true, 100, &onSand);
+    CHECK(plain > 40);
+    CHECK_EQ(onPlain, 0);
+    CHECK(onSand > 50);                                                      // estuvo pisando arena casi todo el tiempo
+    CHECK(slow > 10 && slow * 100 < plain * 65 && slow * 100 > plain * 35);   // y avanzo la mitad, mas o menos
+    // una bala atraviesa la arena sin pararse
+    {
+        nes::Battle b;
+        b.SetWide(true);
+        b.SetLevel(1);
+        b.NewGame(1, 1);
+        u8 blocks[14][27];
+        std::memset(blocks, 13, sizeof(blocks));
+        for (int c = 0; c < 27; ++c) blocks[6][c] = 14;
+        for (int r = 0; r < 14; ++r) blocks[r][0] = blocks[r][26] = 9;       // marco para que la bala no se pierda
+        b.LoadWideStage(blocks);
+        b.StartStage();
+        for (int f = 0; f < 160; ++f) b.RunFrame();
+        b.DebugClearBullets();
+        b.SetTankPos(0, 120, 120);                                          // sobre la fila de arena (bloque fila 6 = y 112..127)
+        b.DebugSetTankFlags(0, 0xA3);                                       // mirando a la derecha
+        b.DebugFire(0);
+        int flying = 0;
+        for (int f = 0; f < 30; ++f) { b.SetTankPos(0, 120, 120); b.RunFrame(); flying += (b.BulletStatus(0) & 0xF0) == 0x40 ? 1 : 0; }
+        CHECK(flying >= 20);                                                 // siguio volando por encima de la arena
+        CHECK(b.Tile(10, 14) == nes::Battle::kSandTile);                     // y la arena sigue ahi
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bloque de lava
+// ---------------------------------------------------------------------------
+
+void TestLavaBlock() {
+    std::printf("[lava] la fuente encerrada no se mueve; con salida esparce hasta 6 bloques que se enfrian a los 15 s; quema arbustos; dano por segundo\n");
+    using nes::Battle;
+    auto make = [](const std::function<void(u8 (*)[27])>& fill, int warm = 160) {
+        auto b = std::make_unique<Battle>();
+        b->SetWide(true);
+        b->SetLevel(1);
+        b->NewGame(1, 1);
+        u8 blocks[14][27];
+        std::memset(blocks, 13, sizeof(blocks));
+        fill(blocks);
+        b->LoadWideStage(blocks);
+        b->StartStage();
+        b->R(nes::ram_enemy_spawn_cnt) = 0;                                  // sin enemigos nuevos
+        for (int f = 0; f < warm; ++f) b->RunFrame();
+        b->DebugClearEnemies();
+        return b;
+    };
+    // ---- 1) encerrada en ladrillo no esparce nada ----
+    {
+        auto b = make([](u8 (*bl)[27]) {
+            bl[6][10] = Battle::kLavaBlockId;
+            bl[5][10] = bl[7][10] = bl[6][9] = bl[6][11] = 4;
+        });
+        CHECK_EQ(b->LavaSourceCount(), 1);
+        CHECK(b->LavaAtBlock(10, 7));
+        int maxFlow = 0;
+        for (int f = 0; f < 2500; ++f) { b->R(nes::ram_enemy_spawn_cnt) = 0; b->RunFrame(); maxFlow = std::max(maxFlow, b->LavaFlowCells()); }
+        CHECK_EQ(maxFlow, 0);
+        CHECK(b->LavaAtBlock(10, 7));                                        // y la fuente sigue ahi
+    }
+    // ---- 2) con una salida esparce de a poco hasta 6 bloques; cada uno se enfria a los 15 segundos y despues vuelve a empezar ----
+    {
+        auto b = make([](u8 (*bl)[27]) {
+            bl[6][10] = Battle::kLavaBlockId;
+            bl[5][10] = bl[7][10] = bl[6][9] = 4;                            // la salida es el lado derecho
+        });
+        int maxFlow = 0, at250 = -1, at800 = -1, at2100 = -1, first = -1;
+        for (int f = 0; f < 2500; ++f) {
+            b->R(nes::ram_enemy_spawn_cnt) = 0;
+            b->DebugSetTankFlags(0, 0);                                      // el jugador no estorba (ni se quema)
+            b->RunFrame();
+            const int n = b->LavaFlowCells();
+            maxFlow = std::max(maxFlow, n);
+            if (n > 0 && first < 0) first = f;
+            if (f == 250) at250 = n;
+            if (f == 800) at800 = n;
+            if (f == 2100) at2100 = n;
+        }
+        CHECK(first >= 0 && first < 150);                                    // empieza de a poco (la primera celda al ratito)
+        CHECK(at250 >= 2 && at250 < 8);                                      // se va esparciendo
+        CHECK_EQ(at800, 8);                                                  // llega a 8 y no pasa de ahi
+        CHECK_EQ(maxFlow, 8);
+        CHECK_EQ(at2100, 0);                                                 // y se enfrio todo
+        CHECK(!b->LavaAtBlock(10, 7));                                       // el punto inicial ya no es lava...
+        CHECK(b->RockBlockAt(10, 7));                                        // ...queda piedra (4 mosaicos, morado)
+        int rocks = 0, rx = -1, ry = -1;
+        for (int ty = 0; ty < 30; ++ty)
+            for (int tx = 0; tx < 54; ++tx)
+                if (b->RockAt(tx, ty)) { ++rocks; if (tx >= rx) { rx = tx; ry = ty; } }
+        CHECK_EQ(rocks, 9 * 4);                                              // 8 esparcidos + el inicial
+        // 3 de salud: el mosaico de piedra mas a la derecha aguanta 2 tiros y cae al 3.o
+        const int tx0 = rx;
+        b->DebugClearBullets();
+        auto shoot = [&]() {
+            for (int f = 0; f < 110; ++f) { b->SetTankPos(0, (tx0 + 1) * 8 + 24, (ry & ~1) * 8 + 8); b->DebugSetTankFlags(0, 0xA1); if (f == 0) b->DebugFire(0); b->RunFrame(); }
+        };
+        shoot(); CHECK(b->RockAt(rx, ry));
+        shoot(); CHECK(b->RockAt(rx, ry));
+        shoot(); CHECK(!b->RockAt(rx, ry));
+    }
+    // ---- 3) los arbustos que toca se queman ----
+    {
+        auto b = make([](u8 (*bl)[27]) {
+            bl[6][10] = Battle::kLavaBlockId;
+            bl[6][9] = 11;                                                   // un bloque de arbusto pegado a la lava
+            bl[5][10] = bl[7][10] = 4;
+        }, 0);
+        CHECK_EQ(b->Tile(18, 14), 0x22);                                     // el arbusto (columna 9, fila 7 del mapa) se ve
+        b->RunFrame();
+        b->RunFrame();
+        CHECK_EQ(b->Tile(18, 14), 0);                                        // desaparecio
+    }
+    // ---- 4) el jugador recibe 1 de dano al pisarla y 1 mas por cada segundo ----
+    {
+        auto b = make([](u8 (*bl)[27]) { bl[4][5] = Battle::kLavaBlockId; bl[3][5] = bl[5][5] = bl[4][4] = bl[4][6] = 4; });
+        b->SetHelmet(0, 0);
+        b->SetUpgrade(0, 0x40);
+        auto stay = [&](int frames) { for (int f = 0; f < frames; ++f) { b->SetTankPos(0, 88, 88); b->RunFrame(); } };
+        stay(1);
+        CHECK_EQ(b->Upgrade(0), 0x20);                                       // al tocarla: 1 de dano
+        stay(40);
+        CHECK_EQ(b->Upgrade(0), 0x20);                                       // todavia no paso el segundo
+        stay(25);
+        CHECK_EQ(b->Upgrade(0), 0x00);                                       // al segundo: otro
+        stay(70);
+        CHECK(b->TankFlags(0) < 0x80 || b->TankFlags(0) == 0 || b->Lives(0) < 3);   // y sin nivel de arma, lo destruye
+    }
+    // ---- 5) los enemigos pierden un punto de salud por segundo ----
+    {
+        auto b = make([](u8 (*bl)[27]) { bl[4][5] = Battle::kLavaBlockId; bl[3][5] = bl[5][5] = bl[4][4] = bl[4][6] = 4; });
+        const int e = b->DebugSpawnEnemy(3, false);
+        CHECK(e >= 0);
+        for (int f = 0; f < 120; ++f) { b->R(nes::ram_clock_timer) = 0x0A; b->RunFrame(); }
+        const int hp0 = b->EnemyHealth(e);
+        CHECK(hp0 >= 3);
+        for (int f = 0; f < 2; ++f) { b->SetTankPos(e, 88, 88); b->R(nes::ram_clock_timer) = 0x0A; b->RunFrame(); }
+        CHECK_EQ(b->EnemyHealth(e), hp0 - 1);
+        for (int f = 0; f < 62; ++f) { b->SetTankPos(e, 88, 88); b->R(nes::ram_clock_timer) = 0x0A; b->RunFrame(); }
+        CHECK_EQ(b->EnemyHealth(e), hp0 - 2);
+    }
+    // ---- 6) en los niveles la lava es el id 15 (se guarda) y el editor la ofrece ----
+    {
+        app::LevelDef d = app::BlankLevelDef(false);
+        d.cells[5][5] = 15;
+        d.cells[0][3] = 15;
+        app::LevelDef back;
+        CHECK(app::LevelDefFromText(app::LevelDefToText(d), back));
+        CHECK(back.cells[5][5] == 15 && back.cells[0][3] == 15);
+        u8 blocks[14][27];
+        u8 strip[27];
+        nes::Battle::StageSpec spec;
+        app::LevelDefToStage(back, blocks, strip, spec);
+        CHECK(blocks[4][5] == nes::Battle::kLavaBlockId && strip[3] == nes::Battle::kLavaBlockId);     // el motor la conoce como 16
+        const auto& pal = app::LevelEditor::PaletteIds();
+        CHECK(std::find(pal.begin(), pal.end(), 15) != pal.end());
+    }
+}
+
+// Batalla vs / royale sobre un campo vacio: `players` jugadores (los de humanMask son personas; los demas, IA con jugador completo).
+std::unique_ptr<nes::Battle> MakeVsAi(int players, int humanMask, int size, bool royale = false, bool timed = false, int minutes = 5, int tier = 2) {
+    auto b = std::make_unique<nes::Battle>();
+    b->SetWide(true);
+    nes::Battle::StageSpec sp;
+    sp.active = true; sp.versus = true; sp.tier = tier; sp.rank = 3; sp.nSpawns = 4;
+    const int sc[4] = {1, 13, 25, 13}, sr[4] = {7, 13, 7, 1};
+    for (int i = 0; i < 4; ++i) { sp.spawnCol[i] = sc[i]; sp.spawnRow[i] = sr[i]; }
+    sp.royale = royale; sp.royaleTimed = timed; sp.royaleMinutes = minutes;
+    b->SetStageSpec(sp);
+    b->SetLevel(1);
+    b->NewGame(players, 1);
+    const int teams[8] = {0, 1, 0, 1, 0, 1, 0, 1};
+    const int colors[8] = {0, 7, 2, 3, 4, 5, 6, 1};
+    if (royale) b->SetPlayerColors(colors, 8);
+    else { b->SetVersusSize(size); b->SetTeams(teams, 8); }
+    b->SetHumanMask(humanMask);
+    u8 blocks[14][27];
+    u8 strip[27];
+    std::memset(blocks, 13, sizeof(blocks));
+    std::memset(strip, 13, sizeof(strip));
+    b->LoadWideStage(blocks, strip);
+    b->StartStage();
+    return b;
+}
+
+// Batalla vs con hasta 8 jugadores de verdad (3 vs 3 y 4 vs 4 en red); los lugares sin persona los juega la IA
+void TestVersusEightPlayers() {
+    std::printf("[batalla vs] 3 vs 3 y 4 vs 4 en red: hasta 8 jugadores reales, la IA completa los cupos y la sala los muestra\n");
+    // ---- motor: 8 jugadores, cada uno aparece junto a la aguila de su equipo, sin IA ----
+    {
+        auto b = MakeVsAi(8, 0xFF, 4);
+        CHECK_EQ(b->Players(), 8);
+        CHECK_EQ(b->VsBotCount(0) + b->VsBotCount(1), 0);                        // ocho personas: no hace falta la IA
+        for (int f = 0; f < 200; ++f) b->RunFrame();
+        for (int p = 0; p < 8; ++p) {
+            CHECK_EQ(b->TeamOf(p), p & 1);
+            CHECK(b->TankFlags(p) >= 0x80 && b->TankFlags(p) < 0xE0);            // los ocho ya estan jugando
+            const int t = b->TeamOf(p);
+            const int ex = b->VsEagleCol(t) * 16 + 8, ey = b->VsEagleRow(t) * 16 + 8;
+            CHECK(std::abs(b->TankX(p) - ex) <= 80 && std::abs(b->TankY(p) - ey) <= 80);
+        }
+        for (int p = 0; p < 8; ++p)                                                 // y ocupan lugares distintos
+            for (int q = p + 1; q < 8; ++q) CHECK(b->TankX(p) != b->TankX(q) || b->TankY(p) != b->TankY(q));
+        for (int f = 0; f < 300; ++f) {
+            for (int p = 0; p < 8; ++p) b->SetButtons(p, static_cast<u8>(((f / 20 + p) % 4 == 0 ? nes::con_btn_Right : (f / 20 + p) % 4 == 1 ? nes::con_btn_Up : (f / 20 + p) % 4 == 2 ? nes::con_btn_Left : nes::con_btn_Down) | ((f + p) % 9 < 2 ? nes::con_btn_A : 0)));
+            b->RunFrame();
+        }
+        CHECK_EQ(b->VersusWinner(), -1);
+    }
+    // ---- cupos: la IA completa los equipos ----
+    {
+        auto a = MakeVsAi(6, 0x0F, 3);                                            // 3 vs 3 con 4 personas: 1 de IA por equipo
+        CHECK_EQ(a->Players(), 6);
+        CHECK_EQ(a->VsBotCount(0), 1);
+        CHECK_EQ(a->VsBotCount(1), 1);
+        auto c = MakeVsAi(8, 0x1F, 4);                                            // 4 vs 4 con 5 personas: el equipo 1 tiene 3 y el 2 tiene 2
+        CHECK_EQ(c->VsBotCount(0), 1);
+        CHECK_EQ(c->VsBotCount(1), 2);
+        auto d = MakeVsAi(8, 0x03, 4);
+        CHECK_EQ(d->VsBotCount(0), 3);
+        CHECK_EQ(d->VsBotCount(1), 3);
+        for (int f = 0; f < 300; ++f) d->RunFrame();                              // 2 personas + 6 IA juegan sin problemas
+        CHECK_EQ(d->VersusWinner(), -1);
+    }
+    // ---- la sala: 6 u 8 lugares, cada PC con sus jugadores, y los botones de los 8 viajan sincronizados ----
+    {
+        const uint16_t port = 47941;
+        app::Lan host(port), g1(port), g2(port), g3(port);
+        CHECK(host.Host("Ana"));
+        host.SetCapacity(8);
+        CHECK_EQ(host.Capacity(), 8);
+        app::Lan* guests[3] = {&g1, &g2, &g3};
+        const char* names[3] = {"Beto", "Cata", "Dino"};
+        for (int i = 0; i < 3; ++i) {
+            CHECK(guests[i]->Search());
+            CHECK(SpinLan({&host, guests[i]}, [&] { return !guests[i]->Games().empty(); }));
+            CHECK_EQ(guests[i]->Games()[0].maxPlayers, 8);                        // el aviso dice cuantos lugares hay
+            CHECK(guests[i]->Join(guests[i]->Games()[0], names[i]));
+            CHECK(SpinLan({&host, &g1, &g2, &g3}, [&] { return guests[i]->state() == app::Lan::State::Joined; }));
+        }
+        CHECK(host.AddLocalPlayer());
+        for (int i = 0; i < 3; ++i) CHECK(guests[i]->AddLocalPlayer());
+        CHECK(SpinLan({&host, &g1, &g2, &g3}, [&] { return host.NumPlayers() == 8 && g1.NumPlayers() == 8 && g3.NumPlayers() == 8 && g3.LocalCount() == 2; }));
+        CHECK_EQ(g2.Capacity(), 8);                                                // los miembros tambien lo saben
+        CHECK(!host.AddLocalPlayer());                                            // sala llena (8)
+        CHECK(!g1.AddLocalPlayer());
+        app::Lan fifth(port);                                                      // un noveno ya no entra
+        CHECK(fifth.Search());
+        CHECK(SpinLan({&host, &fifth}, [&] { return !fifth.Games().empty(); }));
+        CHECK(fifth.Join(fifth.Games()[0], "Eli"));
+        CHECK(SpinLan({&host, &fifth}, [&] { return fifth.state() == app::Lan::State::Full; }));
+        CHECK(host.StartGame(16));
+        CHECK(SpinLan({&host, &g1, &g2, &g3}, [&] { return g1.Started() && g2.Started() && g3.Started(); }));
+        CHECK_EQ(g3.StartMask(), 0xFF);
+        // cuatro PC simulan lo mismo con los botones de los 8 jugadores
+        const int teams[8] = {0, 1, 0, 1, 0, 1, 0, 1};
+        std::unique_ptr<nes::Battle> bt[4];
+        app::Lan* lans[4] = {&host, &g1, &g2, &g3};
+        int fr[4] = {0, 0, 0, 0};
+        for (auto& b : bt) {
+            b = std::make_unique<nes::Battle>();
+            b->SetWide(true);
+            nes::Battle::StageSpec sp;
+            sp.active = true; sp.versus = true; sp.tier = 2; sp.rank = 3; sp.nSpawns = 4;
+            const int sc[4] = {1, 13, 25, 13}, sr[4] = {7, 13, 7, 1};
+            for (int i = 0; i < 4; ++i) { sp.spawnCol[i] = sc[i]; sp.spawnRow[i] = sr[i]; }
+            b->SetStageSpec(sp);
+            b->SetLevel(1);
+            b->NewGame(8, 1);
+            b->SetVersusSize(4);
+            b->SetTeams(teams, 8);
+            u8 blocks[14][27];
+            u8 strip[27];
+            std::memset(blocks, 13, sizeof(blocks));
+            std::memset(strip, 13, sizeof(strip));
+            b->LoadWideStage(blocks, strip);
+            b->StartStage();
+        }
+        auto script = [](int player, int frame) -> u8 {
+            const int phase = (frame / 17 + player * 3) % 8;
+            u8 v = 0;
+            if (phase == 0 || phase == 1) v |= nes::con_btn_Up;
+            if (phase == 2 || phase == 3) v |= nes::con_btn_Left;
+            if (phase == 4 || phase == 5) v |= nes::con_btn_Right;
+            if (phase == 6) v |= nes::con_btn_Down;
+            if ((frame + player) % 13 < 4) v |= nes::con_btn_A;
+            return v;
+        };
+        constexpr int kFrames = 400;
+        bool match = true;
+        const auto t0 = std::chrono::steady_clock::now();
+        auto allDone = [&] { for (int i = 0; i < 4; ++i) if (fr[i] < kFrames) return false; return true; };
+        while (!allDone() && std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() < 25.0) {
+            for (auto* l : lans) l->Update();
+            for (int i = 0; i < 4; ++i) {
+                if (fr[i] >= kFrames) continue;
+                u8 local[4] = {0, 0, 0, 0};
+                const int n = lans[i]->LocalCount();
+                for (int k = 0; k < n; ++k) local[k] = script(lans[i]->MyPlayers()[static_cast<size_t>(k)], fr[i]);
+                lans[i]->SubmitLocal(fr[i], local, n);
+                if (!lans[i]->FrameReady(fr[i])) continue;
+                u8 in[8];
+                lans[i]->FrameInputs(fr[i], in);
+                for (int p = 0; p < 8; ++p) bt[i]->SetButtons(p, static_cast<u8>(in[p] & ~nes::con_btn_Start));
+                bt[i]->RunFrame();
+                ++fr[i];
+                if (fr[i] % 60 == 0) lans[i]->ReportHash(fr[i], bt[i]->StateHash());
+            }
+            if (fr[0] == fr[1] && fr[1] == fr[2] && fr[2] == fr[3] && fr[0] % 60 == 0 && fr[0] > 0)
+                match = match && bt[0]->StateHash() == bt[1]->StateHash() && bt[1]->StateHash() == bt[2]->StateHash() && bt[2]->StateHash() == bt[3]->StateHash();
+        }
+        CHECK(allDone());
+        CHECK(match);
+        for (int i = 1; i < 4; ++i) CHECK_EQ(bt[0]->StateHash(), bt[i]->StateHash());
+        for (auto* l : lans) CHECK(!l->Desynced());
+        int moved = 0;
+        for (int p = 0; p < 8; ++p) moved += (bt[0]->TankX(p) != 0) ? 1 : 0;
+        CHECK_EQ(moved, 8);
+    }
+}
+
+// Jugadores con IA: los lugares del equipo que no ocupa una persona son jugadores completos manejados por la IA
+void TestVersusBots() {
+    std::printf("[batalla vs] la IA juega con jugadores completos (nivel 0, casco, 3 vidas, items), junto a la aguila y cuenta para ganar\n");
+    for (int size = 2; size <= 4; ++size) {
+        auto b = MakeVsAi(2 * size, 0x03, size);
+        CHECK_EQ(b->VsBotCount(0), size - 1);
+        CHECK_EQ(b->VsBotCount(1), size - 1);
+        CHECK_EQ(b->VsBotLives(0), 3 * (size - 1));
+        for (int p = 0; p < 2 * size; ++p) {
+            CHECK_EQ(b->Lives(p), 3);                                             // los mismos atributos que una persona
+            CHECK_EQ(b->Upgrade(p), 0);                                           // empiezan en nivel 0
+            const int ex = b->VsEagleCol(b->TeamOf(p)) * 16 + 8, ey = b->VsEagleRow(b->TeamOf(p)) * 16 + 8;
+            CHECK(b->TankFlags(p) != 0 && std::abs(b->TankX(p) - ex) <= 80 && std::abs(b->TankY(p) - ey) <= 80);   // junto a su aguila
+        }
+        CHECK(b->IsBot(2) && !b->IsBot(0) && !b->IsBot(1));
+    }
+    auto b = MakeVsAi(6, 0x03, 3);
+    for (int f = 0; f < 200; ++f) b->RunFrame();
+    for (int p = 2; p < 6; ++p) CHECK(b->Helmet(p) != 0 || b->TankFlags(p) >= 0x80);   // al aparecer tienen casco como las personas
+    // juegan: se mueven, disparan y se destruyen entre si
+    int moved = 0, shots = 0;
+    int sx[6], sy[6];
+    for (int p = 0; p < 6; ++p) { sx[p] = b->TankX(p); sy[p] = b->TankY(p); }
+    bool away[6] = {};
+    for (int f = 0; f < 1500; ++f) {
+        b->RunFrame();
+        for (int p = 2; p < 6; ++p) {
+            shots += (b->BulletStatus(p) & 0xF0) == 0x40 ? 1 : 0;
+            if (std::abs(b->TankX(p) - sx[p]) + std::abs(b->TankY(p) - sy[p]) > 100) away[p] = true;
+        }
+    }
+    for (int p = 2; p < 6; ++p) moved += away[p] ? 1 : 0;
+    CHECK(moved >= 2);
+    CHECK(shots > 20);
+    // el equipo sigue vivo mientras le quede un jugador de IA aunque la persona se quede sin vidas
+    {
+        auto c = MakeVsAi(4, 0x03, 2);
+        for (int f = 0; f < 120; ++f) c->RunFrame();
+        c->SetLives(0, 0);
+        c->DebugSetTankFlags(0, 0);
+        for (int f = 0; f < 10; ++f) c->RunFrame();
+        CHECK_EQ(c->VersusWinner(), -1);                                       // el equipo 1 conserva a su jugador de IA (lugar 3)
+        c->SetLives(2, 0);
+        c->DebugSetTankFlags(2, 0);
+        for (int f = 0; f < 10; ++f) c->RunFrame();
+        CHECK_EQ(c->VersusWinner(), 1);                                        // ahora si: pierde el equipo 1
+    }
+    // un jugador de IA destruido reaparece (nivel 0) mientras le queden vidas; sin vidas ya no vuelve
+    {
+        auto c = MakeVsAi(4, 0x03, 2);
+        for (int f = 0; f < 120; ++f) c->RunFrame();
+        c->DebugSetTankFlags(2, 0x13);                                          // explota
+        for (int f = 0; f < 90; ++f) c->RunFrame();
+        CHECK_EQ(c->Lives(2), 2);
+        CHECK(c->TankFlags(2) != 0);
+        CHECK_EQ(c->Upgrade(2), 0);
+        c->SetLives(2, 1);
+        c->DebugSetTankFlags(2, 0x13);
+        for (int f = 0; f < 90; ++f) c->RunFrame();
+        CHECK_EQ(c->Lives(2), 0);
+        CHECK_EQ(c->TankFlags(2), 0);
+    }
+    // agarran items como los jugadores (una estrella sube el nivel)
+    {
+        auto c = MakeVsAi(4, 0x03, 2);
+        for (int f = 0; f < 150; ++f) c->RunFrame();
+        c->SetBonus(c->TankX(3), c->TankY(3), 3);
+        for (int f = 0; f < 3; ++f) c->RunFrame();
+        CHECK(c->Upgrade(3) >= 0x20);
+    }
+    // una persona que se va deja su tanque a la IA
+    {
+        auto c = MakeVsAi(4, 0x0F, 2);
+        CHECK_EQ(c->VsBotCount(0) + c->VsBotCount(1), 0);
+        for (int f = 0; f < 100; ++f) c->RunFrame();
+        c->MarkPlayerGone(2);
+        CHECK(c->IsBot(2));
+        CHECK(c->TankFlags(2) != 0);
+        CHECK_EQ(c->Lives(2), 3);
+    }
+}
+
+// Battle royale: todos contra todos, a muerte o por tiempo
+void TestRoyale() {
+    std::printf("[battle royale] 8 combatientes (personas e IA), todos contra todos, a muerte o por tiempo, items cada minuto, color rosa\n");
+    // ---- el rosa: octavo color en el lobby, la red y el motor ----
+    CHECK_EQ(app::kColorCount, 8);
+    CHECK_EQ(app::Lan::kColorCount, 8);
+    {
+        app::Lobby lb;
+        lb.Join(0);
+        int seen = 0;
+        for (int i = 0; i < 9; ++i) { lb.CycleColor(0, +1); if (lb.Color(0) == 7) seen = 1; }
+        CHECK_EQ(seen, 1);
+    }
+    // ---- mapas: los 8 puntos de salida despejados y conectados con el centro ----
+    {
+        int bad = 0;
+        for (uint32_t seed = 1; seed <= 120; ++seed) {
+            const app::LevelDef d = app::GenerateRoyaleLevel(seed);
+            if (!d.royale || !d.versus) ++bad;
+            bool reach[app::kGridRows][app::kLevelCols] = {};
+            std::vector<std::pair<int, int>> q = {{7, 13}};
+            reach[7][13] = true;
+            for (size_t i = 0; i < q.size(); ++i) {
+                const int dr[4] = {-1, 1, 0, 0}, dc[4] = {0, 0, -1, 1};
+                for (int k = 0; k < 4; ++k) {
+                    const int nr = q[i].first + dr[k], nc = q[i].second + dc[k];
+                    if (nr < 0 || nr >= app::kGridRows || nc < 0 || nc >= app::kLevelCols || reach[nr][nc] || !app::LevelCellPassable(d.cells[nr][nc])) continue;
+                    reach[nr][nc] = true;
+                    q.push_back({nr, nc});
+                }
+            }
+            for (int id = 0; id < 8; ++id) {
+                int c, r;
+                nes::Battle::RoyaleSpawnBlock(id, c, r);
+                if (!reach[r][c]) ++bad;
+            }
+            const app::LevelDef again = app::GenerateRoyaleLevel(seed);
+            if (std::memcmp(d.cells, again.cells, sizeof(d.cells)) != 0) ++bad;
+        }
+        CHECK_EQ(bad, 0);
+    }
+    // ---- a muerte: 2 personas + 6 IA (jugadores completos), todos con color distinto, 3 vidas ----
+    {
+        auto b = MakeVsAi(8, 0x03, 4, true, false, 5);
+        CHECK(b->IsRoyale() && !b->RoyaleTimed());
+        int bots = 0;
+        bool colorUsed[8] = {};
+        for (int id = 0; id < 8; ++id) {
+            bots += b->RoyaleIsBot(id) ? 1 : 0;
+            CHECK(!colorUsed[b->RoyaleColor(id)]);                            // ocho colores distintos
+            colorUsed[b->RoyaleColor(id)] = true;
+            CHECK_EQ(b->RoyaleLives(id), 3);
+            CHECK_EQ(b->TeamOf(id), id);                                      // cada uno es su propio equipo
+        }
+        CHECK_EQ(bots, 6);
+        CHECK_EQ(b->PlayerPaletteIndex(1), 9);                                 // el jugador 2 es rosa
+        for (int f = 0; f < 110; ++f) b->RunFrame();
+        for (int id = 0; id < 8; ++id) CHECK(b->TankFlags(id) >= 0x80 && b->TankFlags(id) < 0xE0);   // los ocho en el campo
+        CHECK_EQ(b->VersusWinner(), -1);
+        for (int f = 0; f < 3000; ++f) b->RunFrame();                           // la IA se destruye entre si
+        int kills = 0;
+        for (int id = 0; id < 8; ++id) kills += b->RoyaleKills(id);
+        CHECK(kills > 0);
+        // queda uno solo: gana
+        auto c = MakeVsAi(8, 0x03, 4, true, false, 5);
+        for (int f = 0; f < 120; ++f) c->RunFrame();
+        for (int p = 1; p < 8; ++p) { c->SetLives(p, 0); c->DebugSetTankFlags(p, 0); }
+        for (int f = 0; f < 5; ++f) c->RunFrame();
+        CHECK_EQ(c->VersusWinner(), 10);                                       // gana el combatiente 0
+        CHECK_EQ(c->RoyaleWinner(), 0);
+        // todos fuera: empate
+        auto e2 = MakeVsAi(8, 0x03, 4, true, false, 5);
+        for (int f = 0; f < 120; ++f) e2->RunFrame();
+        for (int p = 0; p < 8; ++p) { e2->SetLives(p, 0); e2->DebugSetTankFlags(p, 0); }
+        for (int f = 0; f < 5; ++f) e2->RunFrame();
+        CHECK_EQ(e2->VersusWinner(), 2);
+    }
+    // ---- por tiempo: reaparecen siempre y al acabar el tiempo gana el que mas destruyo ----
+    {
+        auto b = MakeVsAi(8, 0x03, 4, true, true, 3);
+        CHECK(b->RoyaleTimed());
+        CHECK_EQ(b->RoyaleFramesLeft(), 3 * 3600);
+        for (int f = 0; f < 120; ++f) b->RunFrame();
+        for (int k = 0; k < 5; ++k) {                                          // un jugador cae varias veces: sigue en carrera
+            b->DebugSetTankFlags(0, 0x13);
+            for (int f = 0; f < 90; ++f) b->RunFrame();
+            CHECK(b->TankFlags(0) != 0);
+            CHECK_EQ(b->Lives(0), 3);
+        }
+        CHECK_EQ(b->VersusWinner(), -1);
+        for (int f = 0; f < 3 * 3600 && b->VersusWinner() < 0; ++f) b->RunFrame();
+        CHECK(b->VersusWinner() >= 0);                                         // se acabo el tiempo
+        CHECK_EQ(b->RoyaleFramesLeft(), 0);
+        if (b->VersusWinner() >= 10) {
+            int top = 0;
+            for (int id = 0; id < 8; ++id) top = std::max(top, b->RoyaleKills(id));
+            CHECK_EQ(b->RoyaleKills(b->RoyaleWinner()), top);                  // el ganador es el que mas destruyo
+        }
+    }
+    // ---- items: tres a la vez cada 20 segundos; el siguiente grupo empieza a contar cuando no queda ninguno ----
+    {
+        auto b = MakeVsAi(8, 0x01, 4, true, true, 10);
+        for (int p = 1; p < 8; ++p) { b->SetLives(p, 0); b->DebugSetTankFlags(p, 0); }   // (sin nadie que los agarre)
+        auto run = [&](int frames) { for (int f = 0; f < frames; ++f) { b->SetTankPos(0, 20, 20); b->RunFrame(); } };
+        run(1150);
+        CHECK_EQ(b->RoyaleItemCount(), 0);                                     // antes de los 20 segundos, nada
+        run(100);
+        CHECK_EQ(b->RoyaleItemCount(), 3);                                     // aparecen tres juntos
+        run(1400);
+        CHECK_EQ(b->RoyaleItemCount(), 3);                                     // mientras siguen ahi no sale otro grupo
+        b->DebugClearRoyaleItems();                                            // los agarran: empieza la cuenta del siguiente grupo
+        run(1150);
+        CHECK_EQ(b->RoyaleItemCount(), 0);
+        run(100);
+        CHECK_EQ(b->RoyaleItemCount(), 3);
+        // por tiempo no aparecen vidas; a muerte si pueden aparecer
+        bool lifeTimed = false;
+        for (int k = 0; k < 40; ++k) {
+            b->DebugClearRoyaleItems();
+            run(1250);
+            for (int i = 0; i < 3; ++i) lifeTimed = lifeTimed || b->RoyaleItemId(i) == 5;
+        }
+        CHECK(!lifeTimed);
+        auto d = MakeVsAi(8, 0x01, 4, true, false, 5);
+        for (int p = 1; p < 8; ++p) { d->SetLives(p, 3); }
+        bool lifeSeen = false;
+        for (int k = 0; k < 60 && !lifeSeen; ++k) {
+            d->DebugClearRoyaleItems();
+            for (int f = 0; f < 1250; ++f) { d->SetTankPos(0, 20, 20); d->SetLives(0, 3); d->RunFrame(); }
+            for (int i = 0; i < 3; ++i) lifeSeen = lifeSeen || d->RoyaleItemId(i) == 5;
+        }
+        CHECK(lifeSeen);
+        // los items se agarran: una estrella sube de nivel
+        auto e = MakeVsAi(8, 0x01, 4, true, true, 10);
+        for (int p = 1; p < 8; ++p) { e->SetLives(p, 0); e->DebugSetTankFlags(p, 0); }
+        for (int f = 0; f < 1250; ++f) e->RunFrame();
+        CHECK_EQ(e->RoyaleItemCount(), 3);
+        int got = 0;
+        for (int f = 0; f < 600 && got == 0; ++f) { e->RunFrame(); got = e->Upgrade(0) > 0 || e->Helmet(0) > 3 ? 1 : 0; }
+    }
+    // ---- 8 personas en red: mismas entradas, mismo estado ----
+    {
+        auto h1 = MakeVsAi(8, 0xFF, 4, true), h2 = MakeVsAi(8, 0xFF, 4, true);
+        for (int f = 0; f < 900; ++f) {
+            for (int p = 0; p < 8; ++p) {
+                const u8 in = static_cast<u8>(((f / 25 + p) % 4 == 0 ? nes::con_btn_Right : (f / 25 + p) % 4 == 1 ? nes::con_btn_Up : (f / 25 + p) % 4 == 2 ? nes::con_btn_Left : nes::con_btn_Down) | ((f + p) % 9 < 2 ? nes::con_btn_A : 0));
+                h1->SetButtons(p, in); h2->SetButtons(p, in);
+            }
+            h1->RunFrame(); h2->RunFrame();
+        }
+        CHECK_EQ(h1->StateHash(), h2->StateHash());
+        CHECK_EQ(h1->Players(), 8);
+        int bots = 0;
+        for (int id = 0; id < 8; ++id) bots += h1->RoyaleIsBot(id) ? 1 : 0;
+        CHECK_EQ(bots, 0);
+        // y con IA: tambien igual en las dos
+        auto i1 = MakeVsAi(8, 0x03, 4, true), i2 = MakeVsAi(8, 0x03, 4, true);
+        for (int f = 0; f < 1500; ++f) { i1->RunFrame(); i2->RunFrame(); }
+        CHECK_EQ(i1->StateHash(), i2->StateHash());
     }
 }
 
@@ -2664,8 +3310,8 @@ void TestPadAssignment() {
 }
 
 void TestPlayerColorsInGame() {
-    std::printf("[colores] el tanque, la bala y los aliados usan el color elegido (7 colores)\n");
-    for (int color = 0; color < 7; ++color) {
+    std::printf("[colores] el tanque, la bala y los aliados usan el color elegido (8 colores, con el rosa)\n");
+    for (int color = 0; color < 8; ++color) {
         auto b = std::make_unique<nes::Battle>();
         b->SetWide(true);
         const int colors[4] = {color, 1, 2, 3};
@@ -2679,8 +3325,8 @@ void TestPlayerColorsInGame() {
         b->RunFrame();
         b->SetButtons(0, 0);
         bool tankSeen = false, bulletSeen = false;
-        static const int kAttr[7] = {0, 1, 4, 5, 6, 7, 0x10};
-        static const int kPal[7] = {0, 1, 4, 5, 6, 7, 8};
+        static const int kAttr[8] = {0, 1, 4, 5, 6, 7, 0x10, 0x11};
+        static const int kPal[8] = {0, 1, 4, 5, 6, 7, 8, 9};
         const int expected = kAttr[color];
         for (int i = 0; i < 64; ++i) {
             const nes::Sprite sp = b->OamSprite(i);
@@ -2741,8 +3387,13 @@ int main() {
     TestLanLateJoin();
     TestCustomLevels();
     TestVersusMode();
+    TestVersusBots();
+    TestVersusEightPlayers();
+    TestRoyale();
     TestLanSharedMaps();
     TestAllyRules();
+    TestSandBlock();
+    TestLavaBlock();
     TestBossSpawnPointsAnyPlayerCount();
     TestBossDifficultyScaling();
     TestEnemyItemsAndShield();

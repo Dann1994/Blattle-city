@@ -2,6 +2,7 @@
 #include <cstdio>
 
 #include <algorithm>
+#include <queue>
 #include <utility>
 
 #include <cstdlib>
@@ -133,6 +134,7 @@ void Battle::Sub_D784_write_tile(uint16_t addr, u8 value) {
     M(addr) = value;
     if (wide_ && addr < sizeof(steelHp_)) {
         steelHp_[addr] = 0;
+        rock_[addr] = 0;
     }
 }
 
@@ -143,6 +145,7 @@ void Battle::Sub_D6B3_fill_buffer_with_tiles(int col, int row, const u8* tiles) 
         M(p + i) = tiles[i];
         if (wide_ && p + i < static_cast<int>(sizeof(steelHp_))) {
             steelHp_[p + i] = 0;
+            rock_[p + i] = 0;
         }
     }
 }
@@ -169,14 +172,19 @@ void Battle::Sub_D635_calculate_nametable_attribute(int tileX, int tileY, u8 att
 void Battle::Sub_D80B_write_block_tiles_and_attribute(u8 tileId, int px, int py) {
     const int tx = WX(px) >> 3;
     const int ty = (py & 0xFF) >> 3;
-    Sub_D635_calculate_nametable_attribute(tx, ty, tbl_DABB_nametable_attribute[tileId]);
+    const int idx = tileId < 16 ? tileId : 0;                             // (las tablas de la ROM llegan al id 15)
+    Sub_D635_calculate_nametable_attribute(tx, ty, tbl_DABB_nametable_attribute[idx]);
 
     const uint16_t p = Sub_D5FB_calculate_pointer(tx & 0xFE, ty & 0xFE);
-    const int x4 = tileId * 4;
-    Sub_D784_write_tile(p, tbl_DACB_block_data[x4 + 0]);
-    Sub_D784_write_tile(p + 1, tbl_DACB_block_data[x4 + 1]);
-    Sub_D784_write_tile(p + Stride(), tbl_DACB_block_data[x4 + 2]);
-    Sub_D784_write_tile(p + Stride() + 1, tbl_DACB_block_data[x4 + 3]);
+    const int x4 = idx * 4;
+    const bool sand = wide_ && tileId == kSandBlockId;                    // arena (solo campo ancho): cuatro mosaicos propios
+    const bool lava = wide_ && tileId == kLavaBlockId;                    // lava: lo mismo
+    const u8 own = lava ? kLavaTile : kSandTile;
+    const bool special = sand || lava;
+    Sub_D784_write_tile(p, special ? own : tbl_DACB_block_data[x4 + 0]);
+    Sub_D784_write_tile(p + 1, special ? own : tbl_DACB_block_data[x4 + 1]);
+    Sub_D784_write_tile(p + Stride(), special ? own : tbl_DACB_block_data[x4 + 2]);
+    Sub_D784_write_tile(p + Stride() + 1, special ? own : tbl_DACB_block_data[x4 + 3]);
 }
 
 // sub_D9E1_calculate_decimal_number (00:D9E1): A (BCD de 2 digitos) a ram_com_dec_number.
@@ -336,6 +344,7 @@ void Battle::Sub_CC08_draw_destroyed_eagle() {
 // sub_C9B0: todo gris indestructible ($11) y el campo de 26x26 mosaicos vacio.
 void Battle::Sub_D7CC_create_default_stage_field() {
     std::memset(steelHp_, 0, sizeof(steelHp_));
+    std::memset(rock_, 0, sizeof(rock_));
     const int total = wide_ ? kWideMapSize : 0x400;
     for (int i = 0; i < total; ++i) {
         M(i) = 0x11;
@@ -392,20 +401,36 @@ void Battle::LoadWideStage(const u8 blocks[kWideBlocksY][kWideBlocksX], const u8
     Sub_D7CC_create_default_stage_field();
     for (int row = 0; row < kWideBlocksY; ++row) {
         for (int col = 0; col < kWideBlocksX; ++col) {
-            Sub_D80B_write_block_tiles_and_attribute(blocks[row][col] & 0x0F, col * 0x10, 0x10 + row * 0x10);
+            Sub_D80B_write_block_tiles_and_attribute(blocks[row][col] & 0x1F, col * 0x10, 0x10 + row * 0x10);
         }
     }
     if (strip && kOpenTopStrip) {
         for (int col = 0; col < kWideBlocksX; ++col) {
-            Sub_D80B_write_block_tiles_and_attribute(strip[col] & 0x0F, col * 0x10, 0x00);     // la franja de arriba (y = 0..15)
+            Sub_D80B_write_block_tiles_and_attribute(strip[col] & 0x1F, col * 0x10, 0x00);     // la franja de arriba (y = 0..15)
         }
     }
+    nLava_ = 0;                                          // las fuentes de lava de este mapa
+    std::memset(lavaTick_, 0, sizeof(lavaTick_));
+    auto addLava = [&](int col, int row) {
+        if (nLava_ >= kMaxLavaSources) return;
+        lava_[nLava_] = LavaSource{};
+        lava_[nLava_].col = col;
+        lava_[nLava_].row = row;
+        lava_[nLava_].timer = 120;
+        ++nLava_;
+    };
+    for (int row = 0; row < kWideBlocksY; ++row)
+        for (int col = 0; col < kWideBlocksX; ++col)
+            if ((blocks[row][col] & 0x1F) == kLavaBlockId) addLava(col, row + 1);
+    if (strip && kOpenTopStrip)
+        for (int col = 0; col < kWideBlocksX; ++col)
+            if ((strip[col] & 0x1F) == kLavaBlockId) addLava(col, 0);
     if (IsVersus()) {                                    // batalla vs: una aguila por equipo, cada una con su fortaleza de hierro
         enemyEagleAlive_ = false;
         enemyEagleHp_ = 0;
         bossSpawned_ = 0;
         vsWinner_ = -1;
-        for (int t = 0; t < 2; ++t) {
+        for (int t = 0; t < 2 && !IsRoyale(); ++t) {         // (el battle royale no tiene aguilas)
             vsEagleAlive_[t] = true;
             const int ec = 2 * spec_.vsEagleCol[t], er = 2 * spec_.vsEagleRow[t];
             DrawEagleAt(ec, er, false, static_cast<u8>(t));
@@ -490,6 +515,7 @@ void Battle::NewGame(int players, int stage) {
     std::memset(bulletLevel_, 0, sizeof(bulletLevel_));
     std::memset(bulletPierced_, 0, sizeof(bulletPierced_));
     std::memset(steelHp_, 0, sizeof(steelHp_));
+    std::memset(rock_, 0, sizeof(rock_));
     bonusXHi_ = msgXHi_ = destXHi_ = 0;
     R(ram_random) = 0x5A;
     R(ram_offset_oam_index) = 4;
@@ -503,13 +529,13 @@ void Battle::NewGame(int players, int stage) {
     std::memset(shieldHp_, 0, sizeof(shieldHp_));
     std::memset(extraEnemy_, 0, sizeof(extraEnemy_));
     for (int& t : stealTarget_) t = -1;
-    nPlayers_ = wide_ ? (players < 1 ? 1 : (players > 4 ? 4 : players)) : 2;
-    for (int i = 0; i < 4; ++i) present_[i] = i < nPlayers_;
-    diffPlayers_ = nPlayers_;
+    nPlayers_ = wide_ ? (players < 1 ? 1 : (players > kMaxPlayers ? kMaxPlayers : players)) : 2;
+    for (int i = 0; i < kMaxPlayers; ++i) present_[i] = i < nPlayers_;
+    diffPlayers_ = nPlayers_ > 4 ? 4 : nPlayers_;
     lastEnemy_ = wide_ ? nPlayers_ + kWideEnemySlots - 1 : con_max_tanks;
     allyBegin_ = lastEnemy_ + 1;
     lastTank_ = wide_ ? lastEnemy_ + kWideAllySlots : con_max_tanks;
-    nBullets_ = wide_ ? 24 : 10;
+    nBullets_ = wide_ ? kMaxBullets : 10;
     std::memset(allyOwner_, 0, sizeof(allyOwner_));
     {
         static const int kTotals[4] = {20, 20, 36, 48};          // 1 y 2 jugadores: los 20 de la ROM
@@ -548,6 +574,7 @@ void Battle::Sub_C331_prepare_tanks_and_spawn_players() {
     inputLocked_ = false;
     std::memset(shieldHp_, 0, sizeof(shieldHp_));
     std::memset(playerFreeze_, 0, sizeof(playerFreeze_));
+    std::memset(lavaTick_, 0, sizeof(lavaTick_));
     std::memset(extraEnemy_, 0, sizeof(extraEnemy_));
     for (int& t : stealTarget_) t = -1;
     bomb_ = BombingState{};
@@ -555,7 +582,11 @@ void Battle::Sub_C331_prepare_tanks_and_spawn_players() {
     std::memset(vsTeam_, 0, sizeof(vsTeam_));
     vsAiTimer_[0] = vsAiTimer_[1] = 90;                  // batalla vs: los primeros tanques con IA salen al ratito
     vsSpawned_[0] = vsSpawned_[1] = 0;
-    teamClock_[0] = teamClock_[1] = 0;
+    std::memset(teamClock_, 0, sizeof(teamClock_));
+    std::memset(royaleKills_, 0, sizeof(royaleKills_));
+    royaleFrames_ = spec_.royaleMinutes * 3600;
+    royaleBonusT_ = 1200;
+    for (auto& it : rItems_) it = RoyaleItem{};
     vsWinner_ = -1;
     shake_ = 0;
     Sub_E409_clear_bullet_status();
@@ -581,7 +612,7 @@ void Battle::Sub_C331_prepare_tanks_and_spawn_players() {
     BONUSX = 0;
     R(ram_clock_timer) = 0;
     R(ram_enemy_spawn_pos_index) = 0;
-    for (int i = 0; i < (wide_ ? 16 : 8); ++i) {
+    for (int i = 0; i < (wide_ ? kMaxPlayers * 4 : 8); ++i) {
         KILLCNT(i) = 0;                          // sub_C71E_clear_kill_counters
     }
     Sub_E42B_prepare_enemy_tanks_for_stage();
@@ -677,12 +708,14 @@ void Battle::Nmi() {
 }
 
 void Battle::RunFrame() {
+    if (IsVersus()) VersusAiInputs();                    // los jugadores con IA aprietan sus botones antes de leer los controles
     Nmi();
     skipRestOfScript_ = false;
     if (R(ram_pause_flag) == 0) {
         Sub_C2E6_main_battle_script();
     }
     Sub_E23B_display_bonus_on_screen();
+    if (IsRoyale()) RoyaleItemsDraw();
     Sub_E0D8_bullets_status_handler();
     Sub_DEA6_tanks_handler();
     if (BTNPRESS(0) & con_btn_Start) {          // Start alterna la pausa
@@ -693,13 +726,14 @@ void Battle::RunFrame() {
 
 // sub_C2E6_main_battle_script (00:C2E6)
 void Battle::Sub_C2E6_main_battle_script() {
-    for (int p = 0; p < 4; ++p) {
+    for (int p = 0; p < kMaxPlayers; ++p) {
         if (playerFreeze_[p] != 0) --playerFreeze_[p];     // cuenta el reloj enemigo, un cuadro por vez
     }
     Sub_E181_ice_detection();
     Sub_DB75_ice_movement();
     Sub_DBF1_tank_movement();
     Sub_E1FA_clear_tank_marks();
+    Sub_Lava();
     Sub_E02E_bullets_status_handler();
     Sub_E2A9_HQ_handler();
     Sub_E27C_players_invincibility_sprites();
@@ -713,7 +747,7 @@ void Battle::Sub_C2E6_main_battle_script() {
     Sub_E910_check_bullets_collision_with_bullets();
     Sub_E70C_check_bullets_collision_with_tanks();
     if (IsVersus()) {
-        for (int t = 0; t < 2; ++t) {
+        for (int t = 0; t < 8; ++t) {
             if (teamClock_[t] != 0 && (R(ram_frm_cnt_lo) & 0x3F) == 0) --teamClock_[t];
         }
         VersusCheckEnd();
@@ -802,11 +836,13 @@ void Battle::Sub_C31D_water_palette_swap_handler() {
 void Battle::Sub_E181_ice_detection() {
     const int st = Stride();
     for (int x = lastTank_; x >= 0; --x) {
+        onSand_[x] = false;
         const u8 f = TFLAGS(x);
         if (!(f & 0x80) || f >= 0xE0) {
             continue;
         }
         const uint16_t p = PointerPx(WX(TPOSX(x) - 8), U8(TPOSY(x) - 8));
+        onSand_[x] = wide_ && (M(p + st + 1) & 0x7F) == kSandTile;        // el mosaico del centro del tanque es arena
         markPtr_[x] = p;
         TSTLO(x) = p & 0xFF;
         TSTHI(x) = (p >> 8) & 0x03;
@@ -862,7 +898,7 @@ void Battle::Sub_DB75_ice_movement() {
         }
         u8 dpad = 0;
         bool forceBump = false;
-        if (wide_ && x < 4 && playerFreeze_[x] != 0) {
+        if (wide_ && x < kMaxPlayers && playerFreeze_[x] != 0) {
                                                     // reloj enemigo: paralizado
             forceBump = true;
         } else if (STUN(x) != 0) {
@@ -916,6 +952,12 @@ void Battle::Sub_DBF1_tank_movement() {
             } else {
                 run = ((x ^ R(ram_frm_cnt_lo)) & 0x01) != 0;
             }
+        }
+        if (run && onSand_[x]) {                         // arena: el tanque se queda con la mitad de sus pasos (va a la mitad de velocidad)
+            const int lo = R(ram_frm_cnt_lo);
+            const int m = lo & 7;
+            const bool allowed = x < nPlayers_ ? (m == 1 || m == 4 || m == 7) : ((lo & 3) < 2);
+            if (!allowed) run = false;
         }
         if (run) {
             Sub_DC3D_tank_status_handler(x);
@@ -1047,9 +1089,9 @@ void Battle::Status_FollowTarget(int x, u8 status) {
         DESTX = TPOSX(p);
         R(ram_enemy_destination_Y) = TPOSY(p);
     } else if (IsVersus()) {
-        const int opp = 1 - TeamOf(x);           // batalla vs: rumbo al aguila del otro equipo
-        DESTX = spec_.vsEagleCol[opp] * 16 + 8;
-        R(ram_enemy_destination_Y) = static_cast<u8>(spec_.vsEagleRow[opp] * 16 + 8);
+        const int opp = IsRoyale() ? 0 : 1 - TeamOf(x);           // batalla vs: rumbo al aguila del otro equipo
+        DESTX = IsRoyale() ? 13 * 16 + 8 : spec_.vsEagleCol[opp] * 16 + 8;       // (battle royale: al centro del mapa)
+        R(ram_enemy_destination_Y) = static_cast<u8>(IsRoyale() ? 7 * 16 + 8 : spec_.vsEagleRow[opp] * 16 + 8);
     } else if (IsBossLevel()) {
         DESTX = guardX_[x];                      // niveles del aguila enemiga: se queda cerca de ella
         R(ram_enemy_destination_Y) = static_cast<u8>(guardY_[x]);
@@ -1183,7 +1225,7 @@ void Battle::Status_Explosion(int x) {
         }
         return;
     }
-    LIVES(x)--;
+    if (!RoyaleTimed()) LIVES(x)--;                       // (battle royale por tiempo: reaparece siempre)
     if (LIVES(x) != 0) {
         Sub_E363_tank_spawn_handler(x);
         return;
@@ -1243,15 +1285,16 @@ void Battle::Sub_E363_tank_spawn_handler(int x) {
     if (x < nPlayers_) {
         // campo ancho: a los lados de la base, como en la version anterior (P1 a 2 casillas del aguila a la izquierda, P2 a la derecha, P3 y P4 una mas afuera)
         static const int kWidePlayerX[4] = {0x78 + 96 - 0x20, 0x78 + 96 + 0x20, 0x78 + 96 - 0x30, 0x78 + 96 + 0x30};
-        TPOSX(x) = wide_ ? kWidePlayerX[x] : tbl_E47A_player_spawn_pos_X[x];
+        TPOSX(x) = wide_ ? kWidePlayerX[x & 3] : tbl_E47A_player_spawn_pos_X[x];
         TPOSY(x) = wide_ ? 0xD8 + ShiftY() : tbl_E47C_player_spawn_pos_Y[x];
-        if (IsVersus()) {                                // batalla vs: al lado de la propia aguila, mirando al otro equipo
-            const int t = playerTeam_[x];
-            int k = 0;
-            for (int p = 0; p < x; ++p) k += playerTeam_[p] == t ? 1 : 0;
-            const int col = spec_.vsEagleCol[t] + (t == 0 ? 2 : -2);
-            int row = spec_.vsEagleRow[t] + (k == 0 ? -1 : 1);
-            row = row < 1 ? 1 : (row > 13 ? 13 : row);
+        if (IsRoyale()) {                                // battle royale: cada uno en su punto de salida
+            int col, row;
+            RoyaleSpawnBlock(x, col, row);
+            TPOSX(x) = col * 16 + 8;
+            TPOSY(x) = row * 16 + 8;
+        } else if (IsVersus()) {                         // batalla vs: al lado de la propia aguila, mirando al otro equipo
+            int col, row;
+            VsSideBlock(spec_.vsEagleCol[playerTeam_[x]], spec_.vsEagleRow[playerTeam_[x]], VsMemberIndex(x), col, row);
             TPOSX(x) = col * 16 + 8;
             TPOSY(x) = row * 16 + 8;
         }
@@ -1312,9 +1355,347 @@ void Battle::DestroyVsEagle(int t) {
     DrawEagleAt(2 * spec_.vsEagleCol[t], 2 * spec_.vsEagleRow[t], true, 0);
 }
 
+// ---- battle royale ----
+void Battle::RoyaleSpawnBlock(int id, int& col, int& row) {
+    static const int kSpawn[8][2] = {{1, 13}, {25, 1}, {1, 1}, {25, 13}, {1, 7}, {25, 7}, {13, 13}, {13, 1}};     // esquinas opuestas de a pares
+    col = kSpawn[id & 7][0];
+    row = kSpawn[id & 7][1];
+}
+
+int Battle::RoyaleColor(int id) const { return playerColor_[id & 7]; }
+
+int Battle::RoyaleLives(int id) const { return id >= 0 && id < nPlayers_ ? Lives(id) : 0; }
+
+bool Battle::RoyaleAlive(int id) const { return id >= 0 && id < nPlayers_ && present_[id] && (Lives(id) != 0 || TankFlags(id) != 0); }
+
+u8 Battle::VsTankAttr(int tank) const {
+    if (tank >= 0 && tank < nPlayers_) return kColorAttr[playerColor_[tank] & 7];
+    return kColorAttr[kTeamColor[TeamOf(tank) & 1]];
+}
+
+// Lugares donde aparecen los miembros de un equipo: pegados a la fortaleza de su aguila, del lado del centro del mapa.
+void Battle::VsSideBlock(int ec, int er, int k, int& col, int& row) {
+    const int sx = ec < 13 ? 1 : -1, sy = er < 7 ? 1 : -1;
+    static const int kOff[8][2] = {{2, 0}, {0, 2}, {2, 2}, {4, 0}, {0, 4}, {4, 2}, {2, 4}, {4, 4}};
+    int n = 0;
+    for (const auto& o : kOff) {
+        const int c = ec + o[0] * sx, r = er + o[1] * sy;
+        if (c < 1 || c > 25 || r < 1 || r > 13) continue;
+        if (n++ == k) { col = c; row = r; return; }
+    }
+    col = ec + 2 * sx < 1 ? 1 : (ec + 2 * sx > 25 ? 25 : ec + 2 * sx);
+    row = er < 1 ? 1 : (er > 13 ? 13 : er);
+}
+
+// Lugar (0..3) del jugador en su equipo (por orden).
+int Battle::VsMemberIndex(int x) const {
+    const int t = TeamOf(x);
+    int k = 0;
+    for (int p = 0; p < x && p < nPlayers_; ++p) k += (playerTeam_[p] == t) ? 1 : 0;
+    return k > 3 ? 3 : k;
+}
+
+int Battle::VsBotCount(int t) const {
+    int n = 0;
+    for (int p = 0; p < nPlayers_; ++p) n += (aiPlayer_[p] && playerTeam_[p] == (t & 1)) ? 1 : 0;
+    return n;
+}
+
+int Battle::VsBotLives(int t) const {
+    int n = 0;
+    for (int p = 0; p < nPlayers_; ++p) if (aiPlayer_[p] && playerTeam_[p] == (t & 1)) n += Lives(p);
+    return n;
+}
+
+// Los lugares que no ocupa una persona los juega la IA (siguen siendo jugadores completos).
+void Battle::SetHumanMask(int mask) {
+    for (int p = 0; p < nPlayers_ && p < kMaxPlayers; ++p) {
+        present_[p] = true;
+        aiPlayer_[p] = IsVersus() && !((mask >> p) & 1);
+        LIVES(p) = 3;
+    }
+}
+
+void Battle::VersusAiInputs() {
+    for (int p = 0; p < nPlayers_; ++p) if (aiPlayer_[p]) pad_[p] = AiButtons(p);
+}
+
+// Cuanto cuesta que el tanque pase por el bloque (col, fila): vacio 1, arena 2, ladrillo 4 (hay que romperlo), lava 9, hierro / agua / borde / aguila: no.
+int Battle::AiBlockCost(int col, int row) const {
+    if (col < 0 || col >= kWideBlocksX || row < 0 || row > kWideBlocksY) return 255;
+    const int p = Sub_D5FB_calculate_pointer(2 * col, 2 * row);
+    const int st = Stride();
+    const int idx[4] = {p, p + 1, p + st, p + st + 1};
+    int cost = 1;
+    for (int i : idx) {
+        const int t = M(i) & 0x7F;
+        int c;
+        if (t == 0 || t == 0x21 || t == 0x22) c = 1;
+        else if (t == 0x23) c = 2;
+        else if (t == kLavaTile) c = 9;
+        else if (t == 0x10) c = (i < static_cast<int>(sizeof(rock_)) && rock_[i]) ? 6 : 255;
+        else if (t >= 0x11) c = 255;
+        else c = 4;
+        cost = std::max(cost, c);
+    }
+    return cost;
+}
+
+// Primer paso (0 arriba, 1 izquierda, 2 abajo, 3 derecha) del camino mas barato entre dos bloques; nextCost = lo que cuesta ese bloque.
+int Battle::AiPathDir(int sc, int sr, int gc, int gr, int& nextCost) {
+    static const int kDc[4] = {0, -1, 0, 1}, kDr[4] = {-1, 0, 1, 0};
+    constexpr int kRows = kWideBlocksY + 1;
+    int cost[kRows][kWideBlocksX];
+    for (int r = 0; r < kRows; ++r) for (int c = 0; c < kWideBlocksX; ++c) cost[r][c] = AiBlockCost(c, r);
+    int dist[kRows][kWideBlocksX];
+    for (auto& row : dist) for (int& d : row) d = 1 << 20;
+    typedef std::pair<int, int> Node;                            // (distancia, fila * 64 + columna)
+    std::priority_queue<Node, std::vector<Node>, std::greater<Node>> q;
+    if (cost[gr][gc] >= 255) return -1;
+    dist[gr][gc] = 0;
+    q.push({0, gr * 64 + gc});
+    while (!q.empty()) {
+        const Node n = q.top();
+        q.pop();
+        const int r = n.second / 64, c = n.second % 64;
+        if (n.first > dist[r][c]) continue;
+        for (int k = 0; k < 4; ++k) {
+            const int nr = r + kDr[k], nc = c + kDc[k];
+            if (nr < 0 || nr >= kRows || nc < 0 || nc >= kWideBlocksX || cost[nr][nc] >= 255) continue;
+            const int nd = n.first + cost[r][c];                 // (entrar a (r, c) desde un vecino cuesta lo que (r, c))
+            if (nd < dist[nr][nc]) { dist[nr][nc] = nd; q.push({nd, nr * 64 + nc}); }
+        }
+    }
+    if (sr == gr && sc == gc) return -1;
+    int bestDir = -1, bestTotal = 1 << 20;
+    for (int k = 0; k < 4; ++k) {
+        const int nr = sr + kDr[k], nc = sc + kDc[k];
+        if (nr < 0 || nr >= kRows || nc < 0 || nc >= kWideBlocksX || cost[nr][nc] >= 255 || dist[nr][nc] >= (1 << 20)) continue;
+        const int total = cost[nr][nc] + dist[nr][nc];           // pisar ese bloque + lo que falta desde ahi
+        if (total < bestTotal) { bestTotal = total; bestDir = k; nextCost = cost[nr][nc]; }
+    }
+    return bestDir;
+}
+
+// Los botones que aprieta la IA de un jugador en este cuadro. Anda con calma: elige un destino (el rival cercano, un item, o un punto
+// cualquiera del mapa para recorrerlo), busca el camino por los bloques libres (los ladrillos los rompe a tiros) y lo sigue sin cambiar
+// de idea a cada rato; esquiva las balas que le vienen de frente y dispara solo cuando apunta a algo, con pausas entre tiro y tiro.
+u8 Battle::AiButtons(int p) {
+    const u8 fl = TFLAGS(p);
+    if (!(fl & 0x80) || fl >= 0xE0 || vsWinner_ >= 0 || R(ram_pause_flag) != 0) { aiStuck_[p] = 0; aiTimer_[p] = 0; aiGoalT_[p] = 0; return 0; }
+    const int x = TankX(p), y = TankY(p);
+    const int myTeam = TeamOf(p);
+    const int facing = fl & 3;
+    const int sc = std::max(0, std::min(kWideBlocksX - 1, x >> 4)), sr = std::max(0, std::min(kWideBlocksY, y >> 4));
+    if (x == aiLastX_[p] && y == aiLastY_[p]) ++aiStuck_[p]; else aiStuck_[p] = 0;
+    aiLastX_[p] = x;
+    aiLastY_[p] = y;
+    if (aiTimer_[p] > 0) --aiTimer_[p];
+    if (aiGoalT_[p] > 0) --aiGoalT_[p];
+    if (aiFireCool_[p] > 0) --aiFireCool_[p];
+    if (aiDodgeT_[p] > 0) --aiDodgeT_[p];
+    if (aiWanderT_[p] > 0) --aiWanderT_[p];
+    const bool wander = aiWanderT_[p] > 0;                       // despues de trabarse: un rato a recorrer, sin ir tras nadie
+    auto hostile = [&](int e) {
+        const u8 f = TFLAGS(e);
+        return e != p && (f & 0x80) && f < 0xE0 && TeamOf(e) != myTeam;
+    };
+    auto rnd = [&]() { return static_cast<int>(Sub_D44D_generate_random_number()); };
+    // 1) esquivar una bala rival que viene de frente (de cerca, y una sola vez por tanda)
+    if (aiDodgeT_[p] <= 0) {
+        for (int b = 0; b < nBullets_; ++b) {
+            if ((BSTATUS(b) & 0xF0) != 0x40) continue;
+            const int sh = BulletShooter(b);
+            if (sh == p || sh > lastTank_ || TeamOf(sh) == myTeam) continue;
+            const int bx = wd_.bposX[b] | (bulletXHi_[b] << 8), by = wd_.bposY[b];
+            const int bd = BSTATUS(b) & 3;
+            int dodge = -1;
+            if (bd == 1 || bd == 3) {
+                const bool toward = bd == 3 ? bx < x : bx > x;
+                if (toward && std::abs(by - y) < 11 && std::abs(bx - x) < 56) dodge = by < y ? 2 : 0;
+            } else {
+                const bool toward = bd == 2 ? by < y : by > y;
+                if (toward && std::abs(bx - x) < 11 && std::abs(by - y) < 56) dodge = bx < x ? 3 : 1;
+            }
+            if (dodge >= 0) { aiDir_[p] = dodge; aiDodgeT_[p] = 12; aiGoalT_[p] = 0; break; }
+        }
+    }
+    // 2) destino
+    int best = -1, bestDist = 1 << 20;
+    for (int e = 0; e <= lastEnemy_; ++e) {
+        if (!hostile(e)) continue;
+        const int d = std::abs(TankX(e) - x) + std::abs(TankY(e) - y);
+        if (d < bestDist) { bestDist = d; best = e; }
+    }
+    const bool royale = IsRoyale();
+    int ox = -1, oy = -1;
+    if (!royale && vsEagleAlive_[1 - myTeam]) { ox = spec_.vsEagleCol[1 - myTeam] * 16 + 8; oy = spec_.vsEagleRow[1 - myTeam] * 16 + 8; }
+    const bool atGoal = sc == aiGoalC_[p] && sr == aiGoalR_[p];
+    if (aiGoalT_[p] <= 0 || atGoal || aiStuck_[p] > 24) {
+        bool picked = false;
+        if (!royale && !wander && vsEagleAlive_[myTeam]) {      // defiende su aguila si un rival se le acerca
+            const int ex = spec_.vsEagleCol[myTeam] * 16 + 8, ey = spec_.vsEagleRow[myTeam] * 16 + 8;
+            int threat = -1, td = 1 << 20;
+            for (int e = 0; e <= lastEnemy_; ++e) {
+                if (!hostile(e)) continue;
+                const int d = std::abs(TankX(e) - ex) + std::abs(TankY(e) - ey);
+                if (d < td) { td = d; threat = e; }
+            }
+            if (threat >= 0 && td < 160) { aiGoalC_[p] = TankX(threat) >> 4; aiGoalR_[p] = TankY(threat) >> 4; aiGoalT_[p] = 20; picked = true; }
+        }
+        if (!picked && !wander && best >= 0 && bestDist < 105) {   // un rival cerca: va a su encuentro
+            aiGoalC_[p] = TankX(best) >> 4;
+            aiGoalR_[p] = TankY(best) >> 4;
+            aiGoalT_[p] = 20;
+            picked = true;
+        }
+        if (!picked && !wander) {                                // un item que este cerca
+            if (royale) {
+                int bi = -1, bd = 260;
+                for (int i = 0; i < 3; ++i) {
+                    if (!rItems_[i].on) continue;
+                    const int d = std::abs(rItems_[i].x - x) + std::abs(rItems_[i].y - y);
+                    if (d < bd) { bd = d; bi = i; }
+                }
+                if (bi >= 0) { aiGoalC_[p] = rItems_[bi].x >> 4; aiGoalR_[p] = rItems_[bi].y >> 4; aiGoalT_[p] = 30; picked = true; }
+            } else if (BonusActive()) {
+                const int ix = R(ram_bonus_pos_X) | (bonusXHi_ << 8), iy = R(ram_bonus_pos_Y);
+                if (std::abs(ix - x) + std::abs(iy - y) < 200) { aiGoalC_[p] = ix >> 4; aiGoalR_[p] = iy >> 4; aiGoalT_[p] = 30; picked = true; }
+            }
+        }
+        if (!picked) {                                           // a recorrer el mapa: un punto cualquiera (en equipos, a veces el aguila rival)
+            if (!royale && ox >= 0 && (rnd() % 4) == 0) { aiGoalC_[p] = ox >> 4; aiGoalR_[p] = oy >> 4; }
+            else {
+                for (int tries = 0; tries < 12; ++tries) {
+                    const int c = 1 + rnd() % (kWideBlocksX - 2), r = 1 + rnd() % (kWideBlocksY - 1);
+                    if (AiBlockCost(c, r) < 255 && (std::abs(c - sc) + std::abs(r - sr)) >= 4) { aiGoalC_[p] = c; aiGoalR_[p] = r; break; }
+                }
+            }
+            aiGoalT_[p] = 90 + rnd() % 90;                       // y lo sigue un buen rato
+        }
+        aiStuck_[p] = aiStuck_[p] > 24 ? 0 : aiStuck_[p];
+    }
+    // trabado (contra una pared o contra otro tanque): primero prueba a tiros, despues se va por otro lado un buen rato
+    bool breakWall = false;
+    if (aiStuck_[p] > 6) breakWall = true;
+    if (aiStuck_[p] > 14) {
+        static const int kDc[4] = {0, -1, 0, 1}, kDr[4] = {-1, 0, 1, 0};
+        int free[4], nf = 0;
+        for (int k = 0; k < 4; ++k) if (AiBlockCost(sc + kDc[k], sr + kDr[k]) < 255 && k != facing) free[nf++] = k;
+        if (nf == 0) free[nf++] = (facing + 2) & 3;
+        aiDir_[p] = free[rnd() % nf];
+        aiTimer_[p] = 22 + rnd() % 20;
+        aiWanderT_[p] = 120;
+        aiGoalT_[p] = 0;
+        aiStuck_[p] = 0;
+        breakWall = false;
+    }
+    // 3) rumbo
+    int dir = facing, nextCost = 1;
+    if (aiDodgeT_[p] > 0) {
+        dir = aiDir_[p];
+    } else if (aiTimer_[p] > 0) {
+        dir = aiDir_[p];                                         // sigue el rumbo elegido un ratito: no cambia de idea a cada cuadro
+    } else {
+        int d = AiPathDir(sc, sr, aiGoalC_[p], aiGoalR_[p], nextCost);
+        if (d < 0) {                                             // en el bloque de destino (o sin camino): hacia el punto exacto, o a otro lado
+            const int gx = aiGoalC_[p] * 16 + 8, gy = aiGoalR_[p] * 16 + 8;
+            if (std::abs(gx - x) >= 4 || std::abs(gy - y) >= 4) d = std::abs(gx - x) >= std::abs(gy - y) ? (gx > x ? 3 : 1) : (gy > y ? 2 : 0);
+            else { d = facing; aiGoalT_[p] = 0; }
+        } else {
+            // alinearse con el centro del carril antes de avanzar (si no, se choca con las esquinas)
+            const int cx = sc * 16 + 8, cy = sr * 16 + 8;
+            if ((d == 1 || d == 3) && std::abs(cy - y) >= 5) d = cy > y ? 2 : 0;
+            else if ((d == 0 || d == 2) && std::abs(cx - x) >= 5) d = cx > x ? 3 : 1;
+        }
+        dir = d;
+        aiDir_[p] = d;
+        aiTimer_[p] = 6;                                         // un minimo de 6 cuadros por rumbo
+    }
+    // 4) disparo: con calma
+    bool fire = breakWall;
+    if (aiFireCool_[p] <= 0 && !fire) {
+        for (int e = 0; e <= lastEnemy_ && !fire; ++e) if (hostile(e) && LineOfFirePoint(p, TankX(e), TankY(e), 120)) fire = (rnd() % 2) == 0;       // si lo tiene en la mira, dispara enseguida
+        if (!fire && ox >= 0 && LineOfFirePoint(p, ox, oy, 100)) fire = (rnd() % 3) == 0;
+        if (!fire && (rnd() % 130) == 0) fire = true;
+    }
+    if (!royale && AimsAtEagleAt(p, spec_.vsEagleCol[myTeam], spec_.vsEagleRow[myTeam], spec_.vsLayers)) fire = false;   // no le tira a su aguila
+    static const u8 kDirBtn[4] = {con_btn_Up, con_btn_Left, con_btn_Down, con_btn_Right};
+    u8 out = kDirBtn[dir & 3];
+    if (fire && (R(ram_frm_cnt_lo) & 1)) { out = static_cast<u8>(out | con_btn_A); aiFireCool_[p] = breakWall ? 12 : 36; }
+    return out;
+}
+
+// ---- items del battle royale: tres a la vez, cada 20 segundos (a muerte: puede haber vidas; por tiempo, no) ----
+void Battle::RoyaleItemsStep() {
+    // se agarran
+    for (int i = 0; i < 3; ++i) {
+        RoyaleItem& it = rItems_[i];
+        if (!it.on) continue;
+        if (--it.life <= 0) { it.on = false; continue; }
+        for (int p = nPlayers_ - 1; p >= 0; --p) {
+            const u8 f = TFLAGS(p);
+            if (!(f & 0x80) || f >= 0xE0) continue;
+            if (std::abs(TankX(p) - it.x) >= 12 || std::abs(TankY(p) - it.y) >= 12) continue;
+            it.on = false;
+            Sub_D9E1_calculate_decimal_number(0x50);             // 500 puntos
+            Sub_D9BE_add_score(p);
+            R(ram_sfx_bonus_pickup) = 1;
+            ++itemPickups_[p];
+            BonusHandler(it.id, p);
+            break;
+        }
+    }
+    // los 20 segundos del proximo grupo empiezan a contar cuando no queda ninguno
+    if (RoyaleItemCount() > 0) { royaleBonusT_ = 1200; return; }
+    if (--royaleBonusT_ > 0) return;
+    royaleBonusT_ = 1200;
+    static const int kAll[7] = {0, 1, 3, 3, 4, 5, 6};            // casco, reloj, estrella, granada, vida, pistola
+    static const int kTimed[6] = {0, 1, 3, 3, 4, 6};             // por tiempo: sin vidas
+    int n = 0;
+    for (int tries = 0; tries < 60 && n < 3; ++tries) {
+        const int c = 1 + Sub_D44D_generate_random_number() % (kWideBlocksX - 2), r = 1 + Sub_D44D_generate_random_number() % (kWideBlocksY - 1);
+        if (!BlockEmptyAt(c, r)) continue;
+        bool near = false;
+        for (int i = 0; i < n; ++i) near = near || (std::abs(rItems_[i].x - (c * 16 + 8)) + std::abs(rItems_[i].y - (r * 16 + 8)) < 64);
+        if (near) continue;
+        RoyaleItem& it = rItems_[n++];
+        it.on = true;
+        it.x = c * 16 + 8;
+        it.y = r * 16 + 8;
+        const int roll = Sub_D44D_generate_random_number();
+        it.id = spec_.royaleTimed ? kTimed[roll % 6] : kAll[roll % 7];
+        it.life = 1800;
+    }
+    if (n > 0) R(ram_sfx_bonus_appear) = 1;
+}
+
+void Battle::RoyaleItemsDraw() {
+    if ((R(ram_frm_cnt_lo) & 0x08) == 0) return;                // parpadean como los de siempre
+    for (const RoyaleItem& it : rItems_) {
+        if (!it.on) continue;
+        R(0x0004) = 2;
+        R(ram_0053_t01_spr_T) = U8((it.id << 2) + 0x81);
+        R(ram_priority_spr_A) = 0;
+        Sub_DA7B_display_2_sprites(it.x, it.y);
+        R(ram_priority_spr_A) = 0x20;
+    }
+}
+
+// El tanque x mira de frente a (px, py) a no mas de `range` pixeles y casi en linea.
+bool Battle::LineOfFirePoint(int x, int px, int py, int range) {
+    const int tx = TankX(x), ty = TankY(x);
+    switch (TFLAGS(x) & 0x03) {
+        case 0: return std::abs(px - tx) <= 10 && ty - py >= 0 && ty - py <= range;     // arriba
+        case 1: return std::abs(py - ty) <= 10 && tx - px >= 0 && tx - px <= range;     // izquierda
+        case 2: return std::abs(px - tx) <= 10 && py - ty >= 0 && py - ty <= range;     // abajo
+        default: return std::abs(py - ty) <= 10 && px - tx >= 0 && px - tx <= range;    // derecha
+    }
+}
+
 // Aparecen tanques con IA de cada equipo, de a uno por punto y por turnos, hasta un maximo a la vez; la reposicion no se acaba.
 void Battle::VersusSpawnHandler() {
-    if (vsWinner_ >= 0) return;
+    if (vsWinner_ >= 0 || IsRoyale()) return;               // (el battle royale no tiene tanques con IA aparte de los combatientes)
     const int maxAi = 2 + tier_ / 3;
     for (int t = 0; t < 2; ++t) {
         if (vsAiTimer_[t] > 0) { --vsAiTimer_[t]; continue; }
@@ -1330,8 +1711,9 @@ void Battle::VersusSpawnHandler() {
                 px = spec_.spawnCol[i] * 16 + 8;
                 py = spec_.spawnRow[i] * 16 + 8;
             } else {                                         // sin puntos propios: arriba y abajo del lado del equipo
-                px = (t == 0 ? 4 : 22) * 16 + 8;
-                py = ((vsSpawned_[t] & 1) ? 12 : 2) * 16 + 8;
+                const bool second = (vsSpawned_[t] & 1) != 0;          // medio a un lado y medio arriba/abajo, del lado de la aguila
+                px = (second ? 13 : (t == 0 ? 1 : 25)) * 16 + 8;
+                py = (second ? (t == 0 ? 13 : 1) : 7) * 16 + 8;
             }
             TTYPE(x) = (vsSpawned_[t] % 4 == 3) ? 0x04 : 0;   // uno de cada cuatro lleva un item (parpadea)
             shieldHp_[x] = 0;
@@ -1402,6 +1784,7 @@ void Battle::VersusCollisions() {
                 R(ram_sfx_explosion_player) = 1;
                 TUPGRADE(x) = 0;
                 TTYPE(x) = 0;
+                if (IsRoyale()) ++royaleKills_[shooterTeam & 7];
                 break;
             }
             if (TTYPE(x) & 0x04) {                       // el tanque con item lo suelta al ser golpeado
@@ -1417,6 +1800,7 @@ void Battle::VersusCollisions() {
                 TFLAGS(x) = con_tank_flag_explosion + 0x03;
                 R(ram_sfx_explosion_enemy) = 1;
                 TTYPE(x) = 0;
+                if (IsRoyale()) ++royaleKills_[shooterTeam & 7];
             }
             break;
         }
@@ -1426,6 +1810,27 @@ void Battle::VersusCollisions() {
 // Pierde el equipo cuyo aguila cae o al que ya no le quedan jugadores con vidas.
 void Battle::VersusCheckEnd() {
     if (vsWinner_ >= 0) return;
+    if (IsRoyale()) {
+        if (spec_.royaleTimed) {                                // por tiempo: gana el que mas destruyo
+            if (royaleFrames_ > 0) --royaleFrames_;
+            if (royaleFrames_ == 0) {
+                int best = -1, bestKills = -1;
+                bool tie = false;
+                for (int id = 0; id < 8; ++id) {
+                    if (royaleKills_[id] > bestKills) { bestKills = royaleKills_[id]; best = id; tie = false; }
+                    else if (royaleKills_[id] == bestKills) tie = true;
+                }
+                vsWinner_ = tie ? 2 : 10 + best;
+                return;
+            }
+        } else {                                                // a muerte: queda uno solo
+            int alive = 0, last = -1;
+            for (int id = 0; id < 8; ++id) if (RoyaleAlive(id)) { ++alive; last = id; }
+            if (alive <= 1) { vsWinner_ = alive == 1 ? 10 + last : 2; return; }
+        }
+        RoyaleItemsStep();
+        return;
+    }
     bool lost[2] = {!vsEagleAlive_[0], !vsEagleAlive_[1]};
     for (int t = 0; t < 2; ++t) {
         if (lost[t]) continue;
@@ -1438,6 +1843,204 @@ void Battle::VersusCheckEnd() {
     if (lost[0] && lost[1]) vsWinner_ = 2;
     else if (lost[0]) vsWinner_ = 1;
     else if (lost[1]) vsWinner_ = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Lava
+// ---------------------------------------------------------------------------
+
+// El bloque (col, row) -- 2x2 mosaicos -- tiene el mosaico `tile` (all: en los cuatro; si no, en alguno).
+bool Battle::BlockTilesAre(int col, int row, u8 tile, bool all) const {
+    if (col < 0 || col >= kWideBlocksX || row < 0 || row >= kWideBlocksY + 1) return false;
+    const int p = Sub_D5FB_calculate_pointer(2 * col, 2 * row);
+    const int st = Stride();
+    const int idx[4] = {p, p + 1, p + st, p + st + 1};
+    int hits = 0;
+    for (int i : idx) hits += (M(i) & 0x7F) == tile ? 1 : 0;
+    return all ? hits == 4 : hits > 0;
+}
+
+bool Battle::BlockEmptyAt(int col, int row) const { return BlockTilesAre(col, row, 0, true); }
+
+void Battle::SetBlockTiles(int col, int row, u8 tile) {
+    const int p = Sub_D5FB_calculate_pointer(2 * col, 2 * row);
+    const int st = Stride();
+    Sub_D784_write_tile(static_cast<uint16_t>(p), tile);
+    Sub_D784_write_tile(static_cast<uint16_t>(p + 1), tile);
+    Sub_D784_write_tile(static_cast<uint16_t>(p + st), tile);
+    Sub_D784_write_tile(static_cast<uint16_t>(p + st + 1), tile);
+}
+
+bool Battle::RockAt(int tx, int ty) const {
+    if (!wide_ || tx < 0 || ty < 0 || tx >= MapCols() || ty >= 34) return false;
+    const int p = Sub_D5FB_calculate_pointer(tx, ty);
+    return p < static_cast<int>(sizeof(rock_)) && rock_[p] != 0 && M(p) == con_block_type + 0x10;
+}
+
+bool Battle::RockBlockAt(int col, int row) const { return RockAt(2 * col, 2 * row) && RockAt(2 * col + 1, 2 * row + 1); }
+
+// Algun tanque vivo pisa alguno de los mosaicos del bloque.
+bool Battle::BlockOccupied(int col, int row) {
+    const int st = Stride();
+    const int q = Sub_D5FB_calculate_pointer(2 * col, 2 * row);
+    const int blk[4] = {q, q + 1, q + st, q + st + 1};
+    for (int x = 0; x <= lastTank_; ++x) {
+        const u8 f = TFLAGS(x);
+        if (!(f & 0x80) || f >= 0xE0) continue;
+        const int p = PointerPx(WX(TPOSX(x) - 8), U8(TPOSY(x) - 8));
+        const int tk[4] = {p, p + 1, p + st, p + st + 1};
+        for (int a : tk) for (int b : blk) if (a == b) return true;
+    }
+    return false;
+}
+
+void Battle::SetRockBlock(int col, int row) {
+    SetBlockTiles(col, row, con_block_type + 0x10);        // para el motor es hierro: cuatro mosaicos...
+    const int p = Sub_D5FB_calculate_pointer(2 * col, 2 * row);
+    const int st = Stride();
+    rock_[p] = rock_[p + 1] = rock_[p + st] = rock_[p + st + 1] = 1;   // ...pero con 3 de salud cada uno
+}
+
+int Battle::LavaFlowCells() const {
+    int n = 0;
+    for (int i = 0; i < nLava_; ++i) n += lava_[i].n;
+    return n;
+}
+
+bool Battle::LavaAtBlock(int col, int row) const { return BlockTilesAre(col, row, kLavaTile, true); }
+
+// Donde la lava no se esparce: alrededor de las aguilas.
+bool Battle::LavaForbidden(int col, int row) const {
+    if (row < 1 || row > kWideBlocksY || col < 0 || col >= kWideBlocksX) return true;
+    if (IsRoyale()) {
+        return false;
+    } else if (IsVersus()) {
+        for (int t = 0; t < 2; ++t) if (std::abs(col - spec_.vsEagleCol[t]) <= 1 && std::abs(row - spec_.vsEagleRow[t]) <= 1) return true;
+    } else if (IsBossLevel()) {
+        if (std::abs(col - EagleCol()) <= 2 && std::abs(row - EagleRow()) <= 2) return true;
+    } else if (row >= 13 && col >= 10 && col <= 16) {
+        return true;                                                 // la base de los jugadores
+    }
+    return false;
+}
+
+void Battle::LavaHit(int x) {
+    if (x < nPlayers_) {
+        if (HELMET(x) != 0) {                                        // el casco protege (con su salud, si la tiene)
+            if (shieldHp_[x] > 0) ShieldHit(x, 1);
+            return;
+        }
+        ++playerHits_[x];
+        if (TUPGRADE(x) != 0) {                                      // como un impacto: pierde un nivel de arma; a nivel 0 lo destruye
+            TUPGRADE(x) = static_cast<u8>(TUPGRADE(x) > 0x20 ? TUPGRADE(x) - 0x20 : 0);
+            TTYPE(x) = TUPGRADE(x);
+            R(ram_sfx_bullet_hit_tank) = 1;
+        } else {
+            TFLAGS(x) = con_tank_flag_explosion + 0x03;
+            R(ram_sfx_explosion_player) = 1;
+            TUPGRADE(x) = 0;
+            TTYPE(x) = 0;
+        }
+        return;
+    }
+    if (wd_.hp[x] > 1) {                                             // enemigos y aliados: un punto de salud
+        wd_.hp[x] = static_cast<u8>(wd_.hp[x] - 1);
+        if (!IsAlly(x) && ((TTYPE(x) >> 5) & 3) == 3) TTYPE(x) = static_cast<u8>((TTYPE(x) & 0xFC) | (wd_.hp[x] - 1 < 3 ? wd_.hp[x] - 1 : 3));
+        R(ram_sfx_bullet_hit_tank) = 1;
+    } else {
+        TFLAGS(x) = con_tank_flag_explosion + 0x03;
+        R(ram_sfx_explosion_enemy) = 1;
+        TTYPE(x) = 0;
+    }
+}
+
+void Battle::Sub_Lava() {
+    if (!wide_) return;
+    static const int kDir[4][2] = {{0, -1}, {0, 1}, {-1, 0}, {1, 0}};
+    // quema los arbustos que toca: los bloques de arbusto vecinos de la lava desaparecen
+    auto burn = [&](int col, int row) {
+        for (const auto& d : kDir) {
+            const int nc = col + d[0], nr = row + d[1];
+            if (nc < 0 || nc >= kWideBlocksX || nr < 0 || nr > kWideBlocksY) continue;
+            if (!BlockTilesAre(nc, nr, 0x22, false)) continue;
+            const int p = Sub_D5FB_calculate_pointer(2 * nc, 2 * nr);
+            const int st = Stride();
+            const int idx[4] = {p, p + 1, p + st, p + st + 1};
+            for (int i : idx) if ((M(i) & 0x7F) == 0x22) Sub_D784_write_tile(static_cast<uint16_t>(i), 0);
+        }
+    };
+    for (int i = 0; i < nLava_; ++i) {
+        LavaSource& s = lava_[i];
+        if (!BlockTilesAre(s.col, s.row, kLavaTile, false)) {          // la fuente ya no esta (una bomba la borro)
+            for (int k = 0; k < s.n; ++k) if (BlockTilesAre(s.flow[k].col, s.flow[k].row, kLavaTile, false)) SetBlockTiles(s.flow[k].col, s.flow[k].row, 0);
+            s.n = 0;
+            s.phase = -1;
+            continue;
+        }
+        // las celdas esparcidas se enfrian al cabo de 15 segundos
+        for (int k = 0; k < s.n;) {
+            LavaCell& c = s.flow[k];
+            if (!BlockTilesAre(c.col, c.row, kLavaTile, false)) {
+                s.flow[k] = s.flow[--s.n];
+            } else if (--c.timer <= 0) {
+                if (BlockOccupied(c.col, c.row)) { c.timer = 1; ++k; continue; }   // un tanque encima: espera a que salga
+                SetRockBlock(c.col, c.row);                                // al secarse queda piedra
+                s.flow[k] = s.flow[--s.n];
+            } else {
+                ++k;
+            }
+        }
+        burn(s.col, s.row);
+        for (int k = 0; k < s.n; ++k) burn(s.flow[k].col, s.flow[k].row);
+        if (s.phase == 0) {                                            // descanso
+            if (--s.timer <= 0) { s.phase = 1; s.timer = kLavaSpreadFrames; s.placed = 0; }
+        } else if (s.phase == 1) {                                     // esparciendo: una celda nueva cada tanto, en un bloque vacio al azar
+            if (--s.timer <= 0) {
+                int cand[4 * (kLavaMaxFlow + 1)][2];
+                int nc = 0;
+                auto consider = [&](int col, int row) {
+                    for (const auto& d : kDir) {
+                        const int c2 = col + d[0], r2 = row + d[1];
+                        if (LavaForbidden(c2, r2) || !BlockEmptyAt(c2, r2)) continue;
+                        bool dup = false;
+                        for (int q = 0; q < nc; ++q) dup = dup || (cand[q][0] == c2 && cand[q][1] == r2);
+                        if (!dup && nc < 4 * (kLavaMaxFlow + 1)) { cand[nc][0] = c2; cand[nc][1] = r2; ++nc; }
+                    }
+                };
+                consider(s.col, s.row);
+                for (int k = 0; k < s.n; ++k) consider(s.flow[k].col, s.flow[k].row);
+                if (nc == 0) {                                         // sin salida: se vuelve a mirar en un rato (puede que se abra una)
+                    s.timer = 60;
+                } else {
+                    const int pick = Sub_D44D_generate_random_number() % nc;
+                    SetBlockTiles(cand[pick][0], cand[pick][1], kLavaTile);
+                    s.flow[s.n].col = cand[pick][0];
+                    s.flow[s.n].row = cand[pick][1];
+                    s.flow[s.n].timer = kLavaFlowLife;
+                    ++s.n;
+                    ++s.placed;
+                    s.timer = kLavaSpreadFrames;
+                    if (s.placed >= kLavaMaxFlow) s.phase = 2;
+                }
+            }
+        } else if (s.phase == 2) {                                     // espera a que se enfrie toda
+            if (s.n == 0 && !BlockOccupied(s.col, s.row)) { SetRockBlock(s.col, s.row); s.phase = -1; }   // se enfrio todo: tambien el punto inicial se vuelve piedra
+        }
+    }
+    // dano: quien pisa lava recibe 1, y 1 mas por cada segundo que siga encima
+    for (int x = 0; x <= lastTank_; ++x) {
+        const u8 f = TFLAGS(x);
+        if (!(f & 0x80) || f >= 0xE0) { lavaTick_[x] = 0; continue; }
+        const int st = Stride();
+        const uint16_t p = PointerPx(WX(TPOSX(x) - 8), U8(TPOSY(x) - 8));
+        const int idx[4] = {p, p + 1, p + st, p + st + 1};
+        bool on = false;
+        for (int i : idx) on = on || (M(i) & 0x7F) == kLavaTile;
+        if (!on) { lavaTick_[x] = 0; continue; }
+        if (lavaTick_[x] > 0) { --lavaTick_[x]; continue; }
+        lavaTick_[x] = kLavaDamageFrames - 1;
+        LavaHit(x);
+    }
 }
 
 // Cantidad de puntos de aparicion de enemigos y su posicion (centro del bloque, en pixeles).
@@ -1468,7 +2071,11 @@ void Battle::SpawnPointPx(int y, int& sx, int& sy) const {
 // sub_E3B8 (00:E3B8): termina la animacion de aparicion.
 void Battle::Sub_E3B8_finish_respawn(int x) {
     if (IsVersus()) {
-        const int dir = TeamOf(x) == 0 ? 3 : 1;          // el equipo de la izquierda mira a la derecha y al reves
+        int dir = TeamOf(x) == 0 ? 3 : 1;                // el equipo de la izquierda mira a la derecha y al reves
+        if (IsRoyale()) {                                // battle royale: mirando al centro del mapa
+            const int cx = TPOSX(x), cy = TPOSY(x);
+            dir = cx < 13 * 16 ? 3 : (cx > 14 * 16 ? 1 : (cy > 7 * 16 ? 0 : 2));
+        }
         if (x < nPlayers_) {
             TFLAGS(x) = static_cast<u8>(0xA0 | dir);
             HELMET(x) = 3;
@@ -1482,7 +2089,7 @@ void Battle::Sub_E3B8_finish_respawn(int x) {
         return;
     }
     if (IsAlly(x)) {
-        static const int kAllyHp[4] = {2, 3, 4, 6};
+        static const int kAllyHp[4] = {1, 2, 3, 4};     // tipo 1 muere de 1 tiro, tipo 2 de 2, tipo 3 de 3 y tipo 4 de 4
         const int kind = allyKind_[x];
         TFLAGS(x) = 0xA2;
         TTYPE(x) = static_cast<u8>(0x80 + (kind << 5));  // basico / rapido / power / blindado segun el nivel de arma del jugador
@@ -1713,7 +2320,7 @@ void Battle::Sub_E162_enemies_fire() {
         if (IsVersus()) {
             if (teamClock_[vsTeam_[x]] != 0) continue;                                    // congelado por el reloj
             const int t = vsTeam_[x];
-            if (AimsAtEagleAt(x, spec_.vsEagleCol[t], spec_.vsEagleRow[t], spec_.vsLayers)) continue;   // no le tira a su propia aguila
+            if (!IsRoyale() && AimsAtEagleAt(x, spec_.vsEagleCol[t], spec_.vsEagleRow[t], spec_.vsLayers)) continue;   // no le tira a su propia aguila
         }
         if (IsBossLevel() && enemyEagleAlive_ && AimsAtEnemyEagle(x)) continue;     // no le tiran a su propia aguila
         const u8 roll = Sub_D44D_generate_random_number();
@@ -1808,11 +2415,12 @@ int Battle::Sub_E693_bullet_probe(int px, int py, int bi) {
         if (wide_ && t == con_block_type + 0x10) {
             // campo ancho: el hierro tiene 20 de salud; las balas bajan nivel + 1 (nivel 3 lo rompe de una)
             {
-                bool broken = bulletLevel_[bi] >= 3;
+                const bool rock = rock_[p] != 0;
+                bool broken = !rock && bulletLevel_[bi] >= 3;
                 if (!broken) {
                     u8& hp = steelHp_[p];
-                    if (hp == 0) hp = kSteelHealth;
-                    const int dmg = bulletLevel_[bi] + 1;
+                    if (hp == 0) hp = rock ? kRockHealth : kSteelHealth;
+                    const int dmg = rock ? (bulletLevel_[bi] >= 3 ? 2 : 1) : bulletLevel_[bi] + 1;   // la piedra: 1 por tiro (2 con nivel 3)
                     if (hp <= dmg) {
                         broken = true;
                     } else {
@@ -1864,7 +2472,7 @@ void Battle::Sub_E70C_check_bullets_collision_with_tanks() {
             if (AbsDiffX(BPOSX(b), TPOSX(x)) >= 0x0A) continue;
             if (AbsDiff8(BPOSY(b), TPOSY(x)) >= 0x0A) continue;
             BSTATUS(b) = 0x33;
-            if (wide_ && x < 4) ++playerHits_[x];                // vibracion: recibio un disparo
+            if (wide_ && x < kMaxPlayers) ++playerHits_[x];                // vibracion: recibio un disparo
             if (HELMET(x) != 0) {
                 BSTATUS(b) = 0;
                 if (wide_) ShieldHit(x, bulletLevel_[b] == 3 ? 2 : 1);   // el casco aguanta 5 puntos                          // el casco la absorbe
@@ -1885,7 +2493,7 @@ void Battle::Sub_E70C_check_bullets_collision_with_tanks() {
             break;
         }
     }
-    // balas enemigas contra aliados (tienen 3 de salud; las de nivel 3 hacen doble dano)
+    // balas enemigas contra aliados (aguantan tantos tiros como el tipo: 1, 2, 3 o 4)
     if (wide_) {
         for (int x = allyBegin_; x <= lastTank_; ++x) {
             const u8 f = TFLAGS(x);
@@ -1897,7 +2505,7 @@ void Battle::Sub_E70C_check_bullets_collision_with_tanks() {
                 if (AbsDiffX(BPOSX(b), TPOSX(x)) >= 0x0A) continue;
                 if (AbsDiff8(BPOSY(b), TPOSY(x)) >= 0x0A) continue;
                 BSTATUS(b) = 0x33;
-                const int dmg = bulletLevel_[b] == 3 ? 2 : 1;
+                const int dmg = 1;                           // cada tiro cuenta uno, sea cual sea el arma del enemigo
                 if (wd_.hp[x] > dmg) {
                     wd_.hp[x] = static_cast<u8>(wd_.hp[x] - dmg);
                     R(ram_sfx_bullet_hit_tank) = 1;
@@ -2017,7 +2625,7 @@ void Battle::Sub_E70C_check_bullets_collision_with_tanks() {
             if (AbsDiffX(BPOSX(b), TPOSX(x)) >= 0x0A) continue;
             if (AbsDiff8(BPOSY(b), TPOSY(x)) >= 0x0A) continue;
             BSTATUS(b) = 0x33;
-            if (wide_ && x < 4) ++playerHits_[x];                // vibracion: recibio un disparo
+            if (wide_ && x < kMaxPlayers) ++playerHits_[x];                // vibracion: recibio un disparo
             if (HELMET(x) != 0) {
                 BSTATUS(b) = 0;
                 if (wide_) ShieldHit(x, bulletLevel_[b] == 3 ? 2 : 1);   // el casco aguanta 5 puntos
@@ -2121,7 +2729,7 @@ bool Battle::Sub_E972_try_to_pick_up_bonus() {
             Sub_D138_gain_extra_life_for_20000_pts();
             R(ram_sfx_bonus_pickup) = 1;
         }
-        if (wide_ && x < 4) ++itemPickups_[x];
+        if (wide_ && x < kMaxPlayers) ++itemPickups_[x];
         BonusHandler(R(ram_bonus_id), x);
         return true;
     }
@@ -2143,12 +2751,12 @@ bool Battle::Sub_E972_try_to_pick_up_bonus() {
 
 int Battle::ActivePlayers() const {
     int n = 0;
-    for (int p = 0; p < nPlayers_ && p < 4; ++p) n += present_[p] ? 1 : 0;
-    return n < 1 ? 1 : n;
+    for (int p = 0; p < nPlayers_ && p < kMaxPlayers; ++p) n += present_[p] ? 1 : 0;
+    return n < 1 ? 1 : (n > 4 ? 4 : n);        // la dificultad cuenta hasta 4 jugadores
 }
 
 void Battle::SetPresentMask(int mask) {
-    for (int p = 0; p < nPlayers_ && p < 4; ++p) {
+    for (int p = 0; p < nPlayers_ && p < kMaxPlayers; ++p) {
         present_[p] = (mask >> p) & 1;
         if (!present_[p]) LIVES(p) = 0;
     }
@@ -2160,6 +2768,7 @@ void Battle::SetPresentMask(int mask) {
 
 void Battle::MarkPlayerGone(int p) {
     if (p < 0 || p >= nPlayers_ || !present_[p]) return;
+    if (IsVersus()) { aiPlayer_[p] = true; return; }         // batalla vs / royale: su tanque sigue, ahora lo juega la IA
     present_[p] = false;
     LIVES(p) = 0;
     TFLAGS(p) = 0;
@@ -2178,6 +2787,7 @@ void Battle::AddPlayerLate(int p, int color) {
     SetPlayerColor(p, color);
     LIVES(p) = 3;
     TUPGRADE(p) = 0;
+    aiPlayer_[p] = false;
     Sub_E363_tank_spawn_handler(p);                      // aparece con la estrella de siempre
 }
 
@@ -2312,7 +2922,7 @@ void Battle::StartRaid() {
                 const int col = horizontal ? pos[k] : lane;
                 const int row = horizontal ? lane : pos[k];
                 if (IsVersus()) {
-                    if (NearVsEagle(col, row)) bad = true;                       // ninguna bomba cerca de las dos aguilas
+                    if (!IsRoyale() && NearVsEagle(col, row)) bad = true;                       // ninguna bomba cerca de las dos aguilas
                 } else if (col >= EagleCol() - 1 && col <= EagleCol() + 1 && row >= EagleRow() - 2 && row <= EagleRow()) {
                     bad = true;
                 }
@@ -2356,6 +2966,7 @@ void Battle::DetonateBomb(int cx, int cy) {
             }
             M(p) = 0x00;
             steelHp_[p] = 0;
+            rock_[p] = 0;
         }
     }
     if (eagleHit && !IsBossLevel() && !IsVersus() && R(ram_game_over_flag) != 0 && (R(ram_game_over_flag) & 0x80)) {
@@ -2452,7 +3063,7 @@ void Battle::EnemyBonus(int id, int x) {
 
 // Granada enemiga: destruye a la mitad de los jugadores vivos (redondeando hacia arriba), los mas cercanos al enemigo.
 void Battle::EnemyGrenade(int x) {
-    int alive[4], n = 0;
+    int alive[kMaxPlayers], n = 0;
     for (int p = 0; p < nPlayers_; ++p) {
         const u8 f = TFLAGS(p);
         if ((f & 0x80) && f < 0xE0) alive[n++] = p;
@@ -2565,6 +3176,11 @@ void Battle::BonusHandler(int id, int x) {
             if (wide_) shieldHp_[x] = 5;                 // aguanta 5 puntos de disparos
             break;
         case 1:                                          // reloj
+            if (IsRoyale()) {                            // battle royale: congela a todos los demas
+                for (int p = 0; p < nPlayers_; ++p) if (p != x) playerFreeze_[p] = (0x0A * 64) / 2;
+                for (int id = 0; id < 8; ++id) if (id != x) teamClock_[id] = 0x0A;
+                break;
+            }
             if (IsVersus()) {                            // congela al otro equipo (sus tanques con IA y a sus jugadores)
                 const int opp = 1 - playerTeam_[x];
                 teamClock_[opp] = 0x0A;
@@ -2590,7 +3206,7 @@ void Battle::BonusHandler(int id, int x) {
             R(ram_sfx_explosion_enemy) = 1;
             for (int y = lastEnemy_; y >= nPlayers_; --y) {
                 const u8 f = TFLAGS(y);
-                if (IsVersus() && vsTeam_[y] == playerTeam_[x]) continue;      // batalla vs: solo revienta a los tanques del otro equipo
+                if (IsVersus() && vsTeam_[y] == (IsRoyale() ? x : playerTeam_[x])) continue;      // batalla vs: solo revienta a los tanques del otro equipo
                 if ((f & 0x80) && f < 0xE0) {
                     TFLAGS(y) = con_tank_flag_explosion + 0x03;
                     TTYPE(y) = 0;
@@ -2838,7 +3454,7 @@ void Battle::Sub_DEB8_tank_handler(int x) {
     if (IsAlly(x)) {
         palette = PlayerPalette(allyOwner_[x]);          // sprite de enemigo, color del jugador que agarro el item
     } else if (x >= nPlayers_ && IsVersus()) {
-        const u8 own = kColorAttr[kTeamColor[vsTeam_[x] & 1]];
+        const u8 own = VsTankAttr(x);
         palette = ((TTYPE(x) & 0x04) && ((R(ram_frm_cnt_lo) >> 3) & 0x01)) ? u8(3) : own;      // el que lleva un item parpadea
     } else if (x >= nPlayers_) {
         if (TTYPE(x) & 0x04) {
@@ -2863,7 +3479,7 @@ void Battle::Sub_E0D8_bullets_status_handler() {
         const u8 st = BSTATUS(x);
         switch (st >> 4) {
             case 0x4:                                    // ofs_003_E0FB
-                R(0x0004) = IsVersus() ? kColorAttr[kTeamColor[TeamOf(BulletShooter(x)) & 1]]
+                R(0x0004) = IsVersus() ? VsTankAttr(BulletShooter(x))
                                        : ((wide_ && BulletOwner(x) >= 0) ? PlayerPalette(BulletOwner(x)) : 2);   // campo ancho: la bala lleva el color de su jugador
                 R(ram_0053_t01_spr_T) = 0xB1;
                 Sub_DA64_display_bullet_sprite(st & 0x03, BPOSX(x), BPOSY(x));
@@ -3146,20 +3762,27 @@ uint32_t Battle::StateHash() const {
     mix(tankXHi_, sizeof tankXHi_);
     mix(bulletXHi_, sizeof bulletXHi_);
     mix(steelHp_, sizeof steelHp_);
+    mix(rock_, sizeof rock_);
     mix(bulletLevel_, sizeof bulletLevel_);
     mix(shieldHp_, sizeof shieldHp_);
     mixInt(enemyTotal_);
     mixInt(diffPlayers_);
-    for (int i = 0; i < 4; ++i) mixInt(present_[i] ? 1 : 0);
-    for (int i = 0; i < 4; ++i) mixInt(playerColor_[i]);
+    for (int i = 0; i < kMaxPlayers; ++i) mixInt(present_[i] ? 1 : 0);
+    for (int i = 0; i < kMaxPlayers; ++i) mixInt(playerColor_[i]);
     mixInt(level_);
     if (IsVersus()) {
         mixInt(vsWinner_ + 1);
         mixInt((vsEagleAlive_[0] ? 1 : 0) + (vsEagleAlive_[1] ? 2 : 0));
-        for (int i = 0; i < 4; ++i) mixInt(playerTeam_[i]);
-        mixInt(teamClock_[0]);
-        mixInt(teamClock_[1]);
+        for (int i = 0; i < kMaxPlayers; ++i) mixInt(playerTeam_[i]);
+        for (int t = 0; t < 8; ++t) mixInt(teamClock_[t]);
+        for (int t = 0; t < 8; ++t) mixInt(royaleKills_[t]);
+        mixInt(royaleFrames_);
+        mixInt(royaleBonusT_);
+        for (const RoyaleItem& it : rItems_) { mixInt(it.on ? 1 : 0); mixInt(it.x); mixInt(it.y); mixInt(it.id); mixInt(it.life); }
+        for (int i = 0; i < nPlayers_; ++i) { mixInt(aiGoalC_[i]); mixInt(aiGoalR_[i]); mixInt(aiGoalT_[i]); mixInt(aiFireCool_[i]); mixInt(aiDodgeT_[i]); mixInt(aiWanderT_[i]); }
+        for (int i = 0; i < nPlayers_; ++i) { mixInt(aiPlayer_[i] ? 1 : 0); mixInt(aiDir_[i]); mixInt(aiTimer_[i]); mixInt(aiStuck_[i]); mixInt(aiLastX_[i]); mixInt(aiLastY_[i]); }
         for (int i = nPlayers_; i <= lastEnemy_; ++i) mixInt(vsTeam_[i]);
+        mixInt(vsSize_);
     }
     if (spec_.active) {                                     // niveles hechos a mano: que todos tengan la misma ficha
         mixInt(spec_.boss ? 1 : 0);
@@ -3176,10 +3799,18 @@ uint32_t Battle::StateHash() const {
     mixInt(bomb_.countdown);
     mixInt(bomb_.raidT);
     mixInt(shake_);
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < kMaxPlayers; ++i) {
         mixInt(playerFreeze_[i]);
         mixInt(stealTarget_[i]);
     }
+    for (int i = 0; i < nLava_; ++i) {                    // la lava (fuentes, celdas y relojes) tambien tiene que ser igual en todos
+        mixInt(lava_[i].phase);
+        mixInt(lava_[i].timer);
+        mixInt(lava_[i].placed);
+        mixInt(lava_[i].n);
+        for (int k = 0; k < lava_[i].n; ++k) mixInt(lava_[i].flow[k].col * 4096 + lava_[i].flow[k].row * 64 + lava_[i].flow[k].timer);
+    }
+    for (int i = 0; i <= lastTank_ && i < kMaxTanks; ++i) mixInt(lavaTick_[i]);
     return h;
 }
 
@@ -3188,14 +3819,14 @@ int Battle::BulletOwner(int b) const {
         return (b & 0x06) == 0 ? (b & 1) : -1;
     }
     if (b < nPlayers_) return b;
-    if (b >= 20 && b < 20 + nPlayers_) return b - 20;
+    if (b >= kSecondBulletBase && b < kSecondBulletBase + nPlayers_) return b - kSecondBulletBase;
     if (b >= allyBegin_ && b <= lastTank_) return allyOwner_[b];     // las balas de un aliado cuentan para su jugador
     return -1;
 }
 
 int Battle::BulletShooter(int b) const {
     if (!wide_) return b & 0x07;
-    return b >= 20 ? b - 20 : b;
+    return b >= kSecondBulletBase ? b - kSecondBulletBase : b;
 }
 
 void Battle::DebugFire(int tank) {

@@ -1,7 +1,8 @@
 #pragma once
 
 // Modo LAN: crear una partida en la red local, unirse (con busqueda automatica) y jugar en red.
-// Cada PC puede traer mas de un jugador (por ejemplo 2 + 2, o 1 + 3): en total hasta 4 jugadores.
+// Cada PC puede traer hasta 4 jugadores (por ejemplo 2 + 2, o 1 + 3). En total, la sala admite 4 jugadores (el anfitrion puede
+// ampliarla hasta 8 para la batalla vs 3 contra 3 y 4 contra 4: SetCapacity).
 // La sala puede abrirse ademas a internet (p2p, sin servidor): el anfitrion averigua su direccion publica (STUN), abre el puerto
 // del router (UPnP) y muestra un CODIGO corto; los de afuera entran con el codigo y los de la red local la encuentran buscando.
 // Los dos tipos de jugadores conviven en la misma sala.
@@ -18,10 +19,10 @@
 //   latido:     miembro -> anfitrion        "BCNES1H"  (cada segundo; sin latidos 6 s = se fue)
 //   salir:      miembro -> anfitrion "BCNES1X"  /  anfitrion -> miembros "BCNES1C" (partida cerrada)
 // Partida: pasos sincronizados ("lockstep"). Cada PC manda los botones de sus jugadores del cuadro f + RETRASO al anfitrion;
-// cuando el anfitrion tiene los de todas las PC para un cuadro, manda los botones de los 4 jugadores y cada equipo simula ese
+// cuando el anfitrion tiene los de todas las PC para un cuadro, manda los botones de los jugadores y cada equipo simula ese
 // cuadro. Como el motor del juego es determinista, todos ven lo mismo.
 //   entradas:   miembro -> anfitrion        "BCNES1I|recibidos|f0|hex..."   (2 hex por jugador local y cuadro)
-//   cuadros:    anfitrion -> miembro        "BCNES1G|f0|n|hex..."           (8 hex por cuadro: botones de los 4 jugadores)
+//   cuadros:    anfitrion -> miembro        "BCNES1G|f0|n|hex..."           (16 hex por cuadro: botones de los 8 lugares)
 //   control:    miembro -> anfitrion        "BCNES1K|cuadro|hash"           (comprobacion de sincronia)
 //               anfitrion -> miembros       "BCNES1D"                       (se detecto una desincronizacion)
 
@@ -47,9 +48,10 @@ class Lan {
 public:
     enum class State { Idle, Hosting, Searching, Joining, Joined, Closed, Full, Failed };
     static constexpr uint16_t kDefaultPort = 47800;
-    static constexpr int kMaxPlayers = 4;
+    static constexpr int kMaxPlayers = 8;               // lugares de jugador como maximo (la sala normal usa 4)
+    static constexpr int kMaxLocal = 4;                 // jugadores por PC
     static constexpr int kMaxName = 12;
-    static constexpr int kColorCount = 7;               // colores de tanque disponibles (los mismos que la seleccion local)
+    static constexpr int kColorCount = 8;               // colores de tanque disponibles (los mismos que la seleccion local)
     static constexpr int kInputDelay = 4;               // cuadros de retraso de los botones en LAN (unos 66 ms)
     static constexpr int kOnlineInputDelay = 8;         // si la sala esta abierta a internet (unos 133 ms)
 
@@ -90,7 +92,10 @@ public:
     bool IsHost() const { return state_ == State::Hosting; }
     const std::string& Error() const { return error_; }
 
-    // Jugadores locales (varios por PC, hasta 4 en total en la sala). k = jugador local 0..LocalCount()-1.
+    // Cuantos jugadores admite la sala (4, o hasta 8 en la batalla vs): lo fija el anfitrion antes de abrir la sala y los demas lo reciben.
+    void SetCapacity(int n) { capacity_ = n < 2 ? 2 : (n > kMaxPlayers ? kMaxPlayers : n); }
+    int Capacity() const { return capacity_; }
+    // Jugadores locales (varios por PC, hasta 4 por PC). k = jugador local 0..LocalCount()-1.
     bool AddLocalPlayer();                              // suma otro jugador de esta PC (si hay lugar)
     void RemoveLocalPlayer(int k);                      // lo quita (el primero no se puede quitar)
     // Color: pasa al siguiente (+1) o anterior (-1) que no use otro, y deja de estar listo.
@@ -124,7 +129,7 @@ public:
     // principio (es determinista), asi que llega al mismo estado que los demas.
     bool LateJoiner() const { return lateJoiner_; }
     int StartMask() const { return startMask_; }          // jugadores que estaban al empezar (bit p)
-    int StartColor(int p) const { return p >= 0 && p < 4 ? startColors_[p] : 0; }
+    int StartColor(int p) const { return p >= 0 && p < kMaxPlayers ? startColors_[p] : 0; }
     int PresentPlayers() const;                           // jugadores de la sala (sin contar lugares libres)
     // Marcas en el flujo de botones (el bit Select no lo usa nadie, asi que no se confunden con botones):
     //   0x0C = ese jugador se fue;  0x04 | color << 4 = ese jugador entra con ese color.
@@ -151,7 +156,7 @@ public:
     // El juego pide el cuadro `f`: se puede simular cuando ya llegaron los botones de todos.
     bool FrameReady(int f) const;
     int FramesAvailable() const;                        // cuadros ya recibidos (hasta ahi se puede simular)
-    void FrameInputs(int f, uint8_t out[4]) const;      // botones de los 4 jugadores en el cuadro f
+    void FrameInputs(int f, uint8_t out[8]) const;      // botones de los 8 lugares de jugador en el cuadro f
     // Botones locales (uno por jugador de esta PC): se piden hasta el cuadro simulado + retraso (una vez por cuadro del juego).
     void SubmitLocal(int simFrame, const uint8_t* buttons, int count);
     void SubmitLocal(int simFrame, uint8_t buttons) { SubmitLocal(simFrame, &buttons, 1); }
@@ -202,7 +207,8 @@ private:
     bool lateJoiner_ = false;
     bool seenLobby_ = false;                            // miembro: ya vi la sala antes de que empezara
     int startMask_ = 0;
-    int startColors_[4] = {0, 1, 2, 3};
+    int startColors_[kMaxPlayers] = {0, 1, 2, 3, 4, 5, 6, 7};
+    int capacity_ = 4;
 };
 
 } // namespace app

@@ -89,7 +89,7 @@ bool ReadHex(const std::string& s, size_t pos, int n, uint8_t* out) {
 int ToInt(const std::string& s, int def = 0) { return s.empty() ? def : std::atoi(s.c_str()); }
 
 constexpr double kMemberTimeout = 6.0;
-constexpr int kMaxFramesPerPacket = 100;
+constexpr int kMaxFramesPerPacket = 50;
 
 } // namespace
 
@@ -127,16 +127,16 @@ struct Lan::Impl {
     sockaddr_in hostAddr{};                // miembro: direccion del anfitrion
     std::vector<Member> members;           // anfitrion: las demas PC
     int nextId = 1;
-    int slotJoinFrame[4] = {-1, -1, -1, -1};    // anfitrion: cuadro en que entra el jugador de ese lugar (-1: ninguno)
-    int slotJoinColor[4] = {0, 0, 0, 0};
+    int slotJoinFrame[Lan::kMaxPlayers] = {-1, -1, -1, -1, -1, -1, -1, -1};    // anfitrion: cuadro en que entra el jugador de ese lugar (-1: ninguno)
+    int slotJoinColor[Lan::kMaxPlayers] = {};
     double lastLobby = 0, lastSearch = 0, lastBeat = 0, lastHeard = 0, joinStart = 0, lastJoin = 0;
     // miembro: lo que pidio cada jugador local (se reenvia unos segundos hasta que el anfitrion lo confirme)
-    int wantColor[4] = {0, 0, 0, 0};
-    bool wantReady[4] = {false, false, false, false};
-    double wantUntil[4] = {0, 0, 0, 0};
+    int wantColor[Lan::kMaxLocal] = {0, 0, 0, 0};
+    bool wantReady[Lan::kMaxLocal] = {false, false, false, false};
+    double wantUntil[Lan::kMaxLocal] = {0, 0, 0, 0};
 
     // partida
-    std::vector<std::array<uint8_t, 4>> in;   // botones por cuadro y jugador
+    std::vector<std::array<uint8_t, Lan::kMaxPlayers>> in;   // botones por cuadro y jugador
     std::vector<uint8_t> have;                // anfitrion: bits de PC con dato; miembro: 1 si llego el cuadro
     std::vector<uint8_t> own;                 // miembro: mis botones por cuadro y jugador local
     std::vector<int> hostPlayers;             // anfitrion: sus jugadores (al empezar)
@@ -247,7 +247,7 @@ struct Lan::Impl {
 
     void EnsureFrame(size_t f) {
         if (in.size() <= f) {
-            in.resize(f + 1, std::array<uint8_t, 4>{0, 0, 0, 0});
+            in.resize(f + 1, std::array<uint8_t, Lan::kMaxPlayers>{});
             have.resize(f + 1, 0);
         }
     }
@@ -263,7 +263,7 @@ struct Lan::Impl {
 // La version del programa para el juego en red: tiene que ser la misma en Windows y en Android (se compilan en momentos distintos),
 // asi que es una constante que se cambia a mano cada vez que cambia la simulacion o el protocolo.
 std::string Lan::BuildId() {
-    return "BCNES-2026.10.18-vs2";
+    return "BCNES-2026.10.19-vs8";
 }
 
 Lan::Lan(uint16_t port) : impl_(new Impl) {
@@ -342,7 +342,7 @@ int Lan::AddPlayerFor(int ownerId, const std::string& base, int k) {
     for (size_t i = 0; i < owners_.size(); ++i) {                        // con la partida en marcha se reusa un lugar libre
         if (owners_[i] < 0) { slot = static_cast<int>(i); break; }
     }
-    if (slot < 0 && static_cast<int>(players_.size()) >= kMaxPlayers) return -1;
+    if (slot < 0 && static_cast<int>(players_.size()) >= capacity_) return -1;
     std::string name = base;
     if (k > 0) name = CleanName(base.substr(0, static_cast<size_t>(kMaxName - 2))) + " " + std::to_string(k + 1);
     name = UniqueName(name);
@@ -493,7 +493,7 @@ void Lan::Leave() {
     impl_->localCount = impl_->broadcastNext = impl_->contiguous = impl_->submitted = 0;
     impl_->hostHash.clear();
     impl_->memberHash.clear();
-    for (int k = 0; k < 4; ++k) impl_->wantUntil[k] = 0;
+    for (int k = 0; k < kMaxLocal; ++k) impl_->wantUntil[k] = 0;
     maps_.clear();
     mapGot_.clear();
     mapTotal_ = 0;
@@ -509,7 +509,8 @@ void Lan::Leave() {
     lateJoiner_ = false;
     seenLobby_ = false;
     startMask_ = 0;
-    for (int i = 0; i < 4; ++i) { startColors_[i] = i; impl_->slotJoinFrame[i] = -1; }
+    for (int i = 0; i < kMaxPlayers; ++i) { startColors_[i] = i % kColorCount; impl_->slotJoinFrame[i] = -1; }
+    capacity_ = 4;
     desync_ = false;
     lost_ = false;
     myId_ = 0;
@@ -518,11 +519,11 @@ void Lan::Leave() {
 std::string Lan::LobbyMessage(bool started) const {
     std::ostringstream os;
     os << "BCNES1L|" << (started ? 1 : 0) << "|" << friendly_ << "|" << inputDelay_ << "|" << startMask_ << "|"
-       << startColors_[0] << startColors_[1] << startColors_[2] << startColors_[3] << "|" << players_.size();
+       << startColors_[0] << startColors_[1] << startColors_[2] << startColors_[3] << startColors_[4] << startColors_[5] << startColors_[6] << startColors_[7] << "|" << players_.size();
     for (size_t i = 0; i < players_.size(); ++i) {
         os << "|" << players_[i] << "|" << colors_[i] << "|" << (ready_[i] ? 1 : 0) << "|" << owners_[i];
     }
-    os << "|" << maps_.size();                                              // cuantos mapas propios va a mandar el anfitrion
+    os << "|" << maps_.size() << "|" << capacity_;                           // cuantos mapas propios va a mandar el anfitrion y cuantos jugadores admite la sala
     return os.str();
 }
 
@@ -538,14 +539,14 @@ void Lan::SendChoice(int k) {
 }
 
 bool Lan::AddLocalPlayer() {
-    if ((started_ && !lateJoiner_) || PresentPlayers() >= kMaxPlayers) return false;
+    if ((started_ && !lateJoiner_) || PresentPlayers() >= capacity_) return false;
     if (state_ == State::Hosting) {
         if (AddPlayerFor(0, myName_, LocalCount()) < 0) return false;
         RecomputeMine();
         impl_->lastLobby = 0;
         return true;
     }
-    if (state_ != State::Joined || LocalCount() >= kMaxPlayers) return false;
+    if (state_ != State::Joined || LocalCount() >= kMaxLocal) return false;
     const int k = LocalCount();
     const int color = FirstFreeColor();
     std::string name = CleanName(myName_.substr(0, static_cast<size_t>(kMaxName - 2))) + " " + std::to_string(k + 1);
@@ -651,8 +652,8 @@ bool Lan::StartGame(int friendlyFire) {
     impl_->hostPlayers = PlayersOf(0);
     impl_->localCount = static_cast<int>(impl_->hostPlayers.size());
     startMask_ = 0;
-    for (int i = 0; i < 4; ++i) {
-        startColors_[i] = static_cast<size_t>(i) < colors_.size() && colors_[static_cast<size_t>(i)] >= 0 ? colors_[static_cast<size_t>(i)] : i;
+    for (int i = 0; i < kMaxPlayers; ++i) {
+        startColors_[i] = static_cast<size_t>(i) < colors_.size() && colors_[static_cast<size_t>(i)] >= 0 ? colors_[static_cast<size_t>(i)] : i % kColorCount;
         if (static_cast<size_t>(i) < owners_.size() && owners_[static_cast<size_t>(i)] >= 0) startMask_ |= 1 << i;
     }
     int bit = 1;
@@ -687,10 +688,10 @@ bool Lan::FrameReady(int f) const {
     return f < impl_->contiguous;
 }
 
-void Lan::FrameInputs(int f, uint8_t out[4]) const {
-    for (int i = 0; i < 4; ++i) out[i] = 0;
+void Lan::FrameInputs(int f, uint8_t out[8]) const {
+    for (int i = 0; i < kMaxPlayers; ++i) out[i] = 0;
     if (f >= 0 && static_cast<size_t>(f) < impl_->in.size()) {
-        for (int i = 0; i < 4; ++i) out[i] = impl_->in[static_cast<size_t>(f)][static_cast<size_t>(i)];
+        for (int i = 0; i < kMaxPlayers; ++i) out[i] = impl_->in[static_cast<size_t>(f)][static_cast<size_t>(i)];
     }
 }
 
@@ -705,7 +706,7 @@ void Lan::SubmitLocal(int simFrame, const uint8_t* buttons, int count) {
             }
             impl_->have[f] = static_cast<uint8_t>(impl_->have[f] | 1);
         } else {
-            if (impl_->own.size() < (f + 1) * 4) impl_->own.resize((f + 1) * 4, 0);                  // 4 bytes por cuadro
+            if (impl_->own.size() < (f + 1) * 4) impl_->own.resize((f + 1) * 4, 0);                  // 4 bytes por cuadro (hasta 4 jugadores por PC)
             for (size_t k = 0; k < 4; ++k) impl_->own[f * 4 + k] = static_cast<int>(k) < count ? buttons[k] : 0;
         }
         ++impl_->submitted;
@@ -841,7 +842,7 @@ void Lan::Update() {
             Impl::Member* member = impl_->Find(from);
             if (kind == '?') {
                 std::ostringstream os;
-                os << "BCNES1!|" << myName_ << "|" << players_.size() << "|" << kMaxPlayers << "|" << BuildId();
+                os << "BCNES1!|" << myName_ << "|" << players_.size() << "|" << capacity_ << "|" << BuildId();
                 impl_->Send(from, os.str());
             } else if (kind == 'J' && f.size() >= 2) {
                 if (f.size() < 3 || f[2] != BuildId()) {
@@ -849,7 +850,7 @@ void Lan::Update() {
                 } else if (member) {                                        // ya estaba: repite la bienvenida
                     member->lastSeen = now;
                     impl_->Send(from, "BCNES1W|" + std::to_string(member->id));
-                } else if (PresentPlayers() >= kMaxPlayers || (started_ && noLateJoin_)) {
+                } else if (PresentPlayers() >= capacity_ || (started_ && noLateJoin_)) {
                     impl_->Send(from, "BCNES1F");
                 } else {
                     Impl::Member m;
@@ -914,7 +915,7 @@ void Lan::Update() {
                             if (static_cast<int>(fr) < member->joinFrame) continue;           // antes de entrar no se le piden botones
                             impl_->EnsureFrame(fr);
                             if (!(impl_->have[fr] & (1 << member->bit))) {
-                                for (size_t q = 0; q < member->players.size() && q < 4; ++q) {
+                                for (size_t q = 0; q < member->players.size() && q < static_cast<size_t>(kMaxLocal); ++q) {
                                     impl_->in[fr][static_cast<size_t>(member->players[q])] = static_cast<uint8_t>(b[q] & ~0x0C);   // sin marcas ni Start
                                 }
                                 impl_->have[fr] = static_cast<uint8_t>(impl_->have[fr] | (1 << member->bit));
@@ -982,8 +983,8 @@ void Lan::Update() {
                     if (f[1] != "1") seenLobby_ = true;
                     friendly_ = ToInt(f[2]);
                     inputDelay_ = std::max(2, std::min(20, ToInt(f[3], kInputDelay)));
-                    startMask_ = ToInt(f[4]) & 0x0F;
-                    for (int i = 0; i < 4 && i < static_cast<int>(f[5].size()); ++i) startColors_[i] = std::max(0, std::min(kColorCount - 1, f[5][static_cast<size_t>(i)] - '0'));
+                    startMask_ = ToInt(f[4]) & 0xFF;
+                    for (int i = 0; i < kMaxPlayers && i < static_cast<int>(f[5].size()); ++i) startColors_[i] = std::max(0, std::min(kColorCount - 1, f[5][static_cast<size_t>(i)] - '0'));
                     const int cnt = ToInt(f[6]);
                     players_.clear();
                     colors_.clear();
@@ -998,6 +999,7 @@ void Lan::Update() {
                     }
                     {
                         const size_t extra = static_cast<size_t>(7 + cnt * 4);
+                        if (f.size() > extra + 1) capacity_ = std::max(2, std::min(kMaxPlayers, ToInt(f[extra + 1], 4)));
                         const int total = f.size() > extra ? ToInt(f[extra]) : 0;
                         if (total >= 0 && total <= 99 && total != mapTotal_) {
                             mapTotal_ = total;
@@ -1025,13 +1027,13 @@ void Lan::Update() {
                     const int f0 = ToInt(f[1]);
                     const int cnt = ToInt(f[2]);
                     for (int k = 0; k < cnt; ++k) {
-                        uint8_t b[4];
-                        if (!ReadHex(f[3], static_cast<size_t>(k) * 8, 4, b)) break;
+                        uint8_t b[kMaxPlayers];
+                        if (!ReadHex(f[3], static_cast<size_t>(k) * 16, kMaxPlayers, b)) break;
                         const int fr = f0 + k;
                         if (fr < 0 || fr > 1000000) break;
                         impl_->EnsureFrame(static_cast<size_t>(fr));
                         if (!impl_->have[static_cast<size_t>(fr)]) {
-                            for (int i = 0; i < 4; ++i) impl_->in[static_cast<size_t>(fr)][static_cast<size_t>(i)] = b[i];
+                            for (int i = 0; i < kMaxPlayers; ++i) impl_->in[static_cast<size_t>(fr)][static_cast<size_t>(i)] = b[i];
                             impl_->have[static_cast<size_t>(fr)] = 1;
                         }
                     }
@@ -1067,7 +1069,7 @@ void Lan::Update() {
         if (now - impl_->lastBeacon > 1.5) {                              // aviso a toda la red: asi los que buscan la ven sin tener que preguntar
             impl_->lastBeacon = now;
             std::ostringstream os;
-            os << "BCNES1!|" << myName_ << "|" << players_.size() << "|" << kMaxPlayers << "|" << BuildId();
+            os << "BCNES1!|" << myName_ << "|" << players_.size() << "|" << capacity_ << "|" << BuildId();
             const uint16_t bp = static_cast<uint16_t>(impl_->port + 1);
             impl_->Send(Impl::Addr("255.255.255.255", bp), os.str());
             for (const std::string& b : Impl::Broadcasts()) impl_->Send(Impl::Addr(b, bp), os.str());       // por cada red de esta PC
@@ -1127,7 +1129,7 @@ void Lan::Update() {
                     if (m.inGame && f >= m.joinFrame) need = static_cast<uint8_t>(need | (1 << m.bit));
                 }
                 if ((impl_->have[static_cast<size_t>(f)] & need) != need) break;
-                for (int s = 0; s < 4; ++s) {                              // marcas de los que se fueron y de los que entran
+                for (int s = 0; s < kMaxPlayers; ++s) {                    // marcas de los que se fueron y de los que entran
                     if (static_cast<size_t>(s) < owners_.size() && owners_[static_cast<size_t>(s)] < 0) impl_->in[static_cast<size_t>(f)][static_cast<size_t>(s)] = kGoneMark;
                     if (impl_->slotJoinFrame[s] == f) {
                         impl_->in[static_cast<size_t>(f)][static_cast<size_t>(s)] = static_cast<uint8_t>(0x04 | (impl_->slotJoinColor[s] << 4));
@@ -1146,7 +1148,7 @@ void Lan::Update() {
                     std::ostringstream os;
                     os << "BCNES1G|" << first << "|" << cnt << "|";
                     for (int k = 0; k < cnt; ++k) {
-                        for (int s = 0; s < 4; ++s) os << Hex(impl_->in[static_cast<size_t>(first + k)][static_cast<size_t>(s)]);
+                        for (int s = 0; s < kMaxPlayers; ++s) os << Hex(impl_->in[static_cast<size_t>(first + k)][static_cast<size_t>(s)]);
                     }
                     impl_->Send(m.addr, os.str());
                     first += cnt;

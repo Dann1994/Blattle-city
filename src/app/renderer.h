@@ -53,21 +53,24 @@ struct MenuView {
 };
 
 struct LobbyView {
-    bool joined[4] = {false, false, false, false};
-    int color[4] = {0, 1, 2, 3};           // 0..6 (ver app::kColorNames)
-    std::string joinKey[4];                // nombre de la tecla (o del boton) de disparo de cada ranura
+    static constexpr int kSlots = 8;       // lugares (la sala normal usa 4; la batalla vs en red, hasta 8)
+    bool joined[kSlots] = {};
+    int color[kSlots] = {0, 1, 2, 3, 4, 5, 6, 7};           // 0..7 (ver app::kColorNames)
+    std::string joinKey[kSlots];           // nombre de la tecla (o del boton) de disparo de cada ranura
+    bool grid8 = false;                    // battle royale en red: 8 lugares sueltos (dos filas de 4), sin equipos
+    int teamSize = 0;                      // batalla vs en red: tanques por equipo (2, 3 o 4); 0 = la sala de siempre
     std::string hint, startText, backText, upDownText;   // textos que dependen de si se usa teclado o mando
     // Sala de espera en red (modo LAN): nombre de cada jugador, quien esta listo, cual soy yo y los textos que cambian
     bool net = false;
-    std::string name[4];
-    bool ready[4] = {false, false, false, false};
-    bool mine[4] = {false, false, false, false};    // jugadores de esta PC
+    std::string name[kSlots];
+    bool ready[kSlots] = {};
+    bool mine[kSlots] = {};                 // jugadores de esta PC
     std::string note;
-    std::string meLine2[4];                 // segunda linea de ayuda en cada casilla propia (por ejemplo "F LISTO")
+    std::string meLine2[kSlots];                 // segunda linea de ayuda en cada casilla propia (por ejemplo "F LISTO")
     std::string addHint;                    // como sumar otro jugador de esta PC
     std::string title;                      // titulo propio (si esta vacio, el de siempre)
     std::string joinLine1, joinLine2;       // en las casillas libres (por defecto PRESIONA / DISPARO)
-    std::string tag[4];                     // en lugar del nombre del color (por ejemplo "EQUIPO 1")
+    std::string tag[kSlots];                // en lugar del nombre del color (por ejemplo "EQUIPO 1")
 };
 
 
@@ -84,7 +87,7 @@ struct EditorView {
     uint8_t spawnCol[kMaxSpawns] = {}, spawnRow[kMaxSpawns] = {};
     bool boss = false;
     bool versus = false;                              // batalla vs: dos aguilas
-    int vsEagleCol[2] = {1, 25}, vsEagleRow[2] = {7, 7};
+    int vsEagleCol[2] = {1, 25}, vsEagleRow[2] = {13, 1};
     int eagleCol = 13, eagleRow = 1, eagleReach = 1;
     int tool = 0;                                     // 0 bloque, 1 aparicion, 2 aguila
     int palette = 0;

@@ -6,10 +6,10 @@
 
 namespace app {
 
-constexpr int kColorCount = 7;
+constexpr int kColorCount = 8;
 
-// Nombres de los 7 colores (sin tildes: la fuente de la NES no las tiene).
-inline constexpr const char* kColorNames[kColorCount] = {"AMARILLO", "VERDE", "AZUL", "ROJO", "VIOLETA", "NARANJA", "MARRON"};
+// Nombres de los 8 colores (sin tildes: la fuente de la NES no las tiene).
+inline constexpr const char* kColorNames[kColorCount] = {"AMARILLO", "VERDE", "AZUL", "ROJO", "VIOLETA", "NARANJA", "MARRON", "ROSA"};
 
 class Lobby {
 public:
@@ -27,7 +27,7 @@ public:
     static int TeamColor(int team) { return team ? 3 : 0; }      // amarillo y rojo
     void ToggleTeam(int slot) { if (slot >= 0 && slot < 4 && joined_[slot]) team_[slot] ^= 1; }
     int TeamCount(int team) const;
-    bool VersusReady() const;                   // los dos equipos con 1 o 2 jugadores
+    bool VersusReady(int maxPerTeam = 2) const;  // los dos equipos con al menos 1 jugador y hasta `maxPerTeam` (el resto lo juega la IA)
     bool Joined(int slot) const { return joined_[slot]; }
     int Color(int slot) const { return color_[slot]; }
     bool ColorTaken(int color, int exceptSlot) const;
