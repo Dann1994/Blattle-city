@@ -44,6 +44,8 @@
 #include "levels.h"
 #include "lan.h"
 #include "lobby.h"
+#include "updater.h"
+#include "version.h"
 #include "renderer.h"
 #include "samples.h"
 #include "touch.h"
@@ -130,6 +132,7 @@ bool g_useSamples = true;      // true: grabaciones del proyecto anterior; false
 app::Config g_cfg;             // teclas, mando, vibracion y demas ajustes (se guardan en un archivo)
 std::string g_cfgPath = "battlecitynes_settings.txt";
 app::TouchControls g_touch;      // controles en pantalla tactil (Android, o --touch en la PC)
+bool g_noUpdate = false;                  // --no-update: no buscar actualizaciones al abrir
 int g_padOfSlot[4] = {-1, -1, -1, -1};   // mando de cada jugador: se reparten solos al conectarlos
 
 void SaveConfig() {
@@ -283,7 +286,7 @@ std::string PadButtonName(int b) {
 class TestScreen {
 public:
     enum class Scene { Title, PlayMenu, Lobby, Settings, KeysPlayer, KeysList, PadSettings, Construction, Pause, Game,
-                       LanMenu, NameEntry, LanHost, LanSearch, LanJoined, OnlineMenu, CodeEntry, LateJoin, Editor, OwnLevels, VsMenu, JoinMenu, ModeMenu, ConfirmExit };
+                       LanMenu, NameEntry, LanHost, LanSearch, LanJoined, OnlineMenu, CodeEntry, LateJoin, Editor, OwnLevels, VsMenu, JoinMenu, ModeMenu, ConfirmExit, UpdateCheck, UpdatePrompt, UpdateDownload };
     enum class Capture { None, Key, Pad };
     struct Rumble { int slot; float left, right, seconds; float delay = 0.0f; };   // delay: segundos hasta empezar
     enum class Ev { Up, Down, Left, Right, Accept, Back, Fire, Start };
@@ -610,9 +613,17 @@ public:
         scene_ = Scene::Title;
         menuIndex_ = 0;
         titleScroll_ = 240;                                    // el titulo sube desde abajo, como en la ROM
+        if (!g_noUpdate && g_cfg.autoUpdate) {                 // antes del titulo: "conectando al servidor" y busca actualizaciones
+            scene_ = Scene::UpdateCheck;
+            updateReturn_ = Scene::Title;
+            checkFrames_ = 0;
+            updatePrompted_ = true;
+            updater_.StartCheck();
+        }
     }
     // Animacion del titulo: sube 1 px por cuadro (240 cuadros en total).
     void TickMenu() {
+        UpdateTick();                                          // actualizaciones: pantalla de arranque, aviso y descarga
         if (scene_ == Scene::Title && titleScroll_ > 0) --titleScroll_;
         ++menuTick_;
         if (scene_ == Scene::LanHost || scene_ == Scene::LanSearch || scene_ == Scene::LanJoined) {
@@ -700,6 +711,44 @@ public:
         Reset(n);
     }
 
+    // ---- actualizaciones ----
+    void StartUpdateCheck() { if (g_cfg.autoUpdate) updater_.StartCheck(); }
+    std::string UpdateStatusText() const {
+        using S = app::Updater::State;
+        switch (updater_.state()) {
+            case S::Checking: return "BUSCANDO ACTUALIZACIONES...";
+            case S::UpToDate: return "TENÉS LA ÚLTIMA VERSIÓN (" + app::AppVersion() + ")";
+            case S::Available: return "HAY UNA VERSIÓN NUEVA: " + updater_.release().version;
+            case S::Failed: return "NO SE PUDO BUSCAR: " + updater_.error();
+            default: return "VERSIÓN " + app::AppVersion();
+        }
+    }
+    // Una vez por cuadro en los menus: pantalla de arranque ("conectando al servidor"), aviso de la version nueva y, al terminar la descarga, instala.
+    void UpdateTick() {
+        using S = app::Updater::State;
+        updater_.Poll();
+        const S st = updater_.state();
+        if (scene_ == Scene::UpdateCheck) {                                    // arranque: espera la respuesta (hasta 8 segundos) y despues sigue al titulo
+            ++checkFrames_;
+            if (st == S::Available) { updateReturn_ = Scene::Title; scene_ = Scene::UpdatePrompt; menuIndex_ = 0; }
+            else if (st == S::UpToDate && checkFrames_ > 50) { scene_ = Scene::Title; menuIndex_ = 0; }
+            else if (st == S::Failed && checkFrames_ > 90) { scene_ = Scene::Title; menuIndex_ = 0; }
+            else if (checkFrames_ > 480) { scene_ = Scene::Title; menuIndex_ = 0; }
+        }
+        if (manualCheck_ && scene_ == Scene::Settings && st == S::Available) {     // "buscar actualizaciones" en la configuracion
+            manualCheck_ = false;
+            updateReturn_ = Scene::Settings;
+            scene_ = Scene::UpdatePrompt;
+            menuIndex_ = 0;
+        } else if (manualCheck_ && (st == S::UpToDate || st == S::Failed)) {
+            manualCheck_ = false;
+        }
+        if (scene_ == Scene::UpdateDownload && st == S::Downloaded && !installLaunched_) {
+            installLaunched_ = true;
+            if (updater_.Install()) quit_ = true;                    // PC: el instalador cierra, actualiza y vuelve a abrir el juego
+        }
+    }
+
     int MenuItemCount() const {
         switch (scene_) {
             case Scene::Title: return 4;
@@ -707,7 +756,10 @@ public:
             case Scene::PlayMenu: return 2;
             case Scene::ModeMenu: return 5;
             case Scene::VsMenu: return 6;
-            case Scene::Settings: return 7;
+            case Scene::Settings: return 9;
+            case Scene::UpdateCheck: return 1;
+            case Scene::UpdatePrompt: return 2;
+            case Scene::UpdateDownload: return 1;
             case Scene::KeysPlayer: return 5;
             case Scene::KeysList: return 8;
             case Scene::PadSettings: return 6;
@@ -724,6 +776,9 @@ public:
             case Scene::PlayMenu: ReturnToTitle(); break;
             case Scene::Title: scene_ = Scene::ConfirmExit; menuIndex_ = 0; break;            // Atras en el titulo: preguntar si se sale
             case Scene::ConfirmExit: scene_ = Scene::Title; menuIndex_ = 3; break;
+            case Scene::UpdateCheck: scene_ = Scene::Title; menuIndex_ = 0; break;
+            case Scene::UpdatePrompt: scene_ = updateReturn_; menuIndex_ = updateReturn_ == Scene::Settings ? 7 : 0; break;
+            case Scene::UpdateDownload: updater_.Cancel(); scene_ = updateReturn_; menuIndex_ = updateReturn_ == Scene::Settings ? 7 : 0; break;
             case Scene::Settings: scene_ = settingsReturn_; menuIndex_ = settingsReturn_ == Scene::Pause ? 1 : 2; break;
             case Scene::KeysPlayer: scene_ = Scene::Settings; menuIndex_ = 0; break;
             case Scene::KeysList: scene_ = Scene::KeysPlayer; menuIndex_ = keysPlayer_; break;
@@ -1295,8 +1350,20 @@ public:
             case Scene::Settings:
                 if (index == 0) { scene_ = Scene::KeysPlayer; menuIndex_ = 0; }
                 else if (index == 1) { scene_ = Scene::PadSettings; menuIndex_ = 0; }
-                else if (index >= 2 && index <= 5) ChangeSetting(index);
+                else if (index >= 2 && index <= 6) ChangeSetting(index);
+                else if (index == 7) { manualCheck_ = true; installLaunched_ = false; updater_.StartCheck(); }      // buscar ahora
                 else GoBack();
+                break;
+            case Scene::UpdateCheck:
+                scene_ = Scene::Title;                                         // cualquier boton: salta la espera
+                menuIndex_ = 0;
+                break;
+            case Scene::UpdatePrompt:
+                if (index == 0) { updater_.StartDownload(); installLaunched_ = false; scene_ = Scene::UpdateDownload; menuIndex_ = 0; }
+                else GoBack();
+                break;
+            case Scene::UpdateDownload:
+                GoBack();
                 break;
             case Scene::KeysPlayer:
                 if (index < 4) { keysPlayer_ = index; scene_ = Scene::KeysList; menuIndex_ = 0; }
@@ -1340,6 +1407,8 @@ public:
                 ToggleFullscreen();
             } else if (index == 5) {
                 g_cfg.turbo = !g_cfg.turbo;
+            } else if (index == 6) {
+                g_cfg.autoUpdate = !g_cfg.autoUpdate;
             }
         } else if (scene_ == Scene::PadSettings && index == 3) {
             g_cfg.vibration = !g_cfg.vibration;
@@ -1529,6 +1598,8 @@ public:
         switch (scene_) {
             case Scene::Title:
                 v.logo = true;
+                v.version = std::string("V") + BCNES_VERSION;
+                if (updater_.state() == app::Updater::State::Available) v.cornerNote = "HAY UNA VERSIÓN NUEVA: V" + updater_.release().version + " (CONFIGURACIÓN)";
                 v.scrollY = titleScroll_;
                 v.p1Score = lastScore_;
                 v.hiScore = hiScore_;
@@ -1562,6 +1633,38 @@ public:
                 v.note = lanNote_;
                 v.footer = NavHint();
                 break;
+            case Scene::UpdateCheck: {
+                using S = app::Updater::State;
+                const S st = updater_.state();
+                if (st == S::UpToDate) v.title = "JUEGO AL DÍA";
+                else if (st == S::Failed) v.title = "SIN CONEXIÓN CON EL SERVIDOR";
+                else v.title = std::string("CONECTANDO AL SERVIDOR") + std::string(static_cast<size_t>((menuTick_ / 20) % 4), '.');
+                v.note = st == S::UpToDate ? "VERSIÓN " + app::AppVersion() : (st == S::Failed ? updater_.error() : "BUSCANDO ACTUALIZACIONES...");
+                v.footer = std::string(touch_ ? "TOQUE A" : "CUALQUIER BOTÓN") + " PARA OMITIR";
+                v.version = std::string("V") + BCNES_VERSION;
+                break;
+            }
+            case Scene::UpdatePrompt:
+                v.title = "ACTUALIZACIÓN VERSIÓN " + updater_.release().version + " ENCONTRADA";
+                v.items = {"INSTALARLA AHORA", "JUGAR SIN ACTUALIZAR"};
+                v.note = "TENÉS LA VERSIÓN " + app::AppVersion() + ". ¿QUERÉS INSTALAR LA NUEVA?";
+                v.footer = NavHint();
+                break;
+            case Scene::UpdateDownload: {
+                v.title = "ACTUALIZANDO";
+                if (updater_.state() == app::Updater::State::Failed) {
+                    v.note = updater_.error();
+                    v.footer = BackHint();
+                } else if (updater_.state() == app::Updater::State::Downloaded) {
+                    v.note = installLaunched_ ? "SIGUE LAS INDICACIONES DE ANDROID PARA INSTALAR" : "INSTALANDO...";
+                    v.footer = BackHint();
+                } else {
+                    const float pr = updater_.progress();
+                    v.note = pr >= 0 ? "DESCARGANDO LA VERSIÓN " + updater_.release().version + ": " + std::to_string(static_cast<int>(pr * 100)) + " POR CIENTO" : "DESCARGANDO...";
+                    v.footer = BackHint() + " CANCELAR";
+                }
+                break;
+            }
             case Scene::ConfirmExit:
                 v.title = "¿SALIR DEL JUEGO?";
                 v.items = {"NO", "SÍ"};
@@ -1624,7 +1727,9 @@ public:
                 v.items = {"MAPEO DE CONTROLES", "MAPEO DE MANDO", "FUEGO AMIGO: " + FriendlyText(),
                            std::string("SONIDO: ") + (g_useSamples ? "REMASTERIZADO" : "ORIGINAL"),
                            std::string("PANTALLA COMPLETA: ") + yesNo[IsWindowState(FLAG_BORDERLESS_WINDOWED_MODE) ? 1 : 0],
-                           std::string("TURBO: ") + yesNo[g_cfg.turbo ? 1 : 0], "VOLVER"};
+                           std::string("TURBO: ") + yesNo[g_cfg.turbo ? 1 : 0], std::string("ACTUALIZACIÓN AUTOMÁTICA: ") + yesNo[g_cfg.autoUpdate ? 1 : 0],
+                           "BUSCAR ACTUALIZACIONES", "VOLVER"};
+                v.note = UpdateStatusText();
                 v.footer = ChangeHint();
                 break;
             case Scene::KeysPlayer:
@@ -1809,6 +1914,15 @@ public:
             else if (key == "back") MenuEvent(Ev::Back, slot);
             else if (key == "start") MenuEvent(Ev::Start, slot);
             else if (key == "fire") MenuEvent(Ev::Fire, slot);
+        } else if (name.compare(0, 3, "upd") == 0 && name.size() == 4) {                    // prueba de las pantallas de actualizacion (sin red)
+            using S = app::Updater::State;
+            const char k = name[3];
+            if (k == '1') { updater_.DebugForce(S::Checking, ""); scene_ = Scene::UpdateCheck; }
+            else if (k == '2') { updater_.DebugForce(S::Available, "1.1.0"); updateReturn_ = Scene::Title; scene_ = Scene::UpdatePrompt; menuIndex_ = 0; }
+            else if (k == '3') { updater_.DebugForce(S::Downloading, "1.1.0", 0.45f); scene_ = Scene::UpdateDownload; installLaunched_ = false; }
+            else if (k == '4') { updater_.DebugForce(S::Failed, "1.1.0", 0, "LA DESCARGA QUEDÓ INCOMPLETA"); scene_ = Scene::UpdateDownload; }
+            else if (k == '5') { updater_.DebugForce(S::UpToDate, ""); scene_ = Scene::UpdateCheck; }
+            else if (k == '6') { updater_.DebugForce(S::Available, "1.1.0"); scene_ = Scene::Title; titleScroll_ = 0; }
         } else if (name == "pad") {
             usingPad_ = true;                                  // simula que se esta usando el mando (textos de ayuda)
         } else if (name == "win") {                          // simula ganar el nivel con algunos enemigos destruidos
@@ -1946,6 +2060,10 @@ private:
     mutable std::unique_ptr<nes::Battle> slotsPreview_;      // fondo vacio de la lista de niveles propios
     bool ownMode_ = false;                                   // jugando la serie de niveles propios (casilleros)
     bool quit_ = false;
+    app::Updater updater_;
+    bool updatePrompted_ = false, installLaunched_ = false, manualCheck_ = false;
+    Scene updateReturn_ = Scene::Title;
+    int checkFrames_ = 0;
     bool royale_ = false;                                    // battle royale (sobre el modo batalla vs): todos contra todos
     int humanMask_ = 3;                                      // batalla vs / royale: bit p = el jugador p es una persona (los demas, IA)
     int royaleOpt_ = 2;                                      // 0 = a muerte, 1 = por tiempo 3 min, 2 = 5 min, 3 = 10 min
@@ -2533,7 +2651,7 @@ int main(int argc, char** argv) {
     std::string wavFile;
     double selfTest = 0.0;
     bool classic = false;
-    int level = 0, ownSlot = 0, vsDirect = 0, royaleDirect = -1;
+    int level = 0, ownSlot = 0, vsDirect = 0, royaleDirect = -1, updateCheck = 0;
     int frames = 120;
     int players = 1;
     bool direct = false;                                   // con --players/--level/--classic salta los menus
@@ -2560,6 +2678,16 @@ int main(int argc, char** argv) {
         else if (a == "--wav" && i + 1 < argc) wavFile = argv[++i];
         else if (a == "--selftest" && i + 1 < argc) selfTest = std::atof(argv[++i]);
         else if (a == "--classic") { classic = true; direct = true; }
+        else if (a == "--no-update") g_noUpdate = true;
+        else if (a == "--update-api" && i + 1 < argc) {                                      // pruebas: otra direccion para buscar actualizaciones
+#ifdef _WIN32
+            _putenv_s("BCNES_UPDATE_API", argv[++i]);
+#else
+            setenv("BCNES_UPDATE_API", argv[++i], 1);
+#endif
+        }
+        else if (a == "--update-check") { updateCheck = 1; }                                  // prueba sin ventana: busca y descarga la version nueva
+        else if (a == "--update-install") { updateCheck = 2; }                              // ... y la instala (se cierra para que el instalador reemplace el juego)
         else if (a == "--lan-host" && i + 1 < argc) { lanRole = 1; lanName = argv[++i]; }
         else if (a == "--lan-join" && i + 1 < argc) { lanRole = 2; lanName = argv[++i]; }
         else if (a == "--lan-frames" && i + 1 < argc) lanFrames = std::atoi(argv[++i]);
@@ -2603,6 +2731,22 @@ int main(int argc, char** argv) {
         app::SetLevelRoot(androidBase + "niveles/");
 #endif
     }
+    if (updateCheck > 0) {
+        app::Updater up;
+        up.StartCheck();
+        auto wait = [&](app::Updater::State from) { while (up.state() == from) { up.Poll(); std::this_thread::sleep_for(std::chrono::milliseconds(50)); } };
+        wait(app::Updater::State::Checking);
+        std::printf("version instalada %s; estado %d\n", app::AppVersion().c_str(), static_cast<int>(up.state()));
+        if (up.state() != app::Updater::State::Available) { if (up.state() == app::Updater::State::Failed) std::printf("error: %s\n", up.error().c_str()); return up.state() == app::Updater::State::UpToDate ? 0 : 3; }
+        std::printf("hay version nueva %s\n", up.release().version.c_str());
+        up.StartDownload();
+        wait(app::Updater::State::Downloading);
+        std::printf("descarga: estado %d progreso %.2f\n", static_cast<int>(up.state()), up.progress());
+        if (up.state() != app::Updater::State::Downloaded) { std::printf("error: %s\n", up.error().c_str()); return 4; }
+        if (updateCheck == 2) { const bool quit = up.Install(); std::printf("instalador lanzado: %d\n", quit ? 1 : 0); std::fflush(stdout); return quit ? 0 : 5; }
+        return 0;
+    }
+    if (selfTest > 0.0 || !shotFile.empty() || !wavFile.empty()) g_noUpdate = true;          // pruebas y capturas: sin red
     TestScreen screen;
     screen.SetFriendlyFromConfig();
     screen.SetHiScore(g_cfg.hiScore);

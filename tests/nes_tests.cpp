@@ -20,6 +20,7 @@
 #include "../src/app/editor.h"
 #include "../src/app/flow.h"
 #include "../src/app/lan.h"
+#include "../src/app/updater.h"
 #include "../src/app/nat.h"
 #include "../src/app/levels.h"
 #include "../src/app/lobby.h"
@@ -3403,6 +3404,46 @@ void TestNewItems() {
     }
 }
 
+// Buscador de actualizaciones: versiones, lectura de los releases de GitHub y eleccion del archivo
+void TestUpdater() {
+    std::printf("[actualizaciones] comparar versiones, leer los releases (pc-vX / android-vX) y elegir el instalador o el APK\n");
+    CHECK_EQ(app::CompareVersions("1.0.0", "1.0.0"), 0);
+    CHECK(app::CompareVersions("1.0.0", "1.0.1") < 0);
+    CHECK(app::CompareVersions("1.10.0", "1.9.0") > 0);               // numerico, no por texto
+    CHECK(app::CompareVersions("2.0", "1.99.99") > 0);
+    CHECK_EQ(app::CompareVersions("1.2", "1.2.0"), 0);
+    CHECK(!app::AppVersion().empty());
+    const std::string json = R"([
+      {"tag_name": "pc-v1.9.0", "name": "PC 1.9.0", "body": "viejo", "draft": false, "prerelease": false,
+       "assets": [{"name": "BattleCityNES-Setup-1.9.0.exe", "browser_download_url": "https://x/s190.exe", "size": 100}]},
+      {"tag_name": "pc-v1.10.0", "name": "PC 1.10.0", "body": "nuevo \"con comillas\" y \u00e1", "draft": false, "prerelease": false,
+       "assets": [{"name": "BattleCityNES-PC.zip", "browser_download_url": "https://x/pc.zip", "size": 7},
+                  {"name": "BattleCityNES-Setup-1.10.0.exe", "browser_download_url": "https://x/s1100.exe", "size": 4650936}]},
+      {"tag_name": "pc-v9.0.0", "name": "borrador", "draft": true, "prerelease": false, "assets": []},
+      {"tag_name": "pc-v8.0.0", "name": "prueba", "draft": false, "prerelease": true, "assets": []},
+      {"tag_name": "pc-2026.10.19", "name": "entrega vieja sin version", "draft": false, "prerelease": false, "assets": []},
+      {"tag_name": "android-v1.4.0", "name": "Android", "draft": false, "prerelease": false,
+       "assets": [{"name": "BattleCityNES.apk", "browser_download_url": "https://x/a.apk", "size": 18000000}]}
+    ])";
+    app::ReleaseInfo pc;
+    CHECK(app::ParseLatestRelease(json, "pc-", pc));
+    CHECK(pc.version == "1.10.0");                           // la mas nueva (sin borradores ni pruebas ni etiquetas sin version)
+    CHECK(pc.body.find("con comillas") != std::string::npos);
+    const app::ReleaseAsset* a = app::PickAsset(pc, false);
+    CHECK(a != nullptr && a->url == "https://x/s1100.exe" && a->size == 4650936);        // en PC, el instalador (no el zip)
+    app::ReleaseInfo an;
+    CHECK(app::ParseLatestRelease(json, "android-", an));
+    CHECK(an.version == "1.4.0");
+    const app::ReleaseAsset* b = app::PickAsset(an, true);
+    CHECK(b != nullptr && b->name == "BattleCityNES.apk");
+    CHECK(app::PickAsset(an, false) == nullptr);
+    app::ReleaseInfo none;
+    CHECK(!app::ParseLatestRelease(json, "linux-", none));                // sin entregas para esa plataforma
+    CHECK(!app::ParseLatestRelease("no es json", "pc-", none));
+    CHECK(!app::ParseLatestRelease("{}", "pc-", none));
+    CHECK(!app::ParseLatestRelease("[]", "pc-", none));
+}
+
 void TestGameOverScreen() {
     std::printf("[pantallas] sin base o sin jugadores aparece GAME OVER, luego HI-SCORE si hay record y vuelve al titulo\n");
     auto fx = MakeFlow(1, 2);
@@ -3606,6 +3647,7 @@ int main() {
     TestVersusEightPlayers();
     TestRoyale();
     TestNewItems();
+    TestUpdater();
     TestLanSharedMaps();
     TestAllyRules();
     TestSandBlock();

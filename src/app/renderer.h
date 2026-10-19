@@ -50,6 +50,8 @@ struct MenuView {
     std::string note;
                                            // linea de aviso (por ejemplo "PROXIMAMENTE")
     std::string footer;
+    std::string version;                   // titulo: la version del juego, abajo a la derecha
+    std::string cornerNote;                // titulo: aviso abajo a la izquierda (por ejemplo "ACTUALIZACION DISPONIBLE")
 };
 
 struct LobbyView {

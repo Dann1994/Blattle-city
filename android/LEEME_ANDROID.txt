@@ -15,6 +15,14 @@ Controles en pantalla
   En CONSTRUCCIÓN aparecen además X, Y, L y R (Y cambia de herramienta, L/R el bloque).
   Un mando Bluetooth también funciona (los textos de ayuda siguen hablando de A / B / START).
 
+Actualizaciones
+  Al abrir el juego aparece "CONECTANDO AL SERVIDOR" y busca en GitHub si hay una version nueva. Si la hay pregunta si instalarla: descarga el APK
+  (con la notificacion de descarga de Android) y abre la pantalla de instalacion de Android, donde hay que tocar "Actualizar". La primera vez Android
+  pide permitir "instalar apps desconocidas" para Battle City NES (es normal: la app no viene de Google Play). Los datos se conservan. La version
+  se ve abajo a la derecha en el titulo. Se puede apagar la busqueda en CONFIGURACION.
+  IMPORTANTE (para quien compila): las actualizaciones solo se instalan si el APK nuevo esta firmado con la MISMA clave (C:ndroid-dev\debug.keystore:
+  guardala en un lugar seguro) y tiene un numero de version mayor (lo toma de src/app/version.h).
+
 Jugar en red con la PC (crossplay)
   El teléfono y la PC usan el mismo protocolo: se pueden mezclar en la misma sala, también en MODO BATALLA VS.
   - CREAR PARTIDA (JUGAR -> EN RED): la sala genera un código de 12 letras. Sirve desde la misma red y desde internet.

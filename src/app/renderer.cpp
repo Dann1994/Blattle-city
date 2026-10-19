@@ -1205,6 +1205,10 @@ void Renderer::RenderMenu(const MenuView& m, std::vector<uint8_t>& rgba) const {
         if (!m.footer.empty() && sc == 0) {
             DrawText(canvas, kScreenW, (kScreenW - TextWidth(m.footer)) / 2, 224, m.footer, 0x7C7C7C);
         }
+        if (sc == 0) {
+            if (!m.version.empty()) DrawText(canvas, kScreenW, kScreenW - TextWidth(m.version) - 6, 230, m.version, 0x7C7C7C);       // la version, abajo a la derecha
+            if (!m.cornerNote.empty()) DrawText(canvas, kScreenW, (kScreenW - TextWidth(m.cornerNote)) / 2, 208, m.cornerNote, 0xF8D878);
+        }
         ToRgba(canvas, rgba);
         return;
     }

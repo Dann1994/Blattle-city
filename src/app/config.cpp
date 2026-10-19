@@ -31,6 +31,7 @@ bool Config::Load(const std::string& path) {
         else if (name == "playername") playerName = line.substr(eq + 1);
         else if (name == "friendlyfire") friendlyFire = value < 0 ? 0 : (value > 2 ? 2 : value);
         else if (name == "samples") useSamples = value != 0;
+        else if (name == "autoupdate") autoUpdate = value != 0;
     }
     return true;
 }
@@ -52,6 +53,7 @@ bool Config::Save(const std::string& path) const {
     f << "friendlyfire=" << friendlyFire << "\n";
     f << "hiscore=" << hiScore << "\n";
     f << "samples=" << (useSamples ? 1 : 0) << "\n";
+    f << "autoupdate=" << (autoUpdate ? 1 : 0) << "\n";
     return static_cast<bool>(f);
 }
 

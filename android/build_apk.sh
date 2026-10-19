@@ -9,6 +9,8 @@ SDK="$DEV/sdk"
 NDK="$(ls -d "$SDK"/ndk/* | head -1)"
 BT="$SDK/build-tools/34.0.0"
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
+VNAME="$(grep -o 'BCNES_VERSION "[0-9.]*"' "$SRC/src/app/version.h" | grep -o '[0-9][0-9.]*')"      # version del juego (src/app/version.h)
+VCODE="$(grep -o 'BCNES_VERSION_CODE [0-9]*' "$SRC/src/app/version.h" | grep -o '[0-9]*$')"
 ABI="${ABI:-arm64-v8a}"                 # arm64-v8a (telefonos) o x86_64 (emulador)
 OUT="$DEV/apk-out-$ABI"
 export JAVA_HOME="$JDK" PATH="$JDK/bin:/c/msys64/mingw64/bin:$PATH"
@@ -25,7 +27,7 @@ cp -r "$SRC/assets/sounds" "$OUT/stage/assets/sounds"
 
 "$BT/aapt2.exe" compile --dir "$SRC/android/res" -o "$OUT/res.zip"
 "$BT/aapt2.exe" link -o "$OUT/base.apk" -I "$SDK/platforms/android-34/android.jar" --manifest "$SRC/android/AndroidManifest.xml" \
-      -R "$OUT/res.zip" -A "$OUT/stage/assets" --min-sdk-version 24 --target-sdk-version 34 --version-code 1 --version-name 1.0
+      -R "$OUT/res.zip" -A "$OUT/stage/assets" --min-sdk-version 24 --target-sdk-version 34 --version-code "$VCODE" --version-name "$VNAME"
 python - "$OUT" "$ABI" <<'PY'
 import sys, zipfile
 out, abi = sys.argv[1], sys.argv[2]
