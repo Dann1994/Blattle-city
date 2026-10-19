@@ -17,11 +17,12 @@ Controles en pantalla
 
 Jugar en red con la PC (crossplay)
   El teléfono y la PC usan el mismo protocolo: se pueden mezclar en la misma sala, también en MODO BATALLA VS.
-  - Misma red WiFi: JUGAR -> LAN -> UNIRSE (o CREAR PARTIDA si el anfitrión es el teléfono).
-  - Por internet: la PC elige JUGAR -> ONLINE -> CREAR PARTIDA y te pasa el código de 12 letras; en el teléfono:
-    JUGAR -> ONLINE -> UNIRSE CON CÓDIGO y lo escribís con el teclado en pantalla.
-  - El anfitrión conviene que sea la PC (con UPnP o el puerto UDP 47800 abierto). Un teléfono con datos móviles casi nunca puede ser
-    anfitrión (el operador no deja entrar conexiones), pero sí puede UNIRSE a una sala de la PC.
+  - CREAR PARTIDA (JUGAR -> EN RED): la sala genera un código de 12 letras. Sirve desde la misma red y desde internet.
+  - UNIRSE -> BUSCAR EN RED: encuentra las salas de la misma wifi. UNIRSE -> INGRESAR CÓDIGO: entra con el código desde cualquier lado
+    (lo escribís con el teclado en pantalla). Si la búsqueda no la encuentra, la sala también muestra el "CÓDIGO DE ESTA RED".
+  - La pantalla de búsqueda muestra "MI IP ... AVISOS n"; con AVISOS 0 la red no deja pasar los avisos (wifi con aislamiento de clientes).
+  - El anfitrión conviene que sea la PC. Un teléfono con datos móviles casi nunca puede ser anfitrión (el operador no deja entrar
+    conexiones), pero sí puede unirse a una sala de la PC.
   - Las dos versiones tienen que ser de la misma entrega (el juego lo avisa si no).
   - Los niveles hechos a mano no se comparten por red (en red valen los 40 de fábrica y los mapas de batalla generados).
 
@@ -34,10 +35,3 @@ Verificado
   Se probó en un emulador Android 14 (x86_64): arranca, los menús responden a los controles táctiles, el teclado en pantalla escribe, se juega,
   y una partida en red con el anfitrión de Windows terminó con el MISMO estado del juego (hash idéntico) en las dos plataformas.
   Todavía no se probó en un teléfono real (arm64): si algo falla, avisá qué modelo es.
-
-Si la búsqueda LAN no encuentra la partida (algunos routers o teléfonos no dejan pasar los mensajes a toda la red):
-  la sala del anfitrión muestra arriba "CÓDIGO DE ESTA RED: XXXX-XXXX-XXXX"; en el otro equipo entrá con ONLINE -> UNIRSE CON CÓDIGO y escribilo.
-  Ahora el anfitrión además avisa su sala cada segundo y medio por toda la red, así que normalmente aparece sola en la lista.
-
-LAN -> UNIRSE CON CÓDIGO: ahora también está dentro del menú LAN (usa el "CÓDIGO DE ESTA RED" que muestra la sala del anfitrión).
-La pantalla de búsqueda muestra cuántos avisos llegaron ("MI IP ... AVISOS n DE ..."): si dice AVISOS 0, la red o el firewall no dejan pasar los mensajes a toda la red; usá el código.
