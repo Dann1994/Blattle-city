@@ -1657,6 +1657,7 @@ public:
             "L SIGUIENTE NIVEL",
             "F12 ITEM ALIADOS",
             "B BOMBARDEO",
+            "Y ESCENARIO ALIADOS",
             "H FUEGO AMIGO",
             "P PAUSA",
             "RETROCESO MENU",
@@ -1743,6 +1744,8 @@ public:
         } else if (name == "steal") {                          // prueba: el jugador 1 se queda sin vidas (robo de vidas)
             battle_->SetLives(0, 0);
             battle_->DebugSetTankFlags(0, 0);
+        } else if (name == "ally") {                          // prueba: escenario de los aliados (aguila sin muros, 2 aliados, enemigos quietos)
+            battle_->DebugAllyScenario();
         } else if (name == "bomb") {                          // prueba: arranca el bombardeo ya
             battle_->DebugStartBombing();
         } else if (name == "al") {
@@ -2209,6 +2212,7 @@ int RunWindow(TestScreen& screen, double selfTestSeconds, const std::string& ass
             SetMasterVolume(muted ? 0.0f : 1.0f);
         }
         if (dbg && IsKeyPressed(KEY_B)) screen.Battle().DebugStartBombing();
+        if (dbg && IsKeyPressed(KEY_Y)) screen.Battle().DebugAllyScenario();               // escenario de prueba de los aliados
         if (dbg && IsKeyPressed(KEY_K)) screen.Battle().DebugKillAllEnemies();
         if (dbg && IsKeyPressed(KEY_C)) screen.Battle().DebugClearEnemies();
         if (dbg && IsKeyPressed(KEY_PAGE_UP)) { screen.SetLevel(screen.level() + 1); screen.Reset(screen.players()); }

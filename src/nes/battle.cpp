@@ -1786,6 +1786,10 @@ int Battle::Sub_E693_bullet_probe(int px, int py, int bi) {
         BSTATUS(bi) = 0x33;
         return 0;
     }
+    if ((tile & 0xFC) == 0xC8 && R(ram_game_over_flag) != 0 && IsAllyBullet(bi)) {
+        BSTATUS(bi) = 0x33;                              // la bala de un aliado se apaga contra el aguila de los jugadores: no le hace nada
+        return 0;
+    }
     if ((tile & 0xFC) == 0xC8 && R(ram_game_over_flag) != 0) {   // el aguila
         R(ram_game_over_flag) = 0x27;
         ++eaglesDestroyed_;
@@ -1967,6 +1971,36 @@ void Battle::Sub_E70C_check_bullets_collision_with_tanks() {
             break;
         }
     }
+    // balas de los aliados contra los jugadores: impactan y se apagan, pero no les hacen dano salvo con el dano amigo activado
+    if (wide_) {
+        for (int x = nPlayers_ - 1; x >= 0; --x) {
+            const u8 f = TFLAGS(x);
+            if (!(f & 0x80) || f >= 0xE0) continue;
+            for (int b = nBullets_ - 1; b >= 0; --b) {
+                if (!IsAllyBullet(b) || (BSTATUS(b) & 0xF0) != 0x40) continue;
+                if (AbsDiffX(BPOSX(b), TPOSX(x)) >= 0x0A) continue;
+                if (AbsDiff8(BPOSY(b), TPOSY(x)) >= 0x0A) continue;
+                BSTATUS(b) = 0x33;
+                if (friendlyFire_ != FriendlyFire::Damage) break;                      // sin dano amigo: nada
+                ++playerHits_[x];
+                if (HELMET(x) != 0) {
+                    BSTATUS(b) = 0;
+                    ShieldHit(x, bulletLevel_[b] == 3 ? 2 : 1);
+                    break;
+                }
+                if (TUPGRADE(x) != 0) {                                                // quita un nivel de arma; a nivel 0 destruye el tanque
+                    const int drop = bulletLevel_[b] == 3 ? 2 : 1;
+                    TUPGRADE(x) = static_cast<u8>(TUPGRADE(x) > 0x20 * drop ? TUPGRADE(x) - 0x20 * drop : 0);
+                    TTYPE(x) = TUPGRADE(x);
+                } else {
+                    TFLAGS(x) = con_tank_flag_explosion + 0x03;
+                    R(ram_sfx_explosion_player) = 1;
+                    TTYPE(x) = 0;
+                }
+                break;
+            }
+        }
+    }
     // balas de jugador contra el otro jugador (lo paraliza)
     if (friendlyFire_ == FriendlyFire::Off) {
         return;                                          // las balas de jugador atraviesan a los aliados
@@ -2020,8 +2054,8 @@ void Battle::Sub_E910_check_bullets_collision_with_bullets() {
             if (BulletShooter(a) == BulletShooter(b)) continue;      // la misma bala o su segunda
             if (vs) {
                 if (TeamOf(BulletShooter(a)) == TeamOf(BulletShooter(b))) continue;       // las balas del mismo equipo no se anulan
-            } else if (wide_ && (IsAllyBullet(a) || IsAllyBullet(b)) && BulletOwner(a) >= 0 && BulletOwner(b) >= 0) {
-                continue;                                                                   // las balas amigas no se anulan
+            } else if (wide_ && IsAllyBullet(a) && IsAllyBullet(b)) {
+                continue;                                                                   // las balas de los aliados entre si no se anulan
             }
             if ((BSTATUS(b) & 0xF0) != 0x40) continue;
             if (AbsDiffX(BPOSX(b), BPOSX(a)) >= 6) continue;
@@ -2920,12 +2954,13 @@ int Battle::NearestEnemy(int x) const {
 
 // Los aliados disparan cuando tienen un enemigo en la mira y de vez en cuando al azar.
 void Battle::Sub_AllyFire() {
-    if (!wide_) {
+    if (!wide_ || !allyAutoFire_) {
         return;
     }
     for (int x = allyBegin_; x <= lastTank_; ++x) {
         const u8 f = TFLAGS(x);
         if (!(f & 0x80) || f >= 0xE0) continue;
+        if (!IsBossLevel() && !IsVersus() && AimsAtEagleAt(x, 13, 14, 1)) continue;      // no le tiran a su propia aguila (ni a sus muros)
         const u8 roll = Sub_D44D_generate_random_number();
         bool inLine = false;
         const int e = NearestEnemy(x);
@@ -2947,16 +2982,25 @@ void Battle::Sub_AllyFire() {
 
 void Battle::SpawnAllies(int owner) {
     const int cx = TPOSX(owner), cy = TPOSY(owner);
-    const int offsets[4][2] = {{-32, 0}, {32, 0}, {0, -32}, {0, 32}};
-    int placed = 0;
+    // lugares alrededor del jugador, en orden; se saltan los que caerian sobre el aguila de los jugadores (al aparecer, un aliado
+    // borra lo que haya debajo y se llevaria puesta el aguila)
+    static const int offsets[10][2] = {{-32, 0}, {32, 0}, {0, -32}, {0, 32}, {-32, -32}, {32, -32}, {-64, 0}, {64, 0}, {0, -64}, {-64, -32}};
+    int placed = 0, tried = 0;
     for (int slot = allyBegin_; slot <= lastTank_ && placed < 2; ++slot) {
         if (TFLAGS(slot) != 0) continue;
-        const int ox = offsets[placed][0], oy = offsets[placed][1];
-        int x = cx + ox, y = cy + oy;
-        x = (x + 4) & ~7;                                // alineados a 8 px: asi pueden elegir rumbo como los enemigos
-        y = (y + 4) & ~7;
-        x = x < 8 ? 8 : (x > 424 ? 424 : x);
-        y = y < 24 ? 24 : (y > 0xE8 ? 0xE8 : y);
+        int x = 0, y = 0;
+        bool found = false;
+        while (tried < 10 && !found) {
+            const int ox = offsets[tried][0], oy = offsets[tried][1];
+            ++tried;
+            x = (cx + ox + 4) & ~7;                      // alineados a 8 px: asi pueden elegir rumbo como los enemigos
+            y = (cy + oy + 4) & ~7;
+            x = x < 8 ? 8 : (x > 424 ? 424 : x);
+            y = y < 24 ? 24 : (y > 0xE8 ? 0xE8 : y);
+            const bool onBase = !IsBossLevel() && !IsVersus() && std::abs(x - 216) < 24 && y > 200;
+            found = !onBase;
+        }
+        if (!found) break;
         TPOSX(slot) = x;
         TPOSY(slot) = y;
         TTYPE(slot) = 0xA0;
@@ -3152,6 +3196,26 @@ int Battle::BulletOwner(int b) const {
 int Battle::BulletShooter(int b) const {
     if (!wide_) return b & 0x07;
     return b >= 20 ? b - 20 : b;
+}
+
+void Battle::DebugFire(int tank) {
+    Sub_E08C_fire_bullet(tank);
+}
+
+void Battle::DebugBareEagle() {
+    R(ram_shovel_timer) = 0;
+    DrawBareBase();
+}
+
+void Battle::DebugAllyScenario() {
+    DebugBareEagle();
+    SpawnAllies(0);
+    DebugClearEnemies();
+    for (int i = 0; i < 3; ++i) {
+        const int e = DebugSpawnEnemy(i % 2, false);
+        if (e >= 0) SetTankPos(e, 80 + i * 90, 40 + i * 12);
+    }
+    R(ram_clock_timer) = 0x0A;                             // los enemigos quedan quietos un rato (los aliados no se congelan)
 }
 
 void Battle::DebugKillAllEnemies() {

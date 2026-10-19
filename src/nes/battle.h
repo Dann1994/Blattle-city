@@ -264,6 +264,14 @@ public:
     int DebugSpawnEnemy(int type, bool flashing);
     void DebugSpawnBonus(int bonusId);   // 0 casco, 1 reloj, 2 pala, 3 estrella, 4 granada, 5 tanque, 6 pistola (extension)
     void DebugKillAllEnemies();
+    int BulletStatus(int i) const { return wide_ ? wd_.bstatus[i] : R(ram_bullet_status + i); }     // estado de la bala del slot i (0x4x: en vuelo)
+    void DebugFire(int tank);                          // hace disparar a ese tanque (si puede)
+    void DebugClearBullets() { Sub_E409_clear_bullet_status(); }
+    void DebugAllyAutoFire(bool on) { allyAutoFire_ = on; }      // pruebas: los aliados dejan de disparar solos
+    void DebugBareEagle();                             // el aguila de los jugadores sin muros alrededor
+    // Escenario de pruebas de los aliados: aguila sin muros, dos aliados del jugador 1 y enemigos quietos (con el reloj) para que se vea
+    // que los aliados no le disparan al aguila, que sus balas no lastiman a los jugadores y que los enemigos que matan suman al dueño.
+    void DebugAllyScenario();
     void DebugRespawnPlayer(int player);
     void DebugClearEnemies();
     void DebugSetTankFlags(int i, u8 flags);           // solo pruebas
@@ -483,6 +491,7 @@ private:
     int enemyTotal_ = 20;
     int level_ = 0;
     StageSpec spec_;
+    bool allyAutoFire_ = true;
     int playerTeam_[4] = {0, 1, 0, 1};
     int vsTeam_[kMaxTanks] = {};                          // equipo de cada tanque con IA (los jugadores usan playerTeam_)
     bool vsEagleAlive_[2] = {false, false};

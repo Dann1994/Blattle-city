@@ -2360,6 +2360,188 @@ void TestLanSharedMaps() {
     CHECK(h2.AllMembersHaveMaps() && h2.SharedMaps().empty());
 }
 
+// ---------------------------------------------------------------------------
+// IA de aliados (item de aliados): escenario de pruebas
+// ---------------------------------------------------------------------------
+
+struct AllyFixture {
+    std::unique_ptr<nes::Battle> b;
+    int a0 = 0, a1 = 0;               // slots de los dos aliados del jugador 1
+};
+
+void ArenaBlocks(u8 blocks[14][27]) {                                  // campo vacio con un marco de hierro (las balas no se pierden)
+    std::memset(blocks, 13, 14 * 27);
+    for (int c = 0; c < 27; ++c) blocks[0][c] = 9;
+    for (int r = 0; r < 14; ++r) blocks[r][0] = blocks[r][26] = 9;
+    for (int c = 0; c < 27; ++c) if (c < 9 || c > 17) blocks[13][c] = 9;
+}
+
+std::unique_ptr<AllyFixture> MakeAllyScene(nes::Battle::FriendlyFire ff, bool autoFire = false) {
+    auto fx = std::make_unique<AllyFixture>();
+    fx->b = std::make_unique<nes::Battle>();
+    nes::Battle& b = *fx->b;
+    b.SetWide(true);
+    b.SetLevel(1);
+    b.NewGame(1, 1);
+    b.SetFriendlyFire(ff);
+    u8 blocks[14][27];
+    ArenaBlocks(blocks);
+    b.LoadWideStage(blocks);
+    b.StartStage();
+    for (int f = 0; f < 160; ++f) b.RunFrame();                         // el jugador aparece
+    b.SpawnAllies(0);
+    for (int f = 0; f < 160; ++f) b.RunFrame();                         // y sus dos aliados
+    fx->a0 = b.LastEnemy() + 1;
+    fx->a1 = fx->a0 + 1;
+    b.R(nes::ram_clock_timer) = 0x0A;                                   // enemigos quietos
+    if (!autoFire) b.DebugAllyAutoFire(false);                          // los aliados solo disparan cuando la prueba lo pide
+    b.DebugClearBullets();
+    return fx;
+}
+
+bool EagleStands(const nes::Battle& b) { return (b.Tile(26, 28) & 0xFC) == 0xC8 && (b.Tile(27, 29) & 0xFC) == 0xC8; }
+
+void StepAlone(nes::Battle& b, int frames) {
+    for (int f = 0; f < frames; ++f) {
+        b.R(nes::ram_clock_timer) = 0x0A;
+        b.RunFrame();
+    }
+}
+
+void TestAllyRules() {
+    std::printf("[aliados] no le tiran a su aguila, sus balas no lastiman (salvo dano amigo), las balas se anulan y los puntos son del dueño\n");
+    using FF = nes::Battle::FriendlyFire;
+    // ---- 1) la bala de un aliado no destruye el aguila de los jugadores; la de un jugador si (como en el original) ----
+    {
+        auto fx = MakeAllyScene(FF::Off);
+        nes::Battle& b = *fx->b;
+        b.DebugBareEagle();
+        CHECK(EagleStands(b));
+        b.DebugSetTankFlags(0, 0);                                        // el jugador fuera del camino
+        b.SetTankPos(fx->a0, 216, 150);
+        b.DebugSetTankFlags(fx->a0, 0xA2);                                // mirando hacia abajo, al aguila
+        b.DebugFire(fx->a0);
+        StepAlone(b, 60);
+        CHECK(EagleStands(b));                                            // la bala se apago sin tocarla
+        CHECK(b.R(nes::ram_game_over_flag) == nes::con_not_game_over);
+        // control: una bala de jugador SI la destruye
+        auto cx = MakeAllyScene(FF::Off);
+        nes::Battle& c = *cx->b;
+        c.DebugBareEagle();
+        c.SetTankPos(0, 216, 150);
+        c.DebugSetTankFlags(0, 0xA2);
+        c.DebugFire(0);
+        StepAlone(c, 60);
+        CHECK(!EagleStands(c) || c.R(nes::ram_game_over_flag) != nes::con_not_game_over);
+    }
+    // ---- 2) los aliados no apuntan al aguila: aunque se queden mirando hacia ella no disparan ----
+    {
+        auto fx = MakeAllyScene(FF::Off, true);
+        nes::Battle& b = *fx->b;
+        b.DebugBareEagle();
+        b.DebugSetTankFlags(0, 0);
+        for (int f = 0; f < 80; ++f) { b.SetTankPos(fx->a0, 216, 160); b.SetTankPos(fx->a1, 150, 232); b.R(nes::ram_clock_timer) = 0x0A; b.RunFrame(); }
+        b.DebugClearBullets();
+        int shots = 0;
+        for (int f = 0; f < 400; ++f) {
+            b.SetTankPos(fx->a0, 216, 160);
+            b.DebugSetTankFlags(fx->a0, 0xA2);                            // arriba del aguila, mirandola
+            b.SetTankPos(fx->a1, 150, 232);
+            b.DebugSetTankFlags(fx->a1, 0xA3);                            // a su izquierda, mirandola
+            b.R(nes::ram_clock_timer) = 0x0A;
+            b.RunFrame();
+            if ((b.BulletStatus(fx->a0) & 0xF0) == 0x40 || (b.BulletStatus(fx->a1) & 0xF0) == 0x40) ++shots;
+        }
+        CHECK(EagleStands(b));
+        CHECK_EQ(shots, 0);
+    }
+    // ---- 3) una bala de aliado contra un jugador: impacta y se apaga, sin dano si no hay dano amigo ----
+    for (FF mode : {FF::Off, FF::Stun, FF::Damage}) {
+        auto fx = MakeAllyScene(mode);
+        nes::Battle& b = *fx->b;
+        b.SetUpgrade(0, 0x40);
+        b.SetHelmet(0, 0);
+        b.SetTankPos(0, 300, 100);
+        b.DebugSetTankFlags(0, 0xA0);
+        b.SetTankPos(fx->a0, 220, 100);
+        b.DebugSetTankFlags(fx->a0, 0xA3);                                // mirando hacia el jugador
+        b.DebugFire(fx->a0);
+        const int bs = fx->a0;
+        StepAlone(b, 1);
+        b.SetTankPos(0, 300, 100);
+        for (int f = 0; f < 40; ++f) {
+            b.SetTankPos(0, 300, 100);
+            b.R(nes::ram_clock_timer) = 0x0A;
+            b.RunFrame();
+        }
+        CHECK((b.BulletStatus(bs) & 0xF0) != 0x40);          // la bala ya no vuela
+        if (mode == FF::Damage) CHECK_EQ(b.Upgrade(0), 0x20);              // dano amigo: pierde un nivel de arma
+        else CHECK_EQ(b.Upgrade(0), 0x40);                                 // si no, nada
+        CHECK(b.TankFlags(0) >= 0x80 && b.TankFlags(0) < 0xE0);            // y sigue vivo
+    }
+    // ---- 4) las balas de los jugadores y de los aliados se anulan entre si ----
+    {
+        auto fx = MakeAllyScene(FF::Off);
+        nes::Battle& b = *fx->b;
+        b.SetTankPos(0, 240, 100);
+        b.DebugSetTankFlags(0, 0xA1);                                      // el jugador mira a la izquierda
+        b.SetTankPos(fx->a0, 160, 100);
+        b.DebugSetTankFlags(fx->a0, 0xA3);                                 // el aliado a la derecha
+        b.DebugFire(0);
+        b.DebugFire(fx->a0);
+        CHECK((b.BulletStatus(0) & 0xF0) == 0x40 && (b.BulletStatus(fx->a0) & 0xF0) == 0x40);
+        for (int f = 0; f < 20; ++f) {
+            b.SetTankPos(0, 240, 100);
+            b.R(nes::ram_clock_timer) = 0x0A;
+            b.RunFrame();
+        }
+        CHECK((b.BulletStatus(0) & 0xF0) != 0x40 && (b.BulletStatus(fx->a0) & 0xF0) != 0x40);
+        CHECK(b.PlayerHits(0) == 0 && b.Upgrade(0) == 0);                  // y ninguna toco al jugador
+    }
+    // ---- 5) los enemigos que matan los aliados suman al jugador que agarro el item ----
+    {
+        auto fx = MakeAllyScene(FF::Off);
+        nes::Battle& b = *fx->b;
+        const int e = b.DebugSpawnEnemy(0, false);
+        CHECK(e >= 0);
+        StepAlone(b, 120);                                                 // el enemigo termina de aparecer
+        const int before = b.Score(0);
+        const int kills = b.KillCount(0, 0);
+        b.DebugSetTankFlags(0, 0);                                         // el jugador no estorba
+        b.SetTankPos(e, 220, 100);
+        b.DebugSetTankFlags(e, 0xA0);
+        b.SetTankPos(fx->a0, 140, 100);
+        b.DebugSetTankFlags(fx->a0, 0xA3);
+        b.DebugFire(fx->a0);
+        for (int f = 0; f < 40; ++f) {
+            b.SetTankPos(e, 220, 100);
+            b.R(nes::ram_clock_timer) = 0x0A;
+            b.RunFrame();
+        }
+        CHECK(b.TankFlags(e) < 0x80 || b.TankFlags(e) == 0);               // el enemigo cayo
+        CHECK_EQ(b.Score(0), before + 100);
+        CHECK_EQ(b.KillCount(0, 0), kills + 1);
+    }
+    // ---- el escenario de prueba jugable arma todo esto ----
+    {
+        nes::Battle b;
+        b.SetWide(true);
+        b.SetLevel(1);
+        b.NewGame(1, 1);
+        u8 blocks[14][27];
+        ArenaBlocks(blocks);
+        b.LoadWideStage(blocks);
+        b.StartStage();
+        for (int f = 0; f < 160; ++f) b.RunFrame();
+        b.DebugAllyScenario();
+        for (int f = 0; f < 200; ++f) b.RunFrame();
+        int allies = 0;
+        for (int x = b.LastEnemy() + 1; x <= b.LastTank(); ++x) allies += b.TankFlags(x) != 0 ? 1 : 0;
+        CHECK_EQ(allies, 2);
+        CHECK(EagleStands(b));
+    }
+}
+
 void TestGameOverScreen() {
     std::printf("[pantallas] sin base o sin jugadores aparece GAME OVER, luego HI-SCORE si hay record y vuelve al titulo\n");
     auto fx = MakeFlow(1, 2);
@@ -2560,6 +2742,7 @@ int main() {
     TestCustomLevels();
     TestVersusMode();
     TestLanSharedMaps();
+    TestAllyRules();
     TestBossSpawnPointsAnyPlayerCount();
     TestBossDifficultyScaling();
     TestEnemyItemsAndShield();
