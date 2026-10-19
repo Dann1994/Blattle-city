@@ -2319,7 +2319,8 @@ int RunWindow(TestScreen& screen, double selfTestSeconds, const std::string& ass
                     voiceRetry = GetTime() + 3.0;
                 }
                 if (IsKeyPressed(KEY_TAB) || AnyPadPressed(GAMEPAD_BUTTON_MIDDLE_LEFT) ||
-                    (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && GetMouseX() < GetScreenWidth() / 5 && GetMouseY() < GetScreenHeight() / 12)) voice.ToggleMute();
+                    (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && GetMouseX() < (g_touch.Enabled() ? GetScreenWidth() / 3 : GetScreenWidth() / 5) &&
+                                                          GetMouseY() < (g_touch.Enabled() ? GetScreenHeight() / 7 : GetScreenHeight() / 12))) voice.ToggleMute();
                 std::vector<uint8_t> pk;
                 while (voice.PopPacket(pk)) vl->SendVoice(pk);
                 int who;
@@ -2524,19 +2525,23 @@ int RunWindow(TestScreen& screen, double selfTestSeconds, const std::string& ass
         DrawTexturePro(tex, Rectangle{0, 0, static_cast<float>(app::kScreenW), static_cast<float>(app::kScreenH)},
                        Rectangle{(sw - dw) / 2, (sh - dh) / 2, dw, dh}, Vector2{0, 0}, 0.0f, WHITE);
         g_touch.Draw();
-        if (voice.Active()) {                                                 // indicador del chat de voz (arriba a la izquierda; tocarlo tambien silencia)
-            const int fs = std::max(14, GetScreenHeight() / 34);
+        if (voice.Active()) {                                                 // boton / indicador del chat de voz (arriba a la izquierda; tocarlo silencia)
+            const bool touch = g_touch.Enabled();
+            const int fs = touch ? std::max(22, GetScreenHeight() / 20) : std::max(14, GetScreenHeight() / 34);
             const char* st = !voice.MicAvailable() ? "MIC: SIN MICROFONO" : (voice.Muted() ? "MIC: SILENCIADO" : (voice.TransmittingNow() ? "MIC: HABLANDO" : "MIC: ACTIVO"));
             const Color col = !voice.MicAvailable() ? Color{255, 120, 80, 255} : (voice.Muted() ? Color{255, 90, 90, 255} : Color{120, 255, 120, 255});
-            DrawRectangle(4, 4, MeasureText(st, fs) + 12, fs + 8, Color{0, 0, 0, 150});
-            DrawText(st, 10, 8, fs, col);
+            const int pad = touch ? fs / 2 : 6;
+            DrawRectangle(4, 4, MeasureText(st, fs) + 2 * pad, fs + 2 * pad, Color{0, 0, 0, 170});
+            if (touch) DrawRectangleLines(4, 4, MeasureText(st, fs) + 2 * pad, fs + 2 * pad, col);
+            DrawText(st, 4 + pad, 4 + pad, fs, col);
             int row = 1;
             if (const app::Lan* vl = screen.VoiceLan()) {
                 for (int id = 0; id < 8; ++id) {
                     if (id != vl->MyId() && voice.Speaking(id)) {
                         const std::string who = "> " + screen.SpeakerName(id);
-                        DrawRectangle(4, 4 + row * (fs + 8), MeasureText(who.c_str(), fs) + 12, fs + 8, Color{0, 0, 0, 150});
-                        DrawText(who.c_str(), 10, 8 + row * (fs + 8), fs, Color{255, 230, 120, 255});
+                        const int y = 4 + fs + 2 * pad + (row - 1) * (fs + 8) + 4;
+                        DrawRectangle(4, y, MeasureText(who.c_str(), fs) + 12, fs + 8, Color{0, 0, 0, 150});
+                        DrawText(who.c_str(), 10, y + 4, fs, Color{255, 230, 120, 255});
                         ++row;
                     }
                 }

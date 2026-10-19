@@ -266,7 +266,7 @@ struct Lan::Impl {
 // La version del programa para el juego en red: tiene que ser la misma en Windows y en Android (se compilan en momentos distintos),
 // asi que es una constante que se cambia a mano cada vez que cambia la simulacion o el protocolo.
 std::string Lan::BuildId() {
-    return "BCNES-2026.10.20-voice";
+    return "BCNES-2026.10.21-voice2";
 }
 
 Lan::Lan(uint16_t port) : impl_(new Impl) {
@@ -893,7 +893,7 @@ void Lan::Update() {
                 if (kind == 'H' && f.size() >= 2) member->mapsOk = f[1] == "1";
                 if (kind == 'A' && f.size() >= 2) {                                    // voz de un miembro: la oigo y la mando a los demas
                     std::vector<uint8_t> pk;
-                    if (Base64Decode(f[1], pk) && !pk.empty() && pk.size() < 400) {
+                    if (Base64Decode(f[1], pk) && !pk.empty() && pk.size() < 700) {
                         impl_->voiceIn.emplace_back(member->id, pk);
                         while (impl_->voiceIn.size() > 100) impl_->voiceIn.pop_front();
                         const std::string out = "BCNES1a|" + std::to_string(member->id) + "|" + f[1];
@@ -1007,7 +1007,7 @@ void Lan::Update() {
                     error_ = "LA PARTIDA ESTÁ LLENA O YA EMPEZÓ";
                 } else if (kind == 'a' && f.size() >= 3 && state_ == State::Joined) {
                     std::vector<uint8_t> pk;
-                    if (Base64Decode(f[2], pk) && !pk.empty() && pk.size() < 400) {
+                    if (Base64Decode(f[2], pk) && !pk.empty() && pk.size() < 700) {
                         impl_->voiceIn.emplace_back(ToInt(f[1]), pk);
                         while (impl_->voiceIn.size() > 100) impl_->voiceIn.pop_front();
                     }

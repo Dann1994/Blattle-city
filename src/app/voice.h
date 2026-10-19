@@ -1,7 +1,7 @@
 #pragma once
 
 // Chat de voz de las partidas en red. Todo pasa por la sala (el anfitrion retransmite), asi que funciona igual en la misma red y por internet.
-//   microfono (8 kHz, 16 bits) -> deteccion de voz (no manda silencio) -> ADPCM de 4 bits (32 kbps) -> paquetes de 60 ms -> sala
+//   microfono (16 kHz, 16 bits) -> deteccion de voz (no manda silencio) -> ADPCM de 4 bits (64 kbps) -> paquetes de 40 ms -> sala
 //   sala -> un buffer por hablante -> mezcla -> altavoz
 // Este archivo no depende de la red ni de la ventana: el microfono y el altavoz los ponen las plataformas (Windows: waveIn; Android: AudioRecord por JNI;
 // la reproduccion la hace el juego con un AudioStream de raylib que pide muestras con Mix()).
@@ -20,9 +20,9 @@
 
 namespace app {
 
-constexpr int kVoiceRate = 8000;                 // muestras por segundo
-constexpr int kVoiceFrame = 160;                 // 20 ms
-constexpr int kVoiceFramesPerPacket = 3;         // 60 ms por paquete
+constexpr int kVoiceRate = 16000;                // muestras por segundo
+constexpr int kVoiceFrame = 320;                 // 20 ms
+constexpr int kVoiceFramesPerPacket = 2;         // 40 ms por paquete
 
 // ---- ADPCM IMA de 4 bits ----
 struct AdpcmState {
@@ -85,7 +85,7 @@ public:
     void ClearSpeakers();
 
     // Parametros (las pruebas los usan)
-    static constexpr int kPrimeSamples = kVoiceRate / 10;                      // 100 ms de colchon antes de empezar a sonar
+    static constexpr int kPrimeSamples = kVoiceRate * 6 / 100;                // 60 ms de colchon antes de empezar a sonar
     static constexpr int kMaxBuffered = kVoiceRate;                            // 1 s como maximo por hablante
 
 private:
