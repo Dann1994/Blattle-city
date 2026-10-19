@@ -283,7 +283,7 @@ std::string PadButtonName(int b) {
 class TestScreen {
 public:
     enum class Scene { Title, PlayMenu, Lobby, Settings, KeysPlayer, KeysList, PadSettings, Construction, Pause, Game,
-                       LanMenu, NameEntry, LanHost, LanSearch, LanJoined, OnlineMenu, CodeEntry, LateJoin, Editor, OwnLevels, VsMenu, JoinMenu, ModeMenu };
+                       LanMenu, NameEntry, LanHost, LanSearch, LanJoined, OnlineMenu, CodeEntry, LateJoin, Editor, OwnLevels, VsMenu, JoinMenu, ModeMenu, ConfirmExit };
     enum class Capture { None, Key, Pad };
     struct Rumble { int slot; float left, right, seconds; float delay = 0.0f; };   // delay: segundos hasta empezar
     enum class Ev { Up, Down, Left, Right, Accept, Back, Fire, Start };
@@ -670,7 +670,8 @@ public:
 
     int MenuItemCount() const {
         switch (scene_) {
-            case Scene::Title: return 3;
+            case Scene::Title: return 4;
+            case Scene::ConfirmExit: return 2;
             case Scene::PlayMenu: return 2;
             case Scene::ModeMenu: return 4;
             case Scene::VsMenu: return 5;
@@ -689,6 +690,8 @@ public:
     void GoBack() {
         switch (scene_) {
             case Scene::PlayMenu: ReturnToTitle(); break;
+            case Scene::Title: scene_ = Scene::ConfirmExit; menuIndex_ = 0; break;            // Atras en el titulo: preguntar si se sale
+            case Scene::ConfirmExit: scene_ = Scene::Title; menuIndex_ = 3; break;
             case Scene::Settings: scene_ = settingsReturn_; menuIndex_ = settingsReturn_ == Scene::Pause ? 1 : 2; break;
             case Scene::KeysPlayer: scene_ = Scene::Settings; menuIndex_ = 0; break;
             case Scene::KeysList: scene_ = Scene::KeysPlayer; menuIndex_ = keysPlayer_; break;
@@ -1161,7 +1164,12 @@ public:
                     editor_ = std::make_unique<app::LevelEditor>(app::LevelEditor::Target::Own);
                     scene_ = Scene::Editor;
                 }
-                else { settingsReturn_ = Scene::Title; scene_ = Scene::Settings; menuIndex_ = 0; }
+                else if (index == 2) { settingsReturn_ = Scene::Title; scene_ = Scene::Settings; menuIndex_ = 0; }
+                else { scene_ = Scene::ConfirmExit; menuIndex_ = 0; }                  // SALIR: primero se pregunta
+                break;
+            case Scene::ConfirmExit:
+                if (index == 1) quit_ = true;                                          // SI: se cierra el juego
+                else { scene_ = Scene::Title; menuIndex_ = 3; }
                 break;
             case Scene::VsMenu:
                 if (index == 0) {
@@ -1454,7 +1462,7 @@ public:
                 v.scrollY = titleScroll_;
                 v.p1Score = lastScore_;
                 v.hiScore = hiScore_;
-                v.items = {"JUGAR", "CONSTRUCCIÓN", "CONFIGURACIÓN"};
+                v.items = {"JUGAR", "CONSTRUCCIÓN", "CONFIGURACIÓN", "SALIR"};
                 v.footer = NavHint();
                 break;
             case Scene::VsMenu: {
@@ -1477,6 +1485,11 @@ public:
                 v.title = "EN RED";
                 v.items = {"CREAR PARTIDA", "UNIRSE", "NOMBRE: " + (g_cfg.playerName.empty() ? std::string("(SIN NOMBRE)") : g_cfg.playerName), "VOLVER"};
                 v.note = lanNote_;
+                v.footer = NavHint();
+                break;
+            case Scene::ConfirmExit:
+                v.title = "¿SALIR DEL JUEGO?";
+                v.items = {"NO", "SÍ"};
                 v.footer = NavHint();
                 break;
             case Scene::ModeMenu:
@@ -1784,6 +1797,7 @@ public:
         const FF f = battle_->GetFriendlyFire();
         return f == FF::Off ? "NO" : (f == FF::Stun ? "PARALIZA" : "DAÑA");
     }
+    bool WantsQuit() const { return quit_; }                 // se eligio SALIR y se confirmo
     bool InEditor() const { return scene_ == Scene::Editor && editor_; }
     void EditorStep(const app::EditorKeys& keys) {
         if (!editor_) return;
@@ -1848,6 +1862,7 @@ private:
     mutable std::unique_ptr<app::LevelEditor> editor_;      // editor de niveles integrado (CONSTRUCCION)
     mutable std::unique_ptr<nes::Battle> slotsPreview_;      // fondo vacio de la lista de niveles propios
     bool ownMode_ = false;                                   // jugando la serie de niveles propios (casilleros)
+    bool quit_ = false;
     bool vsMode_ = false;                                    // modo batalla vs
     bool netMode_ = false;                                   // se esta armando una sala en red (el modo se elige para crearla)
     bool vsOwnNet_ = false;                                  // batalla vs en red con un mapa propio del anfitrion
@@ -2057,7 +2072,7 @@ int RunWindow(TestScreen& screen, double selfTestSeconds, const std::string& ass
     double acc = 0.0;
     constexpr double kStep = 1.0 / 60.0;
 
-    while (!WindowShouldClose() && !(selfTestSeconds > 0 && GetTime() > selfTestSeconds)) {
+    while (!WindowShouldClose() && !screen.WantsQuit() && !(selfTestSeconds > 0 && GetTime() > selfTestSeconds)) {
         ServiceRumbleTimers();
         // ---- dispositivo en uso: los textos de ayuda cambian entre teclado y mando ----
         const int keyNow = GetKeyPressed();
