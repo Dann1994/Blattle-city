@@ -1717,6 +1717,7 @@ public:
             "F5 GRANADA",
             "F6 TANQUE",
             "F7 PISTOLA",
+            "CTRL+F1-F5 ITEMS NUEVOS",
             "F8 MUSICA",
             "F9 RECORD",
             "F10 GAME OVER",
@@ -1784,8 +1785,12 @@ public:
     void Do(const std::string& name) {
         if (name.size() == 2 && (name[0] == 'e' || name[0] == 'f')) {
             battle_->DebugSpawnEnemy(name[1] - '0', name[0] == 'f');
-        } else if (name.size() == 2 && name[0] == 'b') {
-            battle_->DebugSpawnBonus(name[1] - '0');
+        } else if (name.size() >= 2 && name[0] == 'g' && std::isdigit(static_cast<unsigned char>(name[1]))) {
+            battle_->DebugGiveItem(std::atoi(name.c_str() + 1), 0);              // prueba: el jugador 1 agarra el item N (g9 = helicoptero...)
+        } else if (name.size() >= 2 && name[0] == 'G' && std::isdigit(static_cast<unsigned char>(name[1]))) {
+            battle_->DebugGiveItem(std::atoi(name.c_str() + 1), battle_->Players());   // prueba: el primer enemigo agarra el item N
+        } else if (name.size() >= 2 && name[0] == 'b' && std::isdigit(static_cast<unsigned char>(name[1]))) {
+            battle_->DebugSpawnBonus(std::atoi(name.c_str() + 1));
         } else if (name.size() == 2 && name[0] == 's') {
             battle_->DebugPlaySound(name[1] - '0');
         } else if (!name.empty() && name[0] == 'm' && name.size() >= 3) {
@@ -2269,7 +2274,8 @@ int RunWindow(TestScreen& screen, double selfTestSeconds, const std::string& ass
             if (IsKeyPressed(KEY_ONE + i)) screen.Battle().DebugSpawnEnemy(i, shift);
         }
         for (int i = 0; i < 7 && dbg; ++i) {
-            if (IsKeyPressed(KEY_F1 + i)) screen.Battle().DebugSpawnBonus(i);
+            const bool ctrl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+            if (IsKeyPressed(KEY_F1 + i) && (!ctrl || i < 5)) screen.Battle().DebugSpawnBonus(ctrl ? 8 + i : i);   // con CTRL: los items nuevos (8 a 12)
         }
         if (dbg && IsKeyPressed(KEY_F12)) screen.Battle().DebugSpawnBonus(7);
         for (int i = 0; i < 3 && dbg; ++i) {

@@ -173,6 +173,33 @@ public:
     // ---- MODO BATALLA VS (dos equipos; el equipo 0 es el amarillo de la izquierda y el 1 el rojo de la derecha) ----
     bool IsVersus() const { return wide_ && level_ > 0 && spec_.active && spec_.versus; }
     bool IsRoyale() const { return IsVersus() && spec_.royale; }
+
+    // ---- items nuevos (ids 8..12): invisible, helicoptero aliado, minas, portal y velocidad ----
+    static constexpr int kBonusGhost = 8, kBonusHeli = 9, kBonusMine = 10, kBonusPortal = 11, kBonusSpeed = 12;
+    static constexpr int kItemFrames = 0x0A * 64;             // lo mismo que dura el casco (unos 10 segundos)
+    static constexpr int kMaxHelis = 6, kMaxMines = 9, kMaxBooms = 12;
+    struct Heli { bool on = false; int owner = -1; int x = 0, y = 0, state = 0, timer = 0, life = 0, target = -1, frame = 0, dir = 0, acc = 0; };   // owner -1: de los enemigos; dir 0..7 = hacia donde mira (0 arriba, de a 45 grados en el sentido del reloj)
+    struct Mine { bool on = false; int owner = -1; int col = 0, row = 0, age = 0, seq = 0; };
+    struct Portal { bool on = false; int col[2] = {0, 0}, row[2] = {0, 0}, uses = 0; };
+    struct Boom { int x = 0, y = 0, t = 0; };
+    const Heli& HeliState(int i) const { return heli_[i]; }
+    const Mine& MineState(int i) const { return mines_[i]; }
+    bool MineVisible(int i) const { return mines_[i].on && (mines_[i].owner >= 0 || (mines_[i].age < 180 && ((mines_[i].age >> 3) & 1) == 0)); }
+    const Portal& PortalState() const { return portal_; }
+    const Boom& BoomState(int i) const { return booms_[i]; }
+    bool TankGhost(int x) const { return x >= 0 && x < kMaxTanks && ghostT_[x] > 0; }
+    bool TankFast(int x) const { return x >= 0 && x < kMaxTanks && speedT_[x] > 0; }
+    int HeliCount() const { int n = 0; for (const auto& h : heli_) n += h.on ? 1 : 0; return n; }
+    int MineCount() const { int n = 0; for (const auto& m : mines_) n += m.on ? 1 : 0; return n; }
+    struct ExtraIcon { int x, y, id; };                         // iconos de items nuevos que el renderer dibuja (parpadean como los demas)
+    int ExtraIcons(ExtraIcon* out, int max) const;
+    void DebugSpawnHeli(int owner) { SpawnHeli(owner); }
+    void DebugPlaceMines(int owner, int n) { PlaceMines(owner, n); }
+    void DebugMakePortal() { MakePortal(); }
+    void DebugSetGhost(int x, int frames) { ghostT_[x] = frames; }
+    void DebugSetEnemyGhost(int frames) { enemyGhostT_ = frames; }
+    void DebugSetSpeed(int x, int frames) { speedT_[x] = frames; }
+    void DebugGiveItem(int id, int player) { if (player < nPlayers_) BonusHandler(id, player); else EnemyBonus(id, player); }
     static constexpr int kRoyaleSize = 8;                        // combatientes de un battle royale
     int RoyaleWinner() const { return vsWinner_ >= 10 ? vsWinner_ - 10 : -1; }     // quien gano (si fue uno solo)
     bool RoyaleTimed() const { return IsRoyale() && spec_.royaleTimed; }
@@ -479,6 +506,22 @@ private:
     bool Sub_E972_try_to_pick_up_bonus();
     void Sub_E8BE_spawn_bonus();
     void BonusHandler(int id, int player);
+    // items nuevos
+    void Sub_Extras();                                            // un cuadro de helicopteros, minas, portal y temporizadores
+    void SpawnHeli(int owner);
+    void PlaceMines(int owner, int count);
+    void MakePortal();
+    bool ExtraHostile(int owner, int tank);                       // el tanque es enemigo de lo que puso `owner` (jugador, o -1 = los enemigos)
+    void ExtraKill(int tank, int owner);                          // lo destruye un helicoptero o una mina (el casco aguanta una vez)
+    void AddBoom(int x, int y);
+    bool FreeBlockForExtra(int col, int row);
+    Heli heli_[kMaxHelis];
+    Mine mines_[kMaxMines];
+    Portal portal_;
+    Boom booms_[kMaxBooms];
+    int mineSeq_ = 0;
+    int ghostT_[kMaxTanks] = {}, speedT_[kMaxTanks] = {}, portalCd_[kMaxTanks] = {};
+    int enemyGhostT_ = 0;
     void EnemyBonus(int id, int x);                  // un enemigo agarra un item (campo ancho)
     void SetEnemyKind(int x, int kind);
     int RandomEnemyKind();

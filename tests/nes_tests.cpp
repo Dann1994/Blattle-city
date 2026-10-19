@@ -3188,6 +3188,221 @@ void TestRoyale() {
     }
 }
 
+// Items nuevos: invisible, helicoptero aliado, minas terrestres, portal y velocidad
+std::unique_ptr<nes::Battle> MakeItemScene() {
+    auto b = std::make_unique<nes::Battle>();
+    b->SetWide(true);
+    b->SetLevel(1);
+    b->NewGame(1, 1);
+    u8 blocks[14][27];
+    std::memset(blocks, 13, sizeof(blocks));
+    b->LoadWideStage(blocks);
+    b->StartStage();
+    b->R(nes::ram_enemy_spawn_cnt) = 0;                                    // sin enemigos nuevos
+    for (int f = 0; f < 160; ++f) b->RunFrame();
+    b->DebugClearEnemies();
+    b->R(nes::ram_clock_timer) = 0x0A;                                     // los que se agreguen se quedan quietos y no disparan
+    b->DebugClearBullets();
+    b->SetHelmet(0, 0);
+    return b;
+}
+
+void TestNewItems() {
+    std::printf("[items nuevos] invisible, helicoptero aliado, minas, portal y velocidad (para jugadores y para enemigos)\n");
+    // ---- velocidad: el doble de camino por el mismo tiempo ----
+    {
+        auto run = [&](bool fast) {
+            auto b = MakeItemScene();
+            if (fast) b->DebugGiveItem(nes::Battle::kBonusSpeed, 0);
+            b->SetTankPos(0, 380, 150);
+            b->DebugSetTankFlags(0, 0xA1);                                       // mirando a la izquierda
+            const int x0 = b->TankX(0);
+            for (int f = 0; f < 60; ++f) { b->SetButtons(0, nes::con_btn_Left); b->RunFrame(); }
+            return x0 - b->TankX(0);
+        };
+        const int normal = run(false), fast = run(true);
+        CHECK(normal > 30);
+        CHECK(fast >= normal * 18 / 10 && fast <= normal * 22 / 10);
+        auto b = MakeItemScene();
+        b->DebugGiveItem(nes::Battle::kBonusSpeed, 0);
+        CHECK(b->TankFast(0));
+        for (int f = 0; f < nes::Battle::kItemFrames + 5; ++f) b->RunFrame();
+        CHECK(!b->TankFast(0));                                                // dura lo mismo que el casco
+    }
+    // ---- invisible: las balas enemigas lo atraviesan ----
+    {
+        auto shot = [&](bool ghost) {
+            auto b = MakeItemScene();
+            const int e = b->DebugSpawnEnemy(0, false);
+            for (int f = 0; f < 120; ++f) b->RunFrame();                         // el enemigo termina de aparecer
+            b->DebugSetTankFlags(0, 0xA0);
+            b->SetTankPos(0, 216, 180);
+            if (ghost) b->DebugGiveItem(nes::Battle::kBonusGhost, 0);
+            b->SetTankPos(e, 216, 60);
+            b->DebugSetTankFlags(e, 0xA2);                                       // mirando hacia abajo, al jugador
+            b->DebugFire(e);
+            for (int f = 0; f < 90; ++f) { b->SetTankPos(0, 216, 180); b->SetTankPos(e, 216, 60); b->RunFrame(); }
+            const u8 fl = b->TankFlags(0);
+            return fl >= 0x80 && fl < 0xE0;                                      // sigue en pie
+        };
+        CHECK(!shot(false));                                                     // sin el item, la bala lo destruye
+        CHECK(shot(true));                                                       // invisible: la bala pasa de largo
+        auto b = MakeItemScene();
+        b->DebugGiveItem(nes::Battle::kBonusGhost, 0);
+        CHECK(b->TankGhost(0));
+        for (int f = 0; f < nes::Battle::kItemFrames + 5; ++f) b->RunFrame();
+        CHECK(!b->TankGhost(0));
+        // enemigos que agarran el item: se vuelven invisibles (no se dibujan, solo sus disparos)
+        auto c = MakeItemScene();
+        const int e = c->DebugSpawnEnemy(0, false);
+        for (int f = 0; f < 120; ++f) c->RunFrame();
+        auto tankSprites = [&](nes::Battle& bb) {
+            int n = 0;
+            for (int i = 0; i < 64; ++i) { const nes::Sprite sp = bb.OamSprite(i); n += (sp.y < 0xEF && sp.tile >= 0x80 && sp.tile < 0xE8) ? 1 : 0; }
+            return n;
+        };
+        c->RunFrame();
+        const int before = tankSprites(*c);
+        c->DebugGiveItem(nes::Battle::kBonusGhost, e);
+        c->RunFrame();
+        CHECK(tankSprites(*c) <= before - 2);                                    // el tanque enemigo dejo de dibujarse
+    }
+    // ---- helicoptero aliado: ataca a los enemigos 10 segundos y se va ----
+    {
+        auto b = MakeItemScene();
+        const int e = b->DebugSpawnEnemy(0, false);
+        for (int f = 0; f < 120; ++f) b->RunFrame();
+        b->SetTankPos(e, 300, 100);
+        b->DebugGiveItem(nes::Battle::kBonusHeli, 0);
+        CHECK_EQ(b->HeliCount(), 1);
+        bool dead = false;
+        for (int f = 0; f < 500 && !dead; ++f) { b->SetTankPos(e, 300, 100); b->RunFrame(); dead = (b->TankFlags(e) >> 4) >= 1 && (b->TankFlags(e) >> 4) <= 7; }
+        CHECK(dead);                                                            // se poso encima y le solto la bomba
+        for (int f = 0; f < 1600; ++f) b->RunFrame();
+        CHECK_EQ(b->HeliCount(), 0);                                            // se fue de la pantalla
+        // el helicoptero enemigo ataca a los jugadores (el casco aguanta una vez)
+        auto c = MakeItemScene();
+        c->SetTankPos(0, 300, 100);
+        c->DebugGiveItem(nes::Battle::kBonusHeli, c->Players());               // (la ficha de enemigo: cualquier slot de enemigo)
+        bool hit = false;
+        for (int f = 0; f < 600 && !hit; ++f) { c->SetTankPos(0, 300, 100); c->RunFrame(); hit = (c->TankFlags(0) >> 4) >= 1 && (c->TankFlags(0) >> 4) <= 7; }
+        CHECK(hit);
+        // se puede escapar: es mas lento que el tanque, y la bomba cae donde esta el helicoptero (no persigue al tanque)
+        auto f2 = MakeItemScene();
+        f2->DebugSpawnHeli(-1);
+        f2->SetTankPos(0, 216, 150);
+        for (int f = 0; f < 700; ++f) {
+            f2->SetButtons(0, (f / 70) % 2 == 0 ? nes::con_btn_Left : nes::con_btn_Right);      // el jugador no se queda quieto
+            f2->RunFrame();
+        }
+        CHECK(f2->TankFlags(0) >= 0x80 && f2->TankFlags(0) < 0xE0);
+        // el helicoptero mira hacia donde va
+        auto g = MakeItemScene();
+        g->SetTankPos(0, 380, 100);
+        g->DebugSpawnHeli(0);
+        const auto e0 = g->DebugSpawnEnemy(0, false);
+        (void)e0;
+        for (int f = 0; f < 130; ++f) g->RunFrame();
+        CHECK(g->HeliState(0).on);
+        CHECK(g->HeliState(0).dir >= 0 && g->HeliState(0).dir < 8);
+        // los invisibles no son su blanco
+        auto d = MakeItemScene();
+        d->DebugGiveItem(nes::Battle::kBonusGhost, 0);
+        d->SetTankPos(0, 300, 100);
+        d->DebugSpawnHeli(-1);
+        for (int f = 0; f < 500; ++f) { d->SetTankPos(0, 300, 100); d->RunFrame(); }
+        CHECK(d->TankFlags(0) >= 0x80 && d->TankFlags(0) < 0xE0);
+    }
+    // ---- minas: 3 por item, hasta 9; solo las pisan los enemigos de quien las puso ----
+    {
+        auto b = MakeItemScene();
+        b->DebugGiveItem(nes::Battle::kBonusMine, 0);
+        CHECK_EQ(b->MineCount(), 3);
+        b->DebugGiveItem(nes::Battle::kBonusMine, 0);
+        b->DebugGiveItem(nes::Battle::kBonusMine, 0);
+        CHECK_EQ(b->MineCount(), 9);
+        int firstSeq = 1 << 30;
+        for (int i = 0; i < nes::Battle::kMaxMines; ++i) firstSeq = std::min(firstSeq, b->MineState(i).seq);
+        b->DebugGiveItem(nes::Battle::kBonusMine, 0);                           // con 9, saca las 3 mas viejas y pone otras 3
+        CHECK_EQ(b->MineCount(), 9);
+        int minSeq = 1 << 30;
+        for (int i = 0; i < nes::Battle::kMaxMines; ++i) minSeq = std::min(minSeq, b->MineState(i).seq);
+        CHECK(minSeq > firstSeq);
+        // todas visibles y en bloques libres
+        for (int i = 0; i < nes::Battle::kMaxMines; ++i) CHECK(b->MineVisible(i));
+        // el jugador pasa por encima de sus minas sin problema; un enemigo que la pisa se destruye
+        const auto m0 = b->MineState(0);
+        const int e = b->DebugSpawnEnemy(0, false);
+        for (int f = 0; f < 120; ++f) b->RunFrame();
+        b->SetTankPos(0, m0.col * 16 + 8, m0.row * 16 + 8);
+        for (int f = 0; f < 10; ++f) { b->SetTankPos(0, m0.col * 16 + 8, m0.row * 16 + 8); b->RunFrame(); }
+        CHECK(b->TankFlags(0) >= 0x80 && b->TankFlags(0) < 0xE0);
+        CHECK(b->MineState(0).on);
+        b->SetTankPos(e, m0.col * 16 + 8, m0.row * 16 + 8);
+        b->RunFrame();
+        CHECK(!b->MineState(0).on);
+        CHECK((b->TankFlags(e) >> 4) >= 1 && (b->TankFlags(e) >> 4) <= 7);
+        CHECK_EQ(b->MineCount(), 8);
+        // minas enemigas: parpadean 3 segundos y se vuelven invisibles; solo afectan a los jugadores
+        auto c = MakeItemScene();
+        c->DebugGiveItem(nes::Battle::kBonusMine, c->Players());
+        CHECK_EQ(c->MineCount(), 3);
+        for (int f = 0; f < 200; ++f) c->RunFrame();
+        for (int i = 0; i < nes::Battle::kMaxMines; ++i) CHECK(!c->MineVisible(i));
+        CHECK_EQ(c->MineCount(), 3);                                            // siguen ahi
+        int idx = -1;
+        for (int i = 0; i < nes::Battle::kMaxMines; ++i) if (c->MineState(i).on) idx = i;
+        const auto mm = c->MineState(idx);
+        c->SetTankPos(0, mm.col * 16 + 8, mm.row * 16 + 8);
+        c->RunFrame();
+        CHECK((c->TankFlags(0) >> 4) >= 1 && (c->TankFlags(0) >> 4) <= 7);
+    }
+    // ---- portal: dos puertas (mitad de arriba y de abajo), 3 usos ----
+    {
+        auto b = MakeItemScene();
+        b->DebugGiveItem(nes::Battle::kBonusPortal, 0);
+        const auto pt = b->PortalState();
+        CHECK(pt.on);
+        CHECK_EQ(pt.uses, 3);
+        const int low = pt.row[0] >= 8 ? 0 : 1;
+        CHECK(pt.row[low] >= 8 && pt.row[1 - low] <= 6);                         // una de la mitad de abajo y otra de la de arriba
+        int uses = 0;
+        int cur = 0;
+        for (int k = 0; k < 3; ++k) {
+            const auto p2 = b->PortalState();
+            if (!p2.on) break;
+            b->SetTankPos(0, p2.col[cur] * 16 + 8, p2.row[cur] * 16 + 8);
+            b->RunFrame();
+            CHECK_EQ(b->TankX(0), p2.col[1 - cur] * 16 + 8);                      // aparece en la otra puerta
+            CHECK_EQ(b->TankY(0), p2.row[1 - cur] * 16 + 8);
+            ++uses;
+            cur = 1 - cur;
+            for (int f = 0; f < 5; ++f) { b->SetTankPos(0, 20, 20); b->RunFrame(); }                          // sale de la puerta (si no, no vuelve a viajar)
+            for (int f = 0; f < 95; ++f) { b->SetTankPos(0, 20, 20); b->RunFrame(); }                         // y pasa el enfriamiento
+        }
+        CHECK_EQ(uses, 3);
+        CHECK(!b->PortalState().on);                                             // se uso 3 veces: desaparece
+    }
+    // ---- todo junto, igual en dos equipos ----
+    {
+        auto run = [&]() {
+            auto b = MakeItemScene();
+            const int e = b->DebugSpawnEnemy(1, false);
+            b->DebugGiveItem(nes::Battle::kBonusMine, 0);
+            b->DebugGiveItem(nes::Battle::kBonusPortal, 0);
+            b->DebugGiveItem(nes::Battle::kBonusHeli, 0);
+            b->DebugGiveItem(nes::Battle::kBonusSpeed, 0);
+            b->DebugGiveItem(nes::Battle::kBonusGhost, e);
+            for (int f = 0; f < 900; ++f) {
+                b->SetButtons(0, static_cast<u8>(((f / 25) % 4 == 0 ? nes::con_btn_Right : (f / 25) % 4 == 1 ? nes::con_btn_Up : (f / 25) % 4 == 2 ? nes::con_btn_Left : nes::con_btn_Down) | ((f % 9) < 2 ? nes::con_btn_A : 0)));
+                b->RunFrame();
+            }
+            return b->StateHash();
+        };
+        CHECK_EQ(run(), run());
+    }
+}
+
 void TestGameOverScreen() {
     std::printf("[pantallas] sin base o sin jugadores aparece GAME OVER, luego HI-SCORE si hay record y vuelve al titulo\n");
     auto fx = MakeFlow(1, 2);
@@ -3390,6 +3605,7 @@ int main() {
     TestVersusBots();
     TestVersusEightPlayers();
     TestRoyale();
+    TestNewItems();
     TestLanSharedMaps();
     TestAllyRules();
     TestSandBlock();

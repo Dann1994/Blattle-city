@@ -583,6 +583,15 @@ void Battle::Sub_C331_prepare_tanks_and_spawn_players() {
     vsAiTimer_[0] = vsAiTimer_[1] = 90;                  // batalla vs: los primeros tanques con IA salen al ratito
     vsSpawned_[0] = vsSpawned_[1] = 0;
     std::memset(teamClock_, 0, sizeof(teamClock_));
+    for (auto& h : heli_) h = Heli{};
+    for (auto& m : mines_) m = Mine{};
+    portal_ = Portal{};
+    for (auto& b : booms_) b = Boom{};
+    std::memset(ghostT_, 0, sizeof(ghostT_));
+    std::memset(speedT_, 0, sizeof(speedT_));
+    std::memset(portalCd_, 0, sizeof(portalCd_));
+    enemyGhostT_ = 0;
+    mineSeq_ = 0;
     std::memset(royaleKills_, 0, sizeof(royaleKills_));
     royaleFrames_ = spec_.royaleMinutes * 3600;
     royaleBonusT_ = 1200;
@@ -734,6 +743,7 @@ void Battle::Sub_C2E6_main_battle_script() {
     Sub_DBF1_tank_movement();
     Sub_E1FA_clear_tank_marks();
     Sub_Lava();
+    Sub_Extras();
     Sub_E02E_bullets_status_handler();
     Sub_E2A9_HQ_handler();
     Sub_E27C_players_invincibility_sprites();
@@ -961,6 +971,7 @@ void Battle::Sub_DBF1_tank_movement() {
         }
         if (run) {
             Sub_DC3D_tank_status_handler(x);
+            if (speedT_[x] > 0 && (TFLAGS(x) & 0x80) && TFLAGS(x) < 0xE0) Sub_DC3D_tank_status_handler(x);     // velocidad: el doble de pasos
         }
     }
 }
@@ -1183,7 +1194,7 @@ void Battle::Sub_DE72_pick_goal(int x) {
         int cand[4];
         int n = 0;
         for (int p = 0; p < nPlayers_; ++p) {
-            if (TFLAGS(p) != 0) {
+            if (TFLAGS(p) != 0 && ghostT_[p] == 0) {
                 cand[n++] = p;
             }
         }
@@ -1280,6 +1291,7 @@ void Battle::Status_E0(int x) {
 
 // sub_E363_tank_spawn_handler (00:E363)
 void Battle::Sub_E363_tank_spawn_handler(int x) {
+    ghostT_[x] = speedT_[x] = portalCd_[x] = 0;
     TTYPE(x) = 0;
     shieldHp_[x] = 0;
     if (x < nPlayers_) {
@@ -1498,7 +1510,7 @@ u8 Battle::AiButtons(int p) {
     const bool wander = aiWanderT_[p] > 0;                       // despues de trabarse: un rato a recorrer, sin ir tras nadie
     auto hostile = [&](int e) {
         const u8 f = TFLAGS(e);
-        return e != p && (f & 0x80) && f < 0xE0 && TeamOf(e) != myTeam;
+        return e != p && (f & 0x80) && f < 0xE0 && TeamOf(e) != myTeam && !(e < nPlayers_ && ghostT_[e] > 0);
     };
     auto rnd = [&]() { return static_cast<int>(Sub_D44D_generate_random_number()); };
     // 1) esquivar una bala rival que viene de frente (de cerca, y una sola vez por tanda)
@@ -1650,8 +1662,8 @@ void Battle::RoyaleItemsStep() {
     if (RoyaleItemCount() > 0) { royaleBonusT_ = 1200; return; }
     if (--royaleBonusT_ > 0) return;
     royaleBonusT_ = 1200;
-    static const int kAll[7] = {0, 1, 3, 3, 4, 5, 6};            // casco, reloj, estrella, granada, vida, pistola
-    static const int kTimed[6] = {0, 1, 3, 3, 4, 6};             // por tiempo: sin vidas
+    static const int kAll[12] = {0, 1, 3, 3, 4, 5, 6, 8, 9, 10, 11, 12};   // casco, reloj, estrella, granada, vida, pistola y los items nuevos
+    static const int kTimed[11] = {0, 1, 3, 3, 4, 6, 8, 9, 10, 11, 12};   // por tiempo: sin vidas
     int n = 0;
     for (int tries = 0; tries < 60 && n < 3; ++tries) {
         const int c = 1 + Sub_D44D_generate_random_number() % (kWideBlocksX - 2), r = 1 + Sub_D44D_generate_random_number() % (kWideBlocksY - 1);
@@ -1664,7 +1676,7 @@ void Battle::RoyaleItemsStep() {
         it.x = c * 16 + 8;
         it.y = r * 16 + 8;
         const int roll = Sub_D44D_generate_random_number();
-        it.id = spec_.royaleTimed ? kTimed[roll % 6] : kAll[roll % 7];
+        it.id = spec_.royaleTimed ? kTimed[roll % 11] : kAll[roll % 12];
         it.life = 1800;
     }
     if (n > 0) R(ram_sfx_bonus_appear) = 1;
@@ -1673,7 +1685,7 @@ void Battle::RoyaleItemsStep() {
 void Battle::RoyaleItemsDraw() {
     if ((R(ram_frm_cnt_lo) & 0x08) == 0) return;                // parpadean como los de siempre
     for (const RoyaleItem& it : rItems_) {
-        if (!it.on) continue;
+        if (!it.on || it.id >= 8) continue;                       // (los items nuevos los dibuja el renderer)
         R(0x0004) = 2;
         R(ram_0053_t01_spr_T) = U8((it.id << 2) + 0x81);
         R(ram_priority_spr_A) = 0;
@@ -1738,7 +1750,7 @@ void Battle::VersusPickGoal(int x) {
     int best = -1, bestDist = 1 << 20;
     for (int e = 0; e <= lastEnemy_; ++e) {
         const u8 f = TFLAGS(e);
-        if (!(f & 0x80) || f >= 0xE0 || TeamOf(e) == t) continue;
+        if (!(f & 0x80) || f >= 0xE0 || TeamOf(e) == t || (e < nPlayers_ && ghostT_[e] > 0)) continue;
         const int d = std::abs(TankX(e) - TankX(x)) + std::abs(TankY(e) - TankY(x));
         if (d < bestDist) { bestDist = d; best = e; }
     }
@@ -1761,7 +1773,7 @@ void Battle::VersusCollisions() {
         const int shooterTeam = TeamOf(BulletShooter(b));
         for (int x = 0; x <= lastEnemy_; ++x) {
             const u8 f = TFLAGS(x);
-            if (!(f & 0x80) || f >= 0xE0 || TeamOf(x) == shooterTeam) continue;
+            if (!(f & 0x80) || f >= 0xE0 || TeamOf(x) == shooterTeam || (x < nPlayers_ && ghostT_[x] > 0)) continue;
             if (AbsDiffX(BPOSX(b), TPOSX(x)) >= 0x0A) continue;
             if (AbsDiff8(BPOSY(b), TPOSY(x)) >= 0x0A) continue;
             BSTATUS(b) = 0x33;
@@ -2043,6 +2055,236 @@ void Battle::Sub_Lava() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Items nuevos: invisible, helicoptero aliado, minas terrestres, portal y velocidad
+// ---------------------------------------------------------------------------
+
+// El tanque `tank` es un enemigo de lo que puso `owner` (un jugador, o -1 = los enemigos).
+bool Battle::ExtraHostile(int owner, int tank) {
+    if (tank < 0 || tank > lastTank_) return false;
+    const u8 f = TFLAGS(tank);
+    if (!(f & 0x80) || f >= 0xE0) return false;
+    if (owner < 0) return tank < nPlayers_ ? ghostT_[tank] == 0 : IsAlly(tank);        // los enemigos atacan a los jugadores (que no sean invisibles) y a sus aliados
+    if (IsVersus()) return TeamOf(tank) != TeamOf(owner) && !(tank < nPlayers_ && ghostT_[tank] > 0);
+    return tank >= nPlayers_ && tank <= lastEnemy_;                                    // los jugadores atacan a los enemigos
+}
+
+// Destruye un tanque con un item: el casco aguanta una vez; el que destruye (si es un jugador) se lleva los puntos.
+void Battle::ExtraKill(int x, int owner) {
+    const u8 f = TFLAGS(x);
+    if (!(f & 0x80) || f >= 0xE0) return;
+    if (x < nPlayers_) {
+        if (HELMET(x) != 0) { ShieldHit(x, 3); R(ram_sfx_bullet_hit_tank) = 1; return; }
+        ++playerHits_[x];
+        TFLAGS(x) = con_tank_flag_explosion + 0x03;
+        TTYPE(x) = 0;
+        TUPGRADE(x) = 0;
+        R(ram_sfx_explosion_player) = 1;
+        if (IsRoyale() && owner >= 0 && owner < 8) ++royaleKills_[owner];
+        return;
+    }
+    TFLAGS(x) = con_tank_flag_explosion + 0x03;
+    R(ram_sfx_explosion_enemy) = 1;
+    if (IsAlly(x)) { TTYPE(x) = 0; return; }
+    const int kind = ((TTYPE(x) >> 5) - 4) & 3;
+    TTYPE(x) = 0;
+    if (owner >= 0 && owner < nPlayers_ && !IsVersus()) {
+        KILLCNT(owner * 4 + kind)++;
+        if (R(ram_2nd_loop_flag) != con_flag_demo) {
+            Sub_D9E1_calculate_decimal_number(tbl_E8BA_points_for_killing_enemy[kind]);
+            Sub_D9BE_add_score(owner);
+            Sub_D138_gain_extra_life_for_20000_pts();
+        }
+    }
+}
+
+void Battle::AddBoom(int x, int y) {
+    int slot = 0;
+    for (int i = 0; i < kMaxBooms; ++i) {
+        if (booms_[i].t <= 0) { slot = i; break; }
+        if (booms_[i].t < booms_[slot].t) slot = i;
+    }
+    booms_[slot] = Boom{x, y, 16};
+}
+
+// Un bloque donde se puede dejar una mina o una puerta: vacio, lejos de las bases, sin tanques y sin otra cosa encima.
+bool Battle::FreeBlockForExtra(int col, int row) {
+    if (col < 1 || col > kWideBlocksX - 2 || row < 1 || row > kWideBlocksY - 1) return false;
+    if (!BlockEmptyAt(col, row) || LavaForbidden(col, row) || BlockOccupied(col, row)) return false;
+    for (const Mine& m : mines_) if (m.on && m.col == col && m.row == row) return false;
+    if (portal_.on) for (int i = 0; i < 2; ++i) if (portal_.col[i] == col && portal_.row[i] == row) return false;
+    return true;
+}
+
+void Battle::SpawnHeli(int owner) {
+    if (!wide_) return;
+    for (Heli& h : heli_) {
+        if (h.on) continue;
+        h = Heli{};
+        h.on = true;
+        h.owner = owner;
+        const bool left = (Sub_D44D_generate_random_number() & 1) != 0;
+        h.x = left ? -24 : MapCols() * 8 + 24;                     // entra volando por un costado
+        h.y = 24 + Sub_D44D_generate_random_number() % 192;
+        h.dir = left ? 2 : 6;                                      // mira hacia donde entra
+        h.life = 1200;                                             // 20 segundos y se va
+        R(ram_sfx_bonus_appear) = 1;
+        return;
+    }
+}
+
+void Battle::PlaceMines(int owner, int count) {
+    if (!wide_) return;
+    int active = 0;
+    for (const Mine& m : mines_) active += m.on ? 1 : 0;
+    for (int excess = active + count - kMaxMines; excess > 0; --excess) {      // con 9, se sacan las mas viejas
+        int old = -1;
+        for (int i = 0; i < kMaxMines; ++i) if (mines_[i].on && (old < 0 || mines_[i].seq < mines_[old].seq)) old = i;
+        if (old >= 0) mines_[old].on = false;
+    }
+    for (int k = 0; k < count; ++k) {
+        for (int tries = 0; tries < 60; ++tries) {
+            const int c = 1 + Sub_D44D_generate_random_number() % (kWideBlocksX - 2), r = 1 + Sub_D44D_generate_random_number() % (kWideBlocksY - 1);
+            if (!FreeBlockForExtra(c, r)) continue;
+            for (Mine& m : mines_) {
+                if (m.on) continue;
+                m = Mine{true, owner, c, r, 0, ++mineSeq_};
+                break;
+            }
+            break;
+        }
+    }
+}
+
+void Battle::MakePortal() {
+    if (!wide_) return;
+    portal_.on = false;
+    int cA = -1, rA = -1, cB = -1, rB = -1;
+    for (int tries = 0; tries < 80 && rA < 0; ++tries) {                       // una de la mitad de abajo
+        const int c = 1 + Sub_D44D_generate_random_number() % (kWideBlocksX - 2), r = 8 + Sub_D44D_generate_random_number() % 6;
+        if (FreeBlockForExtra(c, r)) { cA = c; rA = r; }
+    }
+    for (int tries = 0; tries < 80 && rB < 0; ++tries) {                       // y otra de la mitad de arriba
+        const int c = 1 + Sub_D44D_generate_random_number() % (kWideBlocksX - 2), r = 1 + Sub_D44D_generate_random_number() % 6;
+        if (FreeBlockForExtra(c, r) && !(c == cA && r == rA)) { cB = c; rB = r; }
+    }
+    if (rA < 0 || rB < 0) return;
+    portal_.on = true;
+    portal_.col[0] = cA; portal_.row[0] = rA;
+    portal_.col[1] = cB; portal_.row[1] = rB;
+    portal_.uses = 3;
+}
+
+int Battle::ExtraIcons(ExtraIcon* out, int max) const {
+    int n = 0;
+    if ((R(ram_frm_cnt_lo) & 0x08) == 0) return 0;                  // parpadean como los demas items
+    if (BonusActive() && R(ram_0062_bonus_timer) == 0 && (R(ram_bonus_id) & 0x80) == 0 && R(ram_bonus_id) >= 8 && n < max)
+        out[n++] = ExtraIcon{R(ram_bonus_pos_X) | (bonusXHi_ << 8), R(ram_bonus_pos_Y), R(ram_bonus_id)};
+    for (const RoyaleItem& it : rItems_) if (it.on && it.id >= 8 && n < max) out[n++] = ExtraIcon{it.x, it.y, it.id};
+    return n;
+}
+
+void Battle::Sub_Extras() {
+    if (!wide_) return;
+    for (int x = 0; x <= lastTank_ && x < kMaxTanks; ++x) {
+        if (ghostT_[x] > 0) --ghostT_[x];
+        if (speedT_[x] > 0) --speedT_[x];
+        if (portalCd_[x] > 0) --portalCd_[x];
+    }
+    if (enemyGhostT_ > 0) --enemyGhostT_;
+    for (Boom& b : booms_) if (b.t > 0) --b.t;
+    // helicopteros: vuelan sobre todo, van tras el enemigo mas cercano (despacio, para que se pueda escapar), se posan y sueltan una bomba
+    const int worldW = MapCols() * 8;
+    auto faceTo = [](Heli& h, int dx, int dy) {                                  // hacia donde mira: 8 direcciones
+        const int ax = std::abs(dx), ay = std::abs(dy);
+        if (ax < 2 && ay < 2) return;
+        int sx = dx > 0 ? 1 : (dx < 0 ? -1 : 0), sy = dy > 0 ? 1 : (dy < 0 ? -1 : 0);
+        if (ay * 5 < ax * 2) sy = 0;                                             // casi horizontal
+        else if (ax * 5 < ay * 2) sx = 0;                                        // casi vertical
+        static const int kDir[3][3] = {{7, 0, 1}, {6, 0, 2}, {5, 4, 3}};         // [sy + 1][sx + 1]
+        h.dir = kDir[sy + 1][sx + 1];
+    };
+    for (Heli& h : heli_) {
+        if (!h.on) continue;
+        ++h.frame;
+        if (h.state != 3 && --h.life <= 0) h.state = 3;                          // se acabo el tiempo: se va
+        if (h.state == 3) {
+            const bool left = h.x < worldW / 2;
+            h.dir = left ? 6 : 2;
+            h.x += left ? -1 : 1;
+            if (h.x < -40 || h.x > worldW + 40) h.on = false;
+            continue;
+        }
+        if (h.state == 2) { if (--h.timer <= 0) { h.state = 0; h.target = -1; } continue; }
+        if (h.state == 1) {                                                      // posado: se queda quieto hasta soltar la bomba (el tanque puede irse)
+            if (--h.timer <= 0) {
+                AddBoom(h.x, h.y);
+                R(ram_sfx_explosion_hq) = 1;
+                for (int e = 0; e <= lastTank_; ++e) {
+                    if (!ExtraHostile(h.owner, e)) continue;
+                    if (std::abs(TankX(e) - h.x) < 22 && std::abs(TankY(e) - h.y) < 22) ExtraKill(e, h.owner);
+                }
+                h.state = 2;
+                h.timer = 24;
+            }
+            continue;
+        }
+        if (h.target >= 0 && !ExtraHostile(h.owner, h.target)) h.target = -1;
+        if (h.target < 0) {
+            int best = -1, bd = 1 << 20;
+            for (int e = 0; e <= lastTank_; ++e) {
+                if (!ExtraHostile(h.owner, e)) continue;
+                const int d = std::abs(TankX(e) - h.x) + std::abs(TankY(e) - h.y);
+                if (d < bd) { bd = d; best = e; }
+            }
+            h.target = best;
+        }
+        if (h.target < 0) continue;                                              // nadie a quien atacar: sobrevuela
+        const int dx = TankX(h.target) - h.x, dy = TankY(h.target) - h.y;
+        faceTo(h, dx, dy);
+        const int dist = std::abs(dx) + std::abs(dy);
+        h.acc += dist > 120 ? 16 : (dist > 50 ? 10 : 5);                         // lejos viene rapido (2 px por cuadro); cerca se acerca a unos 0,6 px por cuadro (el tanque camina a 0,75)
+        const int move = h.acc >> 3;
+        h.acc &= 7;
+        h.x += std::max(-move, std::min(move, dx));
+        h.y += std::max(-move, std::min(move, dy));
+        if (std::abs(TankX(h.target) - h.x) <= 4 && std::abs(TankY(h.target) - h.y) <= 4) { h.state = 1; h.timer = 40; }
+    }
+    // minas: solo las pisan los enemigos de quien las puso
+    for (Mine& m : mines_) {
+        if (!m.on) continue;
+        ++m.age;
+        const int mx = m.col * 16 + 8, my = m.row * 16 + 8;
+        for (int e = 0; e <= lastTank_; ++e) {
+            if (!ExtraHostile(m.owner, e)) continue;
+            if (std::abs(TankX(e) - mx) >= 10 || std::abs(TankY(e) - my) >= 10) continue;
+            AddBoom(mx, my);
+            R(ram_sfx_explosion_hq) = 1;
+            ExtraKill(e, m.owner);
+            m.on = false;
+            break;
+        }
+    }
+    // portal: el tanque que toca una puerta sale por la otra (3 usos)
+    if (portal_.on) {
+        for (int x = 0; x <= lastTank_ && portal_.on; ++x) {
+            const u8 f = TFLAGS(x);
+            if (!(f & 0x80) || f >= 0xE0) continue;
+            for (int side = 0; side < 2; ++side) {
+                if (std::abs(TankX(x) - (portal_.col[side] * 16 + 8)) >= 8 || std::abs(TankY(x) - (portal_.row[side] * 16 + 8)) >= 8) continue;
+                if (portalCd_[x] > 0) { portalCd_[x] = 2; break; }                 // sigue sobre una puerta: no vuelve a viajar hasta que salga
+                const int o = 1 - side;
+                TPOSX(x) = portal_.col[o] * 16 + 8;
+                TPOSY(x) = portal_.row[o] * 16 + 8;
+                portalCd_[x] = 90;
+                R(ram_sfx_bonus_appear) = 1;
+                if (--portal_.uses <= 0) portal_.on = false;
+                break;
+            }
+        }
+    }
+}
+
 // Cantidad de puntos de aparicion de enemigos y su posicion (centro del bloque, en pixeles).
 int Battle::SpawnPointCount() const {
     if (spec_.active && spec_.nSpawns > 0) return spec_.nSpawns;
@@ -2280,7 +2522,7 @@ bool Battle::BossAggro(int x, int& nearest) {
     nearest = -1;
     for (int p = 0; p < nPlayers_; ++p) {
         const u8 f = TFLAGS(p);
-        if (!(f & 0x80) || f >= 0xE0) continue;
+        if (!(f & 0x80) || f >= 0xE0 || ghostT_[p] > 0) continue;
         const int dTank = AbsDiffX(TPOSX(p), TPOSX(x)) + std::abs(static_cast<int>(TPOSY(p)) - static_cast<int>(TPOSY(x)));   // (AbsDiff8 da la vuelta a los 8 bits)
         const int dEagle = AbsDiffX(TPOSX(p), EagleCol() * 16 + 8) + std::abs(static_cast<int>(TPOSY(p)) - (EagleRow() * 16 + 8));
         if (dTank < bestDist) { bestDist = dTank; nearest = p; }
@@ -2464,7 +2706,7 @@ void Battle::Sub_E70C_check_bullets_collision_with_tanks() {
     // balas enemigas contra jugadores
     for (int x = nPlayers_ - 1; x >= 0; --x) {
         const u8 f = TFLAGS(x);
-        if (!(f & 0x80) || f >= 0xE0) {
+        if (!(f & 0x80) || f >= 0xE0 || ghostT_[x] > 0) {          // (el invisible: las balas enemigas lo atraviesan)
             continue;
         }
         for (int b = lastEnemy_; b >= nPlayers_; --b) {
@@ -2700,9 +2942,9 @@ void Battle::Sub_E8BE_spawn_bonus() {
         Sub_E972_try_to_pick_up_bonus();                  // solo para evitar que caiga encima de un jugador
     } while (R(ram_0062_bonus_timer) != 0);
     {
-        static const u8 kWideBonus[8] = {0, 1, 2, 3, 4, 5, 7, 3};   // en el campo ancho una de las granadas repetidas es el item de aliados
-        static const u8 kVsBonus[8] = {0, 1, 3, 4, 5, 6, 3, 0};    // batalla vs: sin pala ni aliados
-        const u8 roll = Sub_D44D_generate_random_number() & 0x07;
+        static const u8 kWideBonus[16] = {0, 1, 2, 3, 4, 5, 7, 3, 8, 9, 10, 11, 12, 0, 3, 12};   // en el campo ancho una de las granadas repetidas es el item de aliados; 8-12 = items nuevos
+        static const u8 kVsBonus[16] = {0, 1, 3, 4, 5, 6, 3, 0, 8, 9, 10, 11, 12, 6, 3, 8};     // batalla vs: sin pala ni aliados
+        const u8 roll = Sub_D44D_generate_random_number() & (wide_ ? 0x0F : 0x07);
         R(ram_bonus_id) = IsVersus() ? kVsBonus[roll] : (wide_ ? kWideBonus[roll] : tbl_E8FA_bonus[roll]);
     }
     R(ram_0062_bonus_timer) = 0;
@@ -3056,6 +3298,21 @@ void Battle::EnemyBonus(int id, int x) {
         case 7:
             SpawnExtraEnemies(x);
             break;
+        case kBonusGhost:                                // los enemigos se vuelven invisibles (solo se ven sus disparos)
+            enemyGhostT_ = kItemFrames;
+            break;
+        case kBonusHeli:                                 // helicoptero enemigo: ataca a los jugadores
+            SpawnHeli(-1);
+            break;
+        case kBonusMine:                                 // minas enemigas: parpadean 3 segundos y se vuelven invisibles
+            PlaceMines(-1, 3);
+            break;
+        case kBonusPortal:
+            MakePortal();
+            break;
+        case kBonusSpeed:
+            speedT_[x] = kItemFrames;
+            break;
         default:
             break;
     }
@@ -3228,6 +3485,21 @@ void Battle::BonusHandler(int id, int x) {
             break;
         case 7:
             if (!IsVersus()) SpawnAllies(x);             // aliados con IA (extension del campo ancho)
+            break;
+        case kBonusGhost:                                // invisible: los enemigos no te atacan
+            ghostT_[x] = kItemFrames;
+            break;
+        case kBonusHeli:                                 // helicoptero aliado: ataca a los enemigos 10 segundos
+            SpawnHeli(x);
+            break;
+        case kBonusMine:                                 // 3 minas terrestres al azar (hasta 9)
+            PlaceMines(x, 3);
+            break;
+        case kBonusPortal:                               // dos puertas conectadas, 3 usos
+            MakePortal();
+            break;
+        case kBonusSpeed:                                // el doble de velocidad
+            speedT_[x] = kItemFrames;
             break;
         default:
             break;
@@ -3450,6 +3722,8 @@ void Battle::Sub_DEB8_tank_handler(int x) {
             break;
     }
     // ofs_001_DFB6 (estados $80..$D0): el tanque
+    if (enemyGhostT_ > 0 && x >= nPlayers_ && !IsAlly(x) && !IsVersus()) return;    // enemigos invisibles: solo se ven sus disparos
+    if (x < nPlayers_ && ghostT_[x] > 0 && ((R(ram_frm_cnt_lo) >> 1) & 1)) return;  // el invisible parpadea
     u8 palette;
     if (IsAlly(x)) {
         palette = PlayerPalette(allyOwner_[x]);          // sprite de enemigo, color del jugador que agarro el item
@@ -3510,6 +3784,7 @@ void Battle::Sub_E23B_display_bonus_on_screen() {
         if ((R(ram_frm_cnt_lo) & 0x08) == 0) {
             return;                                      // parpadea
         }
+        if (wide_ && R(ram_bonus_id) >= 8 && (R(ram_bonus_id) & 0x80) == 0) return;      // items nuevos: los dibuja el renderer
         R(0x0004) = 2;
         R(ram_0053_t01_spr_T) = (wide_ && R(ram_bonus_id) == 7) ? 0x00 : U8((R(ram_bonus_id) << 2) + 0x81);
         if (wide_ && R(ram_bonus_id) == 7) {
@@ -3803,6 +4078,14 @@ uint32_t Battle::StateHash() const {
         mixInt(playerFreeze_[i]);
         mixInt(stealTarget_[i]);
     }
+    for (int i = 0; i <= lastTank_ && i < kMaxTanks; ++i) { mixInt(ghostT_[i]); mixInt(speedT_[i]); mixInt(portalCd_[i]); }
+    mixInt(enemyGhostT_);
+    mixInt(mineSeq_);
+    for (const Heli& h : heli_) { mixInt(h.on ? 1 : 0); mixInt(h.owner); mixInt(h.x); mixInt(h.y); mixInt(h.state); mixInt(h.timer); mixInt(h.life); mixInt(h.target); mixInt(h.dir); mixInt(h.acc); }
+    for (const Mine& m : mines_) { mixInt(m.on ? 1 : 0); mixInt(m.owner); mixInt(m.col); mixInt(m.row); mixInt(m.age); mixInt(m.seq); }
+    mixInt(portal_.on ? 1 : 0); mixInt(portal_.uses);
+    for (int i = 0; i < 2; ++i) { mixInt(portal_.col[i]); mixInt(portal_.row[i]); }
+    for (const Boom& b : booms_) { mixInt(b.t); mixInt(b.x); mixInt(b.y); }
     for (int i = 0; i < nLava_; ++i) {                    // la lava (fuentes, celdas y relojes) tambien tiene que ser igual en todos
         mixInt(lava_[i].phase);
         mixInt(lava_[i].timer);

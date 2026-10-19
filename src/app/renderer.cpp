@@ -1,5 +1,7 @@
 #include "renderer.h"
 
+#include "heli_data.h"
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -162,6 +164,171 @@ int Renderer::ChrPixel(int table, int tile, int x, int y) const {
     return ((p0 >> bit) & 1) | (((p1 >> bit) & 1) << 1);
 }
 
+namespace {
+constexpr int kNesHeightPx = 240;
+
+// ---- items nuevos (ids 8..12), minas, portal y helicopteros ----
+// Los items nuevos usan el mismo marco y los mismos colores que los originales (paleta de sprites 2): 0 negro, 1 fondo verde azulado,
+// 2 gris, 3 blanco. El dibujo ocupa el interior: 12 columnas por 11 filas (columnas 2..13, filas 2..12 del item de 16x16).
+constexpr const char* kItemArt[5][11] = {
+    {   // 8: invisible (fantasma)
+        "111133331111", "111333333111", "113333333311", "113303303311", "113303303311", "113333333311",
+        "113333333311", "113333333311", "113333333311", "113323323311", "113313313311",
+    },
+    {   // 9: helicoptero aliado
+        "111111111111", "333333333333", "111112211111", "111222222111", "112222222211", "112220022211",
+        "112222222211", "111122221111", "111112211111", "111112211111", "111133331111",
+    },
+    {   // 10: mina terrestre
+        "111113311111", "131112211131", "113222222311", "112222222211", "332220022233", "332220022233",
+        "112222222211", "113222222311", "131112211131", "111113311111", "111111111111",
+    },
+    {   // 11: portal (puerta)
+        "111133331111", "113333333311", "113222222311", "113222222311", "113222222311", "113222222311",
+        "113222223311", "113222222311", "113222222311", "113222222311", "113333333311",
+    },
+    {   // 12: velocidad (doble flecha)
+        "311111311111", "331111331111", "333111333111", "333311333311", "333331333331", "333333333333",
+        "333331333331", "333311333311", "333111333111", "331111331111", "311111311111",
+    },
+};
+
+// El marco de los items originales (copiado de la CHR): 0 transparente, 1-3 colores de la paleta de sprites 2.
+constexpr const char* kItemFrame[16] = {
+    "0333333333333320", "3000000000000031", "3011111111111131", "3011111111111131",
+    "3011111111111131", "3011111111111131", "3011111111111131", "3011111111111131",
+    "3011111111111131", "3011111111111131", "3011111111111131", "3011111111111131",
+    "3011111111111131", "2333333333333321", "0111111111111110", "0000000000000000",
+};
+
+// Mezcla un pixel ARGB sobre el buffer (alfa 0 = nada, 255 = tapa).
+inline void BlendPx(std::vector<uint32_t>& rgb, int w, int x, int y, uint32_t argb) {
+    const uint32_t a = argb >> 24;
+    if (a == 0 || x < 0 || y < 0 || x >= w || y >= kNesHeightPx) return;
+    uint32_t& d = rgb[static_cast<size_t>(y) * w + x];
+    if (a >= 250) { d = argb & 0xFFFFFF; return; }
+    auto ch = [&](int sh) { return ((((d >> sh) & 0xFF) * (255 - a) + ((argb >> sh) & 0xFF) * a) / 255) << sh; };
+    d = ch(16) | ch(8) | ch(0);
+}
+
+void BlitHeli(std::vector<uint32_t>& rgb, int w, const app::HeliSprite& sp, int cx, int cy) {
+    for (int y = 0; y < sp.h; ++y)
+        for (int x = 0; x < sp.w; ++x) BlendPx(rgb, w, cx - sp.ax + x, cy - sp.ay + y, sp.px[y * sp.w + x]);
+}
+
+// El helicoptero girado hacia donde va (dir 0..7, de a 45 grados): la silueta de la sombra cae siempre hacia abajo a la derecha.
+void BlitHeliRotated(std::vector<uint32_t>& rgb, int w, const app::HeliSprite& sp, int cx, int cy, int dir, uint32_t tint) {
+    static const int kCos[8] = {1024, 724, 0, -724, -1024, -724, 0, 724};
+    static const int kSin[8] = {0, 724, 1024, 724, 0, -724, -1024, -724};
+    const int c = kCos[dir & 7], s = kSin[dir & 7];
+    constexpr int R = 27;
+    for (int pass = 0; pass < 2; ++pass) {                       // primero la sombra, despues el cuerpo
+        for (int dy = -R; dy <= R; ++dy)
+            for (int dx = -R; dx <= R; ++dx) {
+                const int sx = sp.ax + (dx * c + dy * s + (dx * c + dy * s >= 0 ? 512 : -512)) / 1024;
+                const int sy = sp.ay + (-dx * s + dy * c + (-dx * s + dy * c >= 0 ? 512 : -512)) / 1024;
+                if (sx < 0 || sy < 0 || sx >= sp.w || sy >= sp.h) continue;
+                const uint32_t px = sp.px[sy * sp.w + sx];
+                if ((px >> 24) == 0) continue;
+                if (pass == 0) BlendPx(rgb, w, cx + dx + 8, cy + dy + 11, 0x60000000);
+                else BlendPx(rgb, w, cx + dx, cy + dy, (tint && (px & 0xFFFFFF) == 0x5C94FC) ? (0xFF000000 | tint) : px);      // el azul del casco toma el color del jugador
+            }
+    }
+}
+
+void DrawItemIcon(std::vector<uint32_t>& rgb, int w, int cx, int cy, int id) {
+    const int x0 = cx - 8, y0 = cy - 8;
+    const uint32_t col[4] = {0x000000, NesColor(SpritePaletteColor(2, 1)), NesColor(SpritePaletteColor(2, 2)), NesColor(SpritePaletteColor(2, 3))};
+    const int k = id - 8;
+    for (int y = 0; y < 16; ++y)
+        for (int x = 0; x < 16; ++x) {
+            int idx = kItemFrame[y][x] - '0';
+            const bool inner = x >= 2 && x <= 13 && y >= 2 && y <= 12;
+            if (inner && k >= 0 && k <= 4) idx = kItemArt[k][y - 2][x - 2] - '0';
+            const bool ring = y == 1 || x == 1 || x == 14 || inner;
+            if (idx == 0 && !(ring && !(y == 15 || (y == 14 && (x == 0 || x == 15))))) continue;   // lo transparente del marco queda transparente; lo negro de adentro, negro
+            BlendPx(rgb, w, x0 + x, y0 + y, 0xFF000000 | col[idx]);
+        }
+}
+
+// Mina terrestre en el color de su dueno (los enemigos: gris).
+void DrawMine(std::vector<uint32_t>& rgb, int w, int cx, int cy, uint32_t body, uint32_t light, bool blinkCenter) {
+    for (int dy = -7; dy <= 7; ++dy)
+        for (int dx = -7; dx <= 7; ++dx) {
+            const int r2 = dx * dx + dy * dy;
+            uint32_t c = 0;
+            if ((std::abs(dx) <= 1 && std::abs(dy) <= 7) || (std::abs(dy) <= 1 && std::abs(dx) <= 7)) c = light;   // puas
+            if (r2 <= 27) c = (r2 <= 27 && r2 > 20) ? 0x101010 : body;                                              // cuerpo y borde
+            if (r2 <= 6) c = blinkCenter ? 0xFC2020 : light;                                                        // centro (luz)
+            if (c) BlendPx(rgb, w, cx + dx, cy + dy, 0xFF000000 | c);
+        }
+}
+
+// Puerta del portal: marco marron y adentro un remolino que cambia de color.
+void DrawDoor(std::vector<uint32_t>& rgb, int w, int cx, int cy, uint32_t c1, uint32_t c2, int phase) {
+    for (int dy = -8; dy <= 7; ++dy)
+        for (int dx = -6; dx <= 5; ++dx) {
+            const bool top = dy < -3;                                  // arco redondeado
+            if (top && (dx + 0.5) * (dx + 0.5) / 36.0 + (dy + 3) * (dy + 3) / 25.0 > 1.0) continue;
+            uint32_t c;
+            if (dx == -6 || dx == 5 || dy == -8 || dy == 7) c = 0x8C5C00;                // marco
+            else c = (((dx + dy + phase) >> 1) & 1) ? c1 : c2;                          // remolino
+            BlendPx(rgb, w, cx + dx, cy + dy, 0xFF000000 | c);
+        }
+}
+
+// Lo que esta pegado al piso: minas y portal (debajo de los tanques).
+void DrawExtraGround(const nes::Battle& b, std::vector<uint32_t>& rgb, int w) {
+    for (int i = 0; i < nes::Battle::kMaxMines; ++i) {
+        if (!b.MineVisible(i)) continue;
+        const auto& m = b.MineState(i);
+        uint32_t body = 0x7C7C7C, light = 0xBCBCBC;
+        if (m.owner >= 0) {
+            const int pal = b.PlayerPaletteIndex(m.owner);
+            body = NesColor(SpritePaletteColor(pal, 2));
+            light = NesColor(SpritePaletteColor(pal, 1));
+        }
+        DrawMine(rgb, w, m.col * 16 + 8, m.row * 16 + 8, body, light, ((b.R(nes::ram_frm_cnt_lo) >> 4) & 1) != 0);
+    }
+    const auto& pt = b.PortalState();
+    if (pt.on) {
+        const int phase = b.R(nes::ram_frm_cnt_lo) >> 2;
+        DrawDoor(rgb, w, pt.col[0] * 16 + 8, pt.row[0] * 16 + 8, 0x5C94FC, 0xA8D8FC, phase);
+        DrawDoor(rgb, w, pt.col[1] * 16 + 8, pt.row[1] * 16 + 8, 0xFC9838, 0xFCD8A8, phase);
+    }
+}
+
+// Lo que va por encima: helicopteros (hoja de sprites propia), explosiones, iconos de los items nuevos y la marca de velocidad.
+void DrawExtraAir(const nes::Battle& b, std::vector<uint32_t>& rgb, int w) {
+    nes::Battle::ExtraIcon icons[8];
+    const int n = b.ExtraIcons(icons, 8);
+    for (int i = 0; i < n; ++i) DrawItemIcon(rgb, w, icons[i].x, icons[i].y, icons[i].id);
+    for (int t = 0; t <= b.LastEnemy() + 4 && t < nes::kMaxTanks; ++t) {                  // velocidad: dos flechitas sobre el tanque
+        if (!b.TankFast(t) || (b.TankFlags(t) & 0x80) == 0 || b.TankFlags(t) >= 0xE0) continue;
+        if (((b.R(nes::ram_frm_cnt_lo) >> 2) & 1) == 0) continue;
+        const int x = b.TankX(t) - 5, y = b.TankY(t) - 15;
+        for (int k = 0; k < 2; ++k)
+            for (int r = 0; r < 5; ++r) {
+                const int len = r < 3 ? r + 1 : 5 - r;
+                for (int c = 0; c < len; ++c) BlendPx(rgb, w, x + k * 5 + c, y + r, 0xFFFCD818);
+            }
+    }
+    for (int i = 0; i < nes::Battle::kMaxBooms; ++i) {
+        const auto& bm = b.BoomState(i);
+        if (bm.t <= 0) continue;
+        const app::HeliSprite& sp = app::kHeliBoom[std::min(3, (16 - bm.t) / 4)];
+        BlitHeli(rgb, w, sp, bm.x, bm.y);
+    }
+    for (int i = 0; i < nes::Battle::kMaxHelis; ++i) {
+        const auto& h = b.HeliState(i);
+        if (!h.on) continue;
+        const app::HeliSprite& sp = (h.owner >= 0 ? app::kHeliBlue : app::kHeliRed)[(h.frame / 2) % 6];
+        const uint32_t tint = h.owner >= 0 ? NesColor(SpritePaletteColor(b.PlayerPaletteIndex(h.owner), 2)) : 0u;   // el helicoptero aliado lleva el color de quien lo trajo
+        BlitHeliRotated(rgb, w, sp, h.x, h.y, h.dir, tint);
+    }
+}
+} // namespace
+
 void Renderer::RenderNesScreen(const nes::Battle& battle, std::vector<uint32_t>& rgb) const {
     const int kNesW = battle.MapCols() * 8;                 // 256 en modo clasico, 432 en el campo ancho
     rgb.assign(static_cast<size_t>(kNesW) * kNesH, 0);
@@ -202,6 +369,8 @@ void Renderer::RenderNesScreen(const nes::Battle& battle, std::vector<uint32_t>&
             }
         }
     }
+
+    DrawExtraGround(battle, rgb, kNesW);                    // minas y portal: pegados al piso
 
     // ---- sprites 8x16: se pintan del ultimo al primero para que el indice menor quede arriba ----
     struct SpritePixel {
@@ -245,6 +414,7 @@ void Renderer::RenderNesScreen(const nes::Battle& battle, std::vector<uint32_t>&
         if (layer[o].behind && bgIndex[o] != 0) continue;
         rgb[o] = layer[o].color;
     }
+    DrawExtraAir(battle, rgb, kNesW);                       // helicopteros, explosiones e iconos de los items nuevos
 }
 
 namespace {
