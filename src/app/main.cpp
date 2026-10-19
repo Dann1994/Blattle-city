@@ -25,6 +25,7 @@
 #include <thread>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -282,7 +283,7 @@ std::string PadButtonName(int b) {
 class TestScreen {
 public:
     enum class Scene { Title, PlayMenu, Lobby, Settings, KeysPlayer, KeysList, PadSettings, Construction, Pause, Game,
-                       LanMenu, NameEntry, LanHost, LanSearch, LanJoined, OnlineMenu, CodeEntry, LateJoin, Editor, OwnLevels, VsMenu, JoinMenu };
+                       LanMenu, NameEntry, LanHost, LanSearch, LanJoined, OnlineMenu, CodeEntry, LateJoin, Editor, OwnLevels, VsMenu, JoinMenu, ModeMenu };
     enum class Capture { None, Key, Pad };
     struct Rumble { int slot; float left, right, seconds; float delay = 0.0f; };   // delay: segundos hasta empezar
     enum class Ev { Up, Down, Left, Right, Accept, Back, Fire, Start };
@@ -371,7 +372,12 @@ public:
         };
         hooks.returnToTitle = [this]() { pendingTitle_ = true; };     // se aplica fuera del Step (destruye el flujo)
         if (ownMode_) {                                                    // niveles propios: sigue el siguiente casillero ocupado
-            hooks.nextLevel = [](int cur) {
+            const bool net = netGame_;
+            hooks.nextLevel = [this, net](int cur) {
+                if (net) {                                                 // en red: la serie que mando el anfitrion
+                    for (size_t i = 0; i + 1 < ownOrder_.size(); ++i) if (ownOrder_[i] == cur) return ownOrder_[i + 1];
+                    return 0;
+                }
                 for (int s = cur + 1; s <= app::kOwnSlots; ++s) if (OwnIsPlayable(s)) return s;
                 return 0;
             };
@@ -392,7 +398,12 @@ public:
             def.tier = vsTier_;
             def.rank = vsRank_;
         } else if (ownMode_) {
-            if (!app::LoadOwnLevelDef(level, def)) def = app::BlankLevelDef(false);
+            if (netGame_) {
+                const auto it = ownNet_.find(level);
+                def = it != ownNet_.end() ? it->second : app::BlankLevelDef(false);
+            } else if (!app::LoadOwnLevelDef(level, def)) {
+                def = app::BlankLevelDef(false);
+            }
         } else if (!(app::MainLevelHasFile(level) && app::LoadLevelDef(app::MainLevelFile(level), def))) {
             return false;
         }
@@ -411,7 +422,10 @@ public:
     // El mapa de la batalla vs segun lo elegido en el menu: al azar (con la semilla de esta partida), uno generado por su numero o
     // uno propio hecho en el editor.
     app::LevelDef VersusMapDef() const {
-        if (netGame_) return app::GenerateVersusLevel(vsSeed_);
+        if (netGame_) {
+            if (vsOwnNet_ && ownNet_.count(0)) return ownNet_.at(0);
+            return app::GenerateVersusLevel(vsSeed_);
+        }
         if (vsMapKind_ == 2) {
             app::LevelDef d;
             if (app::LoadOwnLevelDef(vsMapNum_, d) && d.versus) return d;
@@ -657,8 +671,9 @@ public:
     int MenuItemCount() const {
         switch (scene_) {
             case Scene::Title: return 3;
-            case Scene::PlayMenu: return 4;
-            case Scene::VsMenu: return 6;
+            case Scene::PlayMenu: return 2;
+            case Scene::ModeMenu: return 4;
+            case Scene::VsMenu: return 5;
             case Scene::Settings: return 7;
             case Scene::KeysPlayer: return 5;
             case Scene::KeysList: return 8;
@@ -680,16 +695,20 @@ public:
             case Scene::PadSettings: scene_ = Scene::Settings; menuIndex_ = 1; break;
             case Scene::Pause: scene_ = Scene::Game; break;                    // Cancelar en la pausa = continuar
             case Scene::Construction: ReturnToTitle(); break;
-            case Scene::OwnLevels: scene_ = Scene::PlayMenu; menuIndex_ = 2; break;
-            case Scene::VsMenu: vsMode_ = false; scene_ = Scene::PlayMenu; menuIndex_ = 3; break;
-            case Scene::LanMenu: if (vsMode_) { scene_ = Scene::VsMenu; menuIndex_ = 1; } else { scene_ = Scene::PlayMenu; menuIndex_ = 1; } break;
+            case Scene::ModeMenu:
+                if (netMode_) { scene_ = Scene::LanMenu; menuIndex_ = 0; }
+                else { scene_ = Scene::PlayMenu; menuIndex_ = 0; }
+                break;
+            case Scene::OwnLevels: ownMode_ = false; scene_ = Scene::ModeMenu; menuIndex_ = 1; break;
+            case Scene::VsMenu: vsMode_ = false; scene_ = Scene::ModeMenu; menuIndex_ = 2; break;
+            case Scene::LanMenu: netMode_ = false; scene_ = Scene::PlayMenu; menuIndex_ = 1; break;
             case Scene::JoinMenu: scene_ = Scene::LanMenu; menuIndex_ = 1; break;
             case Scene::NameEntry: {
                 if (nameNext_ == Scene::JoinMenu) {
                     scene_ = g_cfg.playerName.empty() ? Scene::LanMenu : Scene::JoinMenu;
                     menuIndex_ = g_cfg.playerName.empty() ? 1 : 0;
                 } else if (g_cfg.playerName.empty()) {
-                    scene_ = vsMode_ ? Scene::VsMenu : Scene::PlayMenu;               // sin nombre no se puede entrar a la red
+                    scene_ = Scene::PlayMenu;                                         // sin nombre no se puede entrar a la red
                     menuIndex_ = 1;
                 } else {
                     scene_ = Scene::LanMenu;
@@ -777,7 +796,7 @@ public:
             else if (then == 2) BeginCodeEntry();
             else { scene_ = Scene::JoinMenu; menuIndex_ = 0; }
         } else {
-            if (then == 1) StartHost(true);
+            if (then == 1) { netMode_ = true; scene_ = Scene::ModeMenu; menuIndex_ = 0; }      // crear partida: ahora el modo
             else { scene_ = Scene::LanMenu; menuIndex_ = nameForced_ ? 0 : 2; }
         }
     }
@@ -785,8 +804,9 @@ public:
         lanNote_.clear();
         roomFrom_ = Scene::LanMenu;
         if (lan_.Host(g_cfg.playerName)) {
-            lan_.SetOptions(vsMode_ ? VersusNetOptions(0, 0) : 0);                  // la sala ya muestra que es batalla vs
-            lan_.SetNoLateJoin(vsMode_);
+            lan_.SetOptions((vsMode_ ? VersusNetOptions(0, 0) : 0) | (ownMode_ ? 4 : 0) | (vsMode_ && vsMapKind_ == 2 ? 8 : 0));   // la sala ya muestra el modo
+            lan_.SetNoLateJoin(vsMode_ || ownMode_);
+            lan_.SetSharedMaps(pendingMaps_);                                        // mapas propios: la sala se los manda a los que entren
             scene_ = Scene::LanHost;
             menuIndex_ = 0;
             if (online) lan_.OpenToInternet();                                 // codigo para entrar desde cualquier lado (la misma red la encuentra buscando)
@@ -823,10 +843,11 @@ public:
             int inTeam[2] = {0, 0};                                                  // el equipo es la paridad del lugar en la sala
             for (int i = 0; i < 4 && static_cast<size_t>(i) < lan_.Owners().size(); ++i) if (lan_.Owners()[static_cast<size_t>(i)] >= 0) ++inTeam[i & 1];
             if (inTeam[0] == 0 || inTeam[1] == 0) { lanNote_ = "HACEN FALTA JUGADORES EN LOS DOS EQUIPOS (LUGARES 1 Y 3 / 2 Y 4)"; return; }
-            if (vsMapKind_ == 2) { vsMapKind_ = 0; lanNote_.clear(); }              // los mapas propios no se comparten por red
             const int seed = vsMapKind_ == 1 ? vsMapNum_ : static_cast<int>(std::chrono::steady_clock::now().time_since_epoch().count() % 99991) + 1;
-            options = VersusNetOptions(options, seed);
+            options = VersusNetOptions(options, seed) | (vsMapKind_ == 2 ? 8 : 0);
         }
+        if (ownMode_) options |= 4;
+        if (!lan_.AllMembersHaveMaps()) { lanNote_ = "ESPERANDO QUE TODOS RECIBAN LOS MAPAS..."; return; }
         lan_.StartGame(options);
         StartNetGame();
     }
@@ -838,15 +859,30 @@ public:
         const int raw = lan_.FriendlyFire();
         const int ff = raw & 3;
         friendly_ = ff == 0 ? nes::Battle::FriendlyFire::Off : (ff == 2 ? nes::Battle::FriendlyFire::Damage : nes::Battle::FriendlyFire::Stun);
+        ownMode_ = ((raw >> 2) & 1) != 0;                         // serie de niveles propios (los manda el anfitrion)
         vsMode_ = ((raw >> 4) & 1) != 0;                          // el anfitrion decide el modo, la dificultad, el bombardeo y el mapa
+        vsOwnNet_ = vsMode_ && ((raw >> 3) & 1) != 0;             // batalla vs con un mapa propio del anfitrion
+        ownNet_.clear();
+        ownOrder_.clear();
+        if (ownMode_ || vsOwnNet_) {                              // los mapas recibidos: "numero#texto del nivel"
+            for (const std::string& m : lan_.SharedMaps()) {
+                const size_t h = m.find('#');
+                app::LevelDef d;
+                if (h == std::string::npos || !app::LevelDefFromText(m.substr(h + 1), d)) continue;
+                const int slot = vsOwnNet_ ? 0 : std::atoi(m.substr(0, h).c_str());
+                ownNet_[slot] = d;
+                ownOrder_.push_back(slot);
+            }
+            if (ownNet_.empty()) { ownMode_ = false; vsOwnNet_ = false; }
+        }
         if (vsMode_) {
             vsTier_ = (raw >> 5) & 7;
             vsRank_ = ((raw >> 8) & 3) + 1;
             vsSeed_ = static_cast<uint32_t>(raw >> 11);
             for (int i = 0; i < 4; ++i) vsTeams_[i] = i & 1;
         }
-        level_ = 1;
-        ownMode_ = false;
+        level_ = ownMode_ && !ownOrder_.empty() ? ownOrder_.front() : 1;
+        ownStart_ = level_;
         scene_ = lan_.LateJoiner() ? Scene::LateJoin : Scene::Game;   // quien llega con la partida en marcha elige color antes de aparecer
         menuIndex_ = 0;
         netGame_ = true;
@@ -860,6 +896,15 @@ public:
     const std::vector<int>& LocalPlayers() const { return lan_.MyPlayers(); }
     void SetAutoLan(int local, int expect) { autoLocal_ = local; autoExpect_ = expect; }
     void SetVersusForTest(int tier, int rank) { vsMode_ = true; vsTier_ = tier; vsRank_ = rank; }
+    void SetOwnForTest() {
+        netMode_ = true;
+        ownMode_ = true;
+        pendingMaps_.clear();
+        for (int s = 1; s <= app::kOwnSlots; ++s) {
+            app::LevelDef d;
+            if (OwnIsPlayable(s) && app::LoadOwnLevelDef(s, d)) pendingMaps_.push_back(std::to_string(s) + "#" + app::LevelDefToText(d));
+        }
+    }
     // Pruebas: entra a una sala por internet con un codigo (sin pasar por los menus).
     bool AutoJoinCode(const std::string& code) {
         BeginCodeEntry();
@@ -1054,17 +1099,18 @@ public:
             }
             else if (ev == Ev::Start) StartLocalGame();
             else if (ev == Ev::Back) {
-                if (vsMode_) { scene_ = Scene::VsMenu; menuIndex_ = 0; }
-                else { scene_ = Scene::PlayMenu; menuIndex_ = 0; }
+                if (vsMode_) { scene_ = Scene::VsMenu; menuIndex_ = 3; }
+                else if (ownMode_) { scene_ = Scene::OwnLevels; }
+                else { scene_ = Scene::ModeMenu; menuIndex_ = 0; }
             }
             return;
         }
         if (scene_ == Scene::Construction || scene_ == Scene::Editor) return;       // el editor maneja sus propias teclas (EditorStep)
         if (scene_ == Scene::VsMenu && (ev == Ev::Left || ev == Ev::Right)) {
             const int d = ev == Ev::Right ? 1 : -1;
-            if (menuIndex_ == 2) CycleVersusMap(d);
-            else if (menuIndex_ == 3) vsTier_ = (vsTier_ + 8 + d) % 8;
-            else if (menuIndex_ == 4) vsRank_ = (vsRank_ - 1 + 4 + d) % 4 + 1;
+            if (menuIndex_ == 0) CycleVersusMap(d);
+            else if (menuIndex_ == 1) vsTier_ = (vsTier_ + 8 + d) % 8;
+            else if (menuIndex_ == 2) vsRank_ = (vsRank_ - 1 + 4 + d) % 4 + 1;
             return;
         }
         if (scene_ == Scene::OwnLevels) {
@@ -1077,8 +1123,17 @@ public:
             else if ((ev == Ev::Accept || ev == Ev::Start || ev == Ev::Fire) && OwnIsPlayable(ownSel_)) {
                 ownMode_ = true;
                 ownStart_ = ownSel_;
-                lobby_ = app::Lobby();
-                scene_ = Scene::Lobby;
+                if (netMode_) {                                                 // en red: la serie (desde este casillero) se manda a los que entren
+                    pendingMaps_.clear();
+                    for (int s = ownSel_; s <= app::kOwnSlots; ++s) {
+                        app::LevelDef d;
+                        if (OwnIsPlayable(s) && app::LoadOwnLevelDef(s, d)) pendingMaps_.push_back(std::to_string(s) + "#" + app::LevelDefToText(d));
+                    }
+                    StartHost(true);
+                } else {
+                    lobby_ = app::Lobby();
+                    scene_ = Scene::Lobby;
+                }
             }
             return;
         }
@@ -1109,40 +1164,55 @@ public:
                 else { settingsReturn_ = Scene::Title; scene_ = Scene::Settings; menuIndex_ = 0; }
                 break;
             case Scene::VsMenu:
-                if (index == 0) {                                              // jugar en esta PC: elegir equipos
-                    vsMode_ = true;
-                    lobby_ = app::Lobby();
-                    scene_ = Scene::Lobby;
-                } else if (index == 1) {
-                    StartVersusNet();
-                } else if (index == 2) {
+                if (index == 0) {
                     CycleVersusMap(1);
-                } else if (index == 5) {
+                } else if (index == 3) {                                       // empezar: en esta PC se eligen los equipos; en red se crea la sala
+                    vsMode_ = true;
+                    ownMode_ = false;
+                    if (netMode_) {
+                        pendingMaps_.clear();
+                        if (vsMapKind_ == 2) {                                 // mapa propio: la sala se lo manda a los demas
+                            app::LevelDef d;
+                            if (app::LoadOwnLevelDef(vsMapNum_, d) && d.versus) pendingMaps_.push_back("0#" + app::LevelDefToText(d));
+                            else vsMapKind_ = 0;
+                        }
+                        StartHost(true);
+                    } else {
+                        lobby_ = app::Lobby();
+                        scene_ = Scene::Lobby;
+                    }
+                } else if (index == 4) {
+                    GoBack();
+                }
+                break;
+            case Scene::ModeMenu:                                              // el modo de juego (en esta PC o para crear una sala)
+                ownMode_ = false;
+                vsMode_ = false;
+                pendingMaps_.clear();
+                if (index == 0) {                                              // campania: los 40 niveles
+                    if (netMode_) StartHost(true);
+                    else { lobby_ = app::Lobby(); scene_ = Scene::Lobby; }
+                } else if (index == 1) {                                       // niveles propios (los del editor)
+                    scene_ = Scene::OwnLevels;
+                    ownSel_ = 1;
+                    for (int s = 1; s <= app::kOwnSlots; ++s) if (OwnIsPlayable(s)) { ownSel_ = s; break; }
+                } else if (index == 2) {
+                    scene_ = Scene::VsMenu;                                    // MODO BATALLA VS
+                    menuIndex_ = 0;
+                } else {
                     GoBack();
                 }
                 break;
             case Scene::PlayMenu:
                 ownMode_ = false;
                 vsMode_ = false;
-                if (index == 3) {
-                    scene_ = Scene::VsMenu;                                    // MODO BATALLA VS
-                    menuIndex_ = 0;
-                } else if (index == 2) {
-                    scene_ = Scene::OwnLevels;                                 // los niveles del editor, aparte
-                    ownSel_ = 1;
-                    for (int s = 1; s <= app::kOwnSlots; ++s) if (OwnIsPlayable(s)) { ownSel_ = s; break; }
-                } else if (index == 0) {
-                    lobby_ = app::Lobby();
-                    scene_ = Scene::Lobby;
-                } else if (index == 1) {
-                    lanNote_.clear();
-                    scene_ = Scene::LanMenu;                                   // EN RED: crear partida / unirse
-                    menuIndex_ = 0;
-                }
+                lanNote_.clear();
+                if (index == 0) { netMode_ = false; scene_ = Scene::ModeMenu; menuIndex_ = 0; }     // LOCAL: elegir el modo
+                else { scene_ = Scene::LanMenu; menuIndex_ = 0; }                                    // EN RED: crear partida / unirse
                 break;
             case Scene::LanMenu:                                               // EN RED
                 lanNote_.clear();
-                if (index == 0) { if (g_cfg.playerName.empty()) { nameThen_ = 1; BeginNameEntry(Scene::LanMenu); } else StartHost(true); }
+                if (index == 0) { if (g_cfg.playerName.empty()) { nameThen_ = 1; BeginNameEntry(Scene::LanMenu); } else { netMode_ = true; scene_ = Scene::ModeMenu; menuIndex_ = 0; } }
                 else if (index == 1) { scene_ = Scene::JoinMenu; menuIndex_ = 0; }
                 else if (index == 2) { nameThen_ = 0; BeginNameEntry(Scene::LanMenu); }
                 else GoBack();
@@ -1260,7 +1330,7 @@ public:
             ev.slotCols = 8;
             ev.slotCount = app::kOwnSlots;
             ev.slotSel = ownSel_;
-            ev.slotTitle = "NIVELES PROPIOS";
+            ev.slotTitle = netMode_ ? "NIVELES PROPIOS (EN RED)" : "NIVELES PROPIOS";
             for (int s = 1; s <= app::kOwnSlots; ++s) ev.slotState.push_back(OwnIsPlayable(s) ? 1 : (app::OwnSlotHasFile(s) ? 2 : 0));
             app::LevelDef d;
             if (app::LoadOwnLevelDef(ownSel_, d)) {
@@ -1268,7 +1338,7 @@ public:
             } else {
                 ev.slotInfo = "CASILLERO " + std::to_string(ownSel_) + ": VACÍO (SE ARMAN EN CONSTRUCCIÓN)";
             }
-            ev.slotLegend = "AL TERMINAR UNO SIGUE EL PRÓXIMO OCUPADO";
+            ev.slotLegend = netMode_ ? "SE JUEGA DESDE ESTE Y LOS DEMÁS SE LOS MANDA LA SALA" : "AL TERMINAR UNO SIGUE EL PRÓXIMO OCUPADO";
             ev.slotFooter = NavHint() + "  " + BackHint();
             renderer_.RenderEditor(*slotsPreview_, ev, rgba);
             return;
@@ -1371,6 +1441,7 @@ public:
             } else {
                 lv.hint = "SALA DE " + lan_.HostName();
                 lv.startText = "ESPERANDO AL ANFITRIÓN  " + readyKey + " LISTO";
+                if (lan_.SharedMapsExpected() > 0 && !lan_.SharedMapsComplete()) lv.note = "RECIBIENDO LOS MAPAS DEL ANFITRIÓN...";
             }
             lv.backText = BackHint();
             renderer_.RenderLobby(lv, rgba);
@@ -1388,8 +1459,9 @@ public:
                 break;
             case Scene::VsMenu: {
                 v.title = "MODO BATALLA VS";
-                v.items = {"JUGAR EN ESTA PC", "EN RED", "MAPA: " + VersusMapText(), "DIFICULTAD IA: " + std::to_string(vsTier_ + 1) + "/8",
-                           "BOMBARDEO CADA: " + std::to_string(5 - vsRank_) + (vsRank_ == 4 ? " MINUTO" : " MINUTOS"), "VOLVER"};
+                v.items = {"MAPA: " + VersusMapText(), "DIFICULTAD IA: " + std::to_string(vsTier_ + 1) + "/8",
+                           "BOMBARDEO CADA: " + std::to_string(5 - vsRank_) + (vsRank_ == 4 ? " MINUTO" : " MINUTOS"),
+                           netMode_ ? "CREAR SALA" : "EMPEZAR", "VOLVER"};
                 v.note = lanNote_;
                 v.footer = touch_ ? "CRUCETA: ELEGIR Y CAMBIAR   TOQUE A PARA ACEPTAR"
                                   : (usingPad_ ? "{DPAD} ELEGIR Y CAMBIAR  " + PadButtonName(g_cfg.padFire) + " ACEPTAR" : "ARRIBA ABAJO ELEGIR  IZQUIERDA DERECHA CAMBIAR");
@@ -1397,14 +1469,19 @@ public:
             }
             case Scene::PlayMenu:
                 v.title = "JUGAR";
-                v.items = {"LOCAL", "EN RED", "NIVELES PROPIOS", "MODO BATALLA VS"};
-                v.enabled = {true, true, true, true};
+                v.items = {"LOCAL", "EN RED"};
+                v.enabled = {true, true};
                 v.footer = BackHint();
                 break;
             case Scene::LanMenu:
                 v.title = "EN RED";
                 v.items = {"CREAR PARTIDA", "UNIRSE", "NOMBRE: " + (g_cfg.playerName.empty() ? std::string("(SIN NOMBRE)") : g_cfg.playerName), "VOLVER"};
                 v.note = lanNote_;
+                v.footer = NavHint();
+                break;
+            case Scene::ModeMenu:
+                v.title = netMode_ ? "EN RED: MODO DE JUEGO" : "LOCAL: MODO DE JUEGO";
+                v.items = {"CAMPAÑA", "NIVELES PROPIOS", "MODO BATALLA VS", "VOLVER"};
                 v.footer = NavHint();
                 break;
             case Scene::JoinMenu:
@@ -1772,6 +1849,11 @@ private:
     mutable std::unique_ptr<nes::Battle> slotsPreview_;      // fondo vacio de la lista de niveles propios
     bool ownMode_ = false;                                   // jugando la serie de niveles propios (casilleros)
     bool vsMode_ = false;                                    // modo batalla vs
+    bool netMode_ = false;                                   // se esta armando una sala en red (el modo se elige para crearla)
+    bool vsOwnNet_ = false;                                  // batalla vs en red con un mapa propio del anfitrion
+    std::map<int, app::LevelDef> ownNet_;                    // en red: los niveles propios que mando el anfitrion (por numero de casillero)
+    std::vector<int> ownOrder_;                              // y su orden
+    std::vector<std::string> pendingMaps_;                   // anfitrion: lo que la sala va a mandar (numero#texto)
     int vsTier_ = 2, vsRank_ = 3;                            // dificultad de la IA (0..7) y tiempo entre bombardeos (rank 3 = cada 2 minutos)
     int vsMapKind_ = 0, vsMapNum_ = 1;                       // mapa: 0 al azar, 1 generado por numero, 2 casillero propio
     uint32_t vsSeed_ = 1;
@@ -2200,8 +2282,9 @@ extern "C" __declspec(dllimport) int __stdcall AttachConsole(unsigned long proce
 // Prueba por red entre dos procesos (el mismo ejecutable, uno con --lan-host y otro con --lan-join): arman la partida por
 // los sockets, juegan N cuadros con botones de mentira y escriben el hash del estado final; tienen que dar el mismo.
 int RunLanAuto(TestScreen& screen, bool host, const std::string& name, int frames, const std::string& outFile, const std::string& shotFile, int local, int expect,
-               bool online, const std::string& codeOut, const std::string& codeIn, double joinDelay, int paceMs, bool vs) {
+               bool online, const std::string& codeOut, const std::string& codeIn, double joinDelay, int paceMs, bool vs, bool own) {
     screen.SetAutoLan(local, expect);
+    if (own && host) screen.SetOwnForTest();                // serie de niveles propios en red (los casilleros de niveles/propios)
     if (vs) screen.SetVersusForTest(4, 2);                  // batalla vs: dificultad 5/8 y bombardeo cada 3 minutos
     screen.SetNetFrameLimit(frames);
     if (joinDelay > 0) std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(joinDelay * 1000)));   // el que llega tarde espera
@@ -2359,7 +2442,7 @@ int main(int argc, char** argv) {
     bool lanOnline = false;
     double lanDelay = 0;
     int lanPace = 0;
-    bool lanVs = false;
+    bool lanVs = false, lanOwn = false;
     int lanRole = 0, lanFrames = 600, lanLocal = 1, lanExpect = 2;                     // 1 anfitrion, 2 se une
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -2381,6 +2464,7 @@ int main(int argc, char** argv) {
         else if (a == "--lan-local" && i + 1 < argc) lanLocal = std::atoi(argv[++i]);
         else if (a == "--lan-online") lanOnline = true;
         else if (a == "--lan-vs") lanVs = true;
+        else if (a == "--lan-own") lanOwn = true;
         else if (a == "--lan-delay" && i + 1 < argc) lanDelay = std::atof(argv[++i]);
         else if (a == "--lan-pace" && i + 1 < argc) lanPace = std::atoi(argv[++i]);
         else if (a == "--lan-code-out" && i + 1 < argc) lanCodeOut = argv[++i];
@@ -2423,7 +2507,7 @@ int main(int argc, char** argv) {
     }
     screen.Reset(players);
     if (lanRole != 0 && !lanCodeIn.empty() && lanRole == 1) lanRole = 1;
-    if (lanRole != 0) return RunLanAuto(screen, lanRole == 1, lanName, lanFrames, lanOut, lanShot, lanLocal, lanExpect, lanOnline, lanCodeOut, lanCodeIn, lanDelay, lanPace, lanVs);
+    if (lanRole != 0) return RunLanAuto(screen, lanRole == 1, lanName, lanFrames, lanOut, lanShot, lanLocal, lanExpect, lanOnline, lanCodeOut, lanCodeIn, lanDelay, lanPace, lanVs, lanOwn);
     const bool headless = !wavFile.empty() || !shotFile.empty();
     if (wantMenu || (!direct && !headless)) screen.StartInMenu();       // sin argumentos: pantalla de titulo
 

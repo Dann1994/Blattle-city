@@ -114,7 +114,10 @@ struct Lan::Impl {
         std::vector<int> players;          // sus jugadores (se fija al empezar o al entrar)
         bool inGame = true;                // false: espectador que todavia no entro a la partida en marcha
         int joinFrame = 0;                 // primer cuadro en que se le piden botones
+        bool mapsOk = false;               // ya tiene todos los mapas compartidos
     };
+    double lastMapSend = 0;
+    size_t nextMap = 0;
 
     SOCKET sock = INVALID_SOCKET;
     SOCKET beacon = INVALID_SOCKET;        // buscando: escucha los avisos que el anfitrion manda a toda la red (puerto + 1)
@@ -260,7 +263,7 @@ struct Lan::Impl {
 // La version del programa para el juego en red: tiene que ser la misma en Windows y en Android (se compilan en momentos distintos),
 // asi que es una constante que se cambia a mano cada vez que cambia la simulacion o el protocolo.
 std::string Lan::BuildId() {
-    return "BCNES-2026.10.18-vs1";
+    return "BCNES-2026.10.18-vs2";
 }
 
 Lan::Lan(uint16_t port) : impl_(new Impl) {
@@ -491,6 +494,10 @@ void Lan::Leave() {
     impl_->hostHash.clear();
     impl_->memberHash.clear();
     for (int k = 0; k < 4; ++k) impl_->wantUntil[k] = 0;
+    maps_.clear();
+    mapGot_.clear();
+    mapTotal_ = 0;
+    noLateJoin_ = false;
     games_.clear();
     players_.clear();
     colors_.clear();
@@ -515,6 +522,7 @@ std::string Lan::LobbyMessage(bool started) const {
     for (size_t i = 0; i < players_.size(); ++i) {
         os << "|" << players_[i] << "|" << colors_[i] << "|" << (ready_[i] ? 1 : 0) << "|" << owners_[i];
     }
+    os << "|" << maps_.size();                                              // cuantos mapas propios va a mandar el anfitrion
     return os.str();
 }
 
@@ -613,6 +621,27 @@ void Lan::ToggleReady(int k) {
 }
 
 // ---------------------------------------------------------------- partida
+
+void Lan::SetSharedMaps(const std::vector<std::string>& maps) {
+    maps_ = maps;
+    mapTotal_ = static_cast<int>(maps.size());
+    mapGot_.assign(maps.size(), true);
+    noLateJoin_ = noLateJoin_ || !maps.empty();
+    for (auto& m : impl_->members) m.mapsOk = false;
+}
+
+bool Lan::SharedMapsComplete() const {
+    if (state_ == State::Hosting) return true;
+    if (mapTotal_ <= 0) return true;
+    for (int i = 0; i < mapTotal_; ++i) if (static_cast<size_t>(i) >= mapGot_.size() || !mapGot_[static_cast<size_t>(i)]) return false;
+    return true;
+}
+
+bool Lan::AllMembersHaveMaps() const {
+    if (maps_.empty()) return true;
+    for (const auto& m : impl_->members) if (!m.mapsOk) return false;
+    return true;
+}
 
 bool Lan::StartGame(int friendlyFire) {
     if (state_ != State::Hosting || started_) return false;
@@ -837,6 +866,7 @@ void Lan::Update() {
                 }
             } else if (member) {
                 member->lastSeen = now;
+                if (kind == 'H' && f.size() >= 2) member->mapsOk = f[1] == "1";
                 if (kind == 'X') {
                     if (!started_) {
                         RemovePlayersOf(member->id);
@@ -966,6 +996,15 @@ void Lan::Update() {
                         ready_.push_back(f[b + 2] == "1");
                         owners_.push_back(ToInt(f[b + 3]));
                     }
+                    {
+                        const size_t extra = static_cast<size_t>(7 + cnt * 4);
+                        const int total = f.size() > extra ? ToInt(f[extra]) : 0;
+                        if (total >= 0 && total <= 99 && total != mapTotal_) {
+                            mapTotal_ = total;
+                            maps_.assign(static_cast<size_t>(total), std::string());
+                            mapGot_.assign(static_cast<size_t>(total), false);
+                        }
+                    }
                     RecomputeMine();
                     if (started_ && !wasStarted) {                          // llegue con la partida en marcha si no estaba entre los del principio
                         bool inMask = false;
@@ -999,6 +1038,15 @@ void Lan::Update() {
                     while (static_cast<size_t>(impl_->contiguous) < impl_->have.size() && impl_->have[static_cast<size_t>(impl_->contiguous)]) ++impl_->contiguous;
                 } else if (kind == 'D') {
                     desync_ = true;
+                } else if (kind == 'M' && f.size() >= 4 && state_ == State::Joined && !started_) {         // un mapa propio del anfitrion
+                    const int total = ToInt(f[1]), idx = ToInt(f[2]);
+                    if (total > 0 && total <= 99 && idx >= 0 && idx < total) {
+                        if (mapTotal_ != total) { maps_.assign(static_cast<size_t>(total), std::string()); mapGot_.assign(static_cast<size_t>(total), false); mapTotal_ = total; }
+                        std::string text = f[3];
+                        for (char& c : text) if (c == '~') c = '\n';
+                        maps_[static_cast<size_t>(idx)] = text;
+                        mapGot_[static_cast<size_t>(idx)] = true;
+                    }
                 }
             }
         }
@@ -1008,6 +1056,14 @@ void Lan::Update() {
     // ---------------- enviar / vencimientos ----------------
     if (state_ == State::Hosting) {
         UpdateInternet();
+        if (!maps_.empty() && !started_ && now - impl_->lastMapSend > 0.12) {          // los mapas propios, de a uno, a quien todavia no los tiene
+            impl_->lastMapSend = now;
+            impl_->nextMap = (impl_->nextMap + 1) % maps_.size();
+            std::string text = maps_[impl_->nextMap];
+            for (char& c : text) if (c == '\n') c = '~';
+            const std::string msg = "BCNES1M|" + std::to_string(maps_.size()) + "|" + std::to_string(impl_->nextMap) + "|" + text;
+            for (const auto& m : impl_->members) if (!m.mapsOk) impl_->Send(m.addr, msg);
+        }
         if (now - impl_->lastBeacon > 1.5) {                              // aviso a toda la red: asi los que buscan la ven sin tener que preguntar
             impl_->lastBeacon = now;
             std::ostringstream os;
@@ -1124,7 +1180,7 @@ void Lan::Update() {
     } else if (state_ == State::Joined) {
         if (now - impl_->lastBeat > 1.0) {
             impl_->lastBeat = now;
-            impl_->Send(impl_->hostAddr, "BCNES1H");
+            impl_->Send(impl_->hostAddr, std::string("BCNES1H|") + (SharedMapsComplete() ? "1" : "0"));
             for (int k = 0; k < LocalCount(); ++k) SendChoice(k);          // por si se perdio el aviso de un color
         }
         if (started_) {

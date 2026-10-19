@@ -139,6 +139,14 @@ public:
     int FriendlyFire() const { return friendly_; }       // (tambien lleva las opciones de la sala: modo batalla vs, dificultad, bombardeo y mapa)
     void SetOptions(int v) { friendly_ = v; }             // solo el anfitrion: lo que la sala muestra antes de empezar
     void SetNoLateJoin(bool v) { noLateJoin_ = v; }       // sin entrar con la partida en marcha (batalla vs)
+    // ---- mapas propios compartidos ----
+    // El anfitrion fija los mapas (cada uno es un texto) y la sala se los manda a todos hasta que cada PC confirma que los tiene.
+    // Con mapas fijados no se puede empezar hasta que todos los tengan, ni entrar con la partida en marcha.
+    void SetSharedMaps(const std::vector<std::string>& maps);
+    const std::vector<std::string>& SharedMaps() const { return maps_; }       // anfitrion: los suyos; miembro: los recibidos
+    bool SharedMapsComplete() const;                      // miembro: ya llegaron todos (anfitrion: true)
+    bool AllMembersHaveMaps() const;                      // anfitrion: todas las PC de la sala los tienen
+    int SharedMapsExpected() const { return mapTotal_; }  // cuantos mapas va a haber (lo dice el anfitrion; 0 = ninguno)
     int NumPlayers() const { return static_cast<int>(players_.size()); }
     // El juego pide el cuadro `f`: se puede simular cuando ya llegaron los botones de todos.
     bool FrameReady(int f) const;
@@ -182,6 +190,9 @@ private:
     bool started_ = false;
     int friendly_ = 0;
     bool noLateJoin_ = false;
+    std::vector<std::string> maps_;
+    std::vector<bool> mapGot_;
+    int mapTotal_ = 0;
     std::string lanCode_;
     std::vector<std::pair<std::string, std::string>> lanCodes_;
     int diagSeen_ = 0;

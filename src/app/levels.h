@@ -76,6 +76,9 @@ LevelDef BuiltinLevelDef(int level);                     // uno de los 40 nivele
 // Arma los datos para el motor: bloques del campo, franja de arriba y la ficha del nivel.
 void LevelDefToStage(const LevelDef& def, uint8_t blocks[kLevelRows][kLevelCols], uint8_t strip[kLevelCols], nes::Battle::StageSpec& spec);
 bool SaveLevelDef(const std::string& path, const LevelDef& def);
+// El mismo formato del archivo como texto (para mandar un nivel por la red).
+std::string LevelDefToText(const LevelDef& def);
+bool LevelDefFromText(const std::string& text, LevelDef& def);
 bool LoadLevelDef(const std::string& path, LevelDef& def);       // false si no existe o esta danado
 // Cuidados al armar un nivel: apariciones encerradas, dentro de la fortaleza, etc. (vacio = todo bien).
 std::vector<std::string> CheckLevelDef(const LevelDef& def);

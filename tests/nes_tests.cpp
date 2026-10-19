@@ -2333,6 +2333,33 @@ void TestVersusMode() {
     CHECK_EQ(h1->StateHash(), h2->StateHash());
 }
 
+void TestLanSharedMaps() {
+    std::printf("[red] los mapas propios del anfitrion llegan a los demas (y no se empieza hasta que todos los tienen)\n");
+    const uint16_t port = 47961;
+    app::Lan host(port), guest(port);
+    CHECK(host.Host("Ana"));
+    std::vector<std::string> maps;
+    for (int i = 0; i < 5; ++i) {
+        app::LevelDef d = app::GenerateVersusLevel(static_cast<uint32_t>(10 + i));
+        maps.push_back(std::to_string(i + 3) + "#" + app::LevelDefToText(d));     // (el numero de casillero, #, el nivel)
+    }
+    host.SetSharedMaps(maps);
+    CHECK(guest.Search());
+    CHECK(SpinLan({&host, &guest}, [&] { return !guest.Games().empty(); }));
+    CHECK(guest.Join(guest.Games()[0], "Beto"));
+    CHECK(SpinLan({&host, &guest}, [&] { return guest.state() == app::Lan::State::Joined; }));
+    CHECK(!host.AllMembersHaveMaps() || guest.SharedMapsComplete());
+    CHECK(SpinLan({&host, &guest}, [&] { return guest.SharedMapsComplete() && guest.SharedMapsExpected() == 5 && host.AllMembersHaveMaps(); }, 8.0));
+    CHECK(guest.SharedMaps() == maps);
+    app::LevelDef back;
+    const std::string& m2 = guest.SharedMaps()[2];
+    CHECK(m2.substr(0, 2) == "5#" && app::LevelDefFromText(m2.substr(m2.find('#') + 1), back) && back.versus);
+    // sin mapas fijados no hay nada que esperar
+    app::Lan h2(port + 1), g2(port + 1);
+    CHECK(h2.Host("Cata"));
+    CHECK(h2.AllMembersHaveMaps() && h2.SharedMaps().empty());
+}
+
 void TestGameOverScreen() {
     std::printf("[pantallas] sin base o sin jugadores aparece GAME OVER, luego HI-SCORE si hay record y vuelve al titulo\n");
     auto fx = MakeFlow(1, 2);
@@ -2532,6 +2559,7 @@ int main() {
     TestLanLateJoin();
     TestCustomLevels();
     TestVersusMode();
+    TestLanSharedMaps();
     TestBossSpawnPointsAnyPlayerCount();
     TestBossDifficultyScaling();
     TestEnemyItemsAndShield();

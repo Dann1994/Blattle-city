@@ -24,7 +24,7 @@ Jugar en red con la PC (crossplay)
   - El anfitrión conviene que sea la PC. Un teléfono con datos móviles casi nunca puede ser anfitrión (el operador no deja entrar
     conexiones), pero sí puede unirse a una sala de la PC.
   - Las dos versiones tienen que ser de la misma entrega (el juego lo avisa si no).
-  - Los niveles hechos a mano no se comparten por red (en red valen los 40 de fábrica y los mapas de batalla generados).
+  - Los niveles propios y los mapas propios de batalla también se juegan en red: la sala del anfitrión se los manda a los demás.
 
 Compilar de nuevo (Windows)
   Hace falta: JDK 17, Android SDK (build-tools 34, plataforma 34) y NDK 26 en C:\android-dev (o la carpeta de ANDROID_DEV),

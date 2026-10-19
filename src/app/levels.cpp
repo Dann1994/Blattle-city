@@ -359,11 +359,8 @@ void LevelDefToStage(const LevelDef& d, uint8_t blocks[kLevelRows][kLevelCols], 
     }
 }
 
-bool SaveLevelDef(const std::string& path, const LevelDef& d) {
-    std::error_code ec;
-    std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    if (!f) return false;
+namespace {
+void WriteLevel(std::ostream& f, const LevelDef& d) {
     f << "BCNES-NIVEL 1\n";
     f << "tipo=" << (d.versus ? "batalla" : (d.boss ? "especial" : "normal")) << "\n";
     if (d.versus) {
@@ -381,12 +378,9 @@ bool SaveLevelDef(const std::string& path, const LevelDef& d) {
         for (int c = 0; c < kLevelCols; ++c) f << kHex[d.cells[r][c] % 14];
         f << "\n";
     }
-    return static_cast<bool>(f);
 }
 
-bool LoadLevelDef(const std::string& path, LevelDef& out) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) return false;
+bool ReadLevel(std::istream& f, LevelDef& out) {
     std::string line;
     if (!std::getline(f, line) || line.rfind("BCNES-NIVEL", 0) != 0) return false;
     LevelDef d;
@@ -450,6 +444,32 @@ bool LoadLevelDef(const std::string& path, LevelDef& out) {
     if (rows != kGridRows) return false;
     out = d;
     return true;
+}
+}  // namespace
+
+bool SaveLevelDef(const std::string& path, const LevelDef& d) {
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    if (!f) return false;
+    WriteLevel(f, d);
+    return static_cast<bool>(f);
+}
+
+bool LoadLevelDef(const std::string& path, LevelDef& out) {
+    std::ifstream f(path, std::ios::binary);
+    return f && ReadLevel(f, out);
+}
+
+std::string LevelDefToText(const LevelDef& d) {
+    std::ostringstream os;
+    WriteLevel(os, d);
+    return os.str();
+}
+
+bool LevelDefFromText(const std::string& text, LevelDef& out) {
+    std::istringstream is(text);
+    return ReadLevel(is, out);
 }
 
 std::vector<std::string> CheckLevelDef(const LevelDef& d) {
