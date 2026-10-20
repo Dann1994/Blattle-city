@@ -122,6 +122,7 @@ public:
     // Pantalla de recuento de puntos (hasta 4 jugadores) y pantalla de GAME OVER.
     void RenderScoreScreen(const ScoreTally& tally, std::vector<uint8_t>& rgba) const;
     void RenderGameOver(std::vector<uint8_t>& rgba) const;
+    void RenderContinue(int continues, int seconds, bool canAccept, std::vector<uint8_t>& rgba) const;      // "CONTINUAR?" con los continues que quedan
     void RenderHighScore(int score, int frame, std::vector<uint8_t>& rgba) const;
     void RenderMenu(const MenuView& menu, std::vector<uint8_t>& rgba) const;
     void RenderLobby(const LobbyView& lobby, std::vector<uint8_t>& rgba) const;

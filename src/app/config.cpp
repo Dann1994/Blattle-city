@@ -33,6 +33,13 @@ bool Config::Load(const std::string& path) {
         else if (name == "samples") useSamples = value != 0;
         else if (name == "autoupdate") autoUpdate = value != 0;
         else if (name == "voicechat") voiceChat = value != 0;
+        else if (name == "diffpreset") diffPreset = value < 0 ? 0 : (value > 3 ? 3 : value);
+        else if (name == "cufriendly") cuFriendly = value < 0 ? 0 : (value > 2 ? 2 : value);
+        else if (name == "cuevery") cuEvery = value >= 10 ? 10 : (value >= 5 ? 5 : 1);
+        else if (name == "cushared") cuShared = value != 0;
+        else if (name == "cuai") cuAi = value < 0 ? 0 : (value > 2 ? 2 : value);
+        else if (name == "culives") cuLives = value < 1 ? 1 : (value > 10 ? 10 : value);
+        else if (name == "vslives") vsLives = value < 1 ? 1 : (value > 10 ? 10 : value);
     }
     return true;
 }
@@ -56,6 +63,13 @@ bool Config::Save(const std::string& path) const {
     f << "samples=" << (useSamples ? 1 : 0) << "\n";
     f << "autoupdate=" << (autoUpdate ? 1 : 0) << "\n";
     f << "voicechat=" << (voiceChat ? 1 : 0) << "\n";
+    f << "diffpreset=" << diffPreset << "\n";
+    f << "cufriendly=" << cuFriendly << "\n";
+    f << "cuevery=" << cuEvery << "\n";
+    f << "cushared=" << (cuShared ? 1 : 0) << "\n";
+    f << "cuai=" << cuAi << "\n";
+    f << "culives=" << cuLives << "\n";
+    f << "vslives=" << vsLives << "\n";
     return static_cast<bool>(f);
 }
 

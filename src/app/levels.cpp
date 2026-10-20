@@ -302,7 +302,8 @@ void GenerateWideLevel(int level, uint8_t out[kLevelRows][kLevelCols]) {
     }
     EnsureReachable(out, layers);
     const int theme = (l - 1) / 5;
-    if (theme == 6) PlaceLavaPools(out, l, 7);
+    if (l == 5) PlaceLavaPools(out, l, 2);                // la lava se presenta en el nivel 5: dos pozos contenidos
+    else if (theme == 6) PlaceLavaPools(out, l, 7);
     else if (theme == 7) PlaceLavaPools(out, l, 3);
 }
 

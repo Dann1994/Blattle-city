@@ -59,6 +59,7 @@ void GameFlow::StartScore() {
         for (int k = 0; k < 4; ++k) tally_.kills[p][k] = battle_.KillCount(p, k);
     }
     UpdateHiScore();
+    if (++cleared_ % every_ == 0) ++continues_;           // nivel superado: suma un continue cada `every_` niveles
     tally_.hiScore = hiScore_;
     mode_ = Mode::ScoreScreen;
     phase_ = 0;
@@ -208,12 +209,37 @@ void GameFlow::Step() {
             return;
         case Mode::GameOverMessage: {
             battle_.RunFrame();
-            if (!battle_.GameOverMessageActive()) {              // termino el cartel: pantalla de GAME OVER
+            if (!battle_.GameOverMessageActive()) {              // termino el cartel: si quedan continues se pregunta; si no, pantalla de GAME OVER
+                if (continues_ > 0 && level_ > 0) {
+                    mode_ = Mode::ContinuePrompt;
+                    continueTimer_ = kContinueFrames;
+                    startPressed_ = false;
+                    return;
+                }
                 mode_ = Mode::GameOver;
                 gameOverTimer_ = 0;
                 battle_.DebugPlaySound(2);                       // la musica de GAME OVER
             }
             startPressed_ = false;
+            return;
+        }
+        case Mode::ContinuePrompt: {
+            battle_.RunSoundFrame();
+            if (startPressed_) {                                 // seguir: todos vuelven con sus vidas y se recarga el nivel
+                startPressed_ = false;
+                --continues_;
+                battle_.ReviveForContinue();
+                if (hooks_.loadNextLevel) hooks_.loadNextLevel(level_);
+                clearTimer_ = 0;
+                gameOverTimer_ = 0;
+                StartIntro();
+                return;
+            }
+            if (--continueTimer_ <= 0) {                         // no se contesto: se acabo
+                mode_ = Mode::GameOver;
+                gameOverTimer_ = 0;
+                battle_.DebugPlaySound(2);
+            }
             return;
         }
         case Mode::GameOver: {

@@ -713,7 +713,7 @@ void TestLevelsAreValid() {
                     if (!cleared && !(boss && wr <= 4) && g[wr][wc] != v) ++diff;
                 }
             }
-            if (level <= 5) CHECK(diff <= 2);                              // 1-5: la construccion original sin cambios (a lo sumo un paso abierto); despues la tematica la modifica
+            if (level <= 4) CHECK(diff <= 2);                              // 1-5: la construccion original sin cambios (a lo sumo un paso abierto); despues la tematica la modifica
         }
         // alcanzabilidad desde el frente de la base
         bool reach[14][27] = {};
@@ -765,12 +765,13 @@ void TestLevelsAreValid() {
         CHECK(tier(5, isSteel) > tier(4, isSteel) + 20);                     // 26-30: hierro
         CHECK(tier(6, isLava) >= 10);                                        // 31-35: lava
         CHECK(tier(7, isLava) >= 1 && tier(7, isLava) < tier(6, isLava));    // 36-40: mezcla (poca lava)
-        for (int t = 0; t < 6; ++t) CHECK_EQ(tier(t, isLava), 0);
+        CHECK(count(5, isLava) >= 2);                                        // la lava se presenta en el nivel 5
+        for (int l = 1; l <= 30; ++l) if (l != 5) CHECK_EQ(count(l, isLava), 0);
         // siguen apareciendo los anteriores
         CHECK(tier(2, isForest) > 0 && tier(3, isWater) > 0 && tier(4, isSand) > 0 && tier(5, isIce) > 0 && tier(6, isWater) > 0);
         for (int l = 1; l <= app::kLevelCount; ++l) CHECK(count(l, isBrick) > 0);
         // la lava siempre esta contenida: sus vecinas son lava, ladrillo o hierro (nunca un lugar abierto)
-        for (int l = 31; l <= app::kLevelCount; ++l) {
+        for (int l = 5; l <= app::kLevelCount; ++l) {
             u8 g[app::kLevelRows][app::kLevelCols];
             app::GenerateWideLevel(l, g);
             for (int r = 0; r < app::kLevelRows; ++r)
@@ -1368,8 +1369,8 @@ void TestBossSpawnPointsAnyPlayerCount() {
                 b.DebugClearEnemies();
             }
             for (int i = 0; i < 5; ++i) CHECK(seen[i]);                 // los cinco principales, siempre
-            CHECK_EQ(seen[5] && seen[6], players >= 3);                 // los laterales, solo con 3 o 4 jugadores
-            CHECK_EQ(seen[5] || seen[6], players >= 3);
+            CHECK_EQ(seen[5] && seen[6], players >= 4);                 // los laterales, solo con 4 jugadores
+            CHECK_EQ(seen[5] || seen[6], players >= 4);
         }
     }
 }
@@ -3252,6 +3253,50 @@ std::unique_ptr<nes::Battle> MakeItemScene() {
     return b;
 }
 
+void TestGhostWalls() {
+    std::printf("[invisible] atraviesa ladrillos y tanques, no el hierro; al terminar despeja los ladrillos que tiene encima\n");
+    auto make = [&](int wallBlock) {
+        auto b = std::make_unique<nes::Battle>();
+        b->SetWide(true);
+        b->SetLevel(1);
+        b->NewGame(1, 1);
+        u8 blocks[14][27];
+        std::memset(blocks, 13, sizeof(blocks));
+        for (int r = 3; r < 10; ++r) blocks[r][14] = static_cast<u8>(wallBlock);              // una pared vertical
+        b->LoadWideStage(blocks);
+        b->StartStage();
+        b->R(nes::ram_enemy_spawn_cnt) = 0;
+        for (int f = 0; f < 160; ++f) b->RunFrame();
+        b->DebugClearEnemies();
+        b->R(nes::ram_clock_timer) = 0x0A;
+        b->DebugClearBullets();
+        b->SetHelmet(0, 0);
+        return b;
+    };
+    auto walk = [&](int wall, bool ghost) {
+        auto b = make(wall);
+        if (ghost) b->DebugSetGhost(0, 600);
+        b->SetTankPos(0, 14 * 16 - 40, 100);
+        b->DebugSetTankFlags(0, 0xA3);                                         // mirando a la derecha
+        for (int f = 0; f < 120; ++f) { b->SetButtons(0, nes::con_btn_Right); b->RunFrame(); }
+        return b->TankX(0);
+    };
+    const int wallX = 14 * 16;
+    CHECK(walk(4, false) < wallX);                                             // ladrillo: lo frena
+    CHECK(walk(4, true) > wallX + 16);                                         // invisible: lo cruza
+    CHECK(walk(9, true) < wallX);                                              // hierro: lo frena igual
+    // al terminar la invisibilidad dentro de la pared, el tanque queda libre
+    auto b = make(4);
+    b->DebugSetGhost(0, 30);
+    b->SetTankPos(0, wallX + 8, 100);
+    for (int f = 0; f < 40; ++f) b->RunFrame();
+    CHECK(!b->TankGhost(0));
+    b->DebugSetTankFlags(0, 0xA3);
+    const int x0 = b->TankX(0);
+    for (int f = 0; f < 40; ++f) { b->SetButtons(0, nes::con_btn_Right); b->RunFrame(); }
+    CHECK(b->TankX(0) > x0 + 10);
+}
+
 void TestNewItems() {
     std::printf("[items nuevos] invisible, helicoptero aliado, minas, portal y velocidad (para jugadores y para enemigos)\n");
     // ---- velocidad: el doble de camino por el mismo tiempo ----
@@ -3531,6 +3576,202 @@ void TestVoiceChat() {
     bool g1Got = false;
     SpinLan({&host, &g1, &g2}, [&] { if (g1.PopVoice(who, got)) g1Got = who == 0 && got == pk; return g1Got; });
     CHECK(g1Got);
+}
+
+void TestDifficultyRulesAndContinues() {
+    std::printf("[dificultad] salud de enemigos, items para todos, la IA y los items, balas, continues, vidas y granada del royale\n");
+    auto scene = [&](int ai, bool shared, int lives, int players) {
+        auto b = std::make_unique<nes::Battle>();
+        b->SetWide(true);
+        b->SetLevel(21);                                                       // escalon 4: la salud crece en dificil
+        nes::Battle::Rules r;
+        r.ai = ai; r.itemsShared = shared; r.lives = lives;
+        b->SetRules(r);
+        b->NewGame(players, 21);
+        u8 blocks[14][27];
+        std::memset(blocks, 13, sizeof(blocks));
+        b->LoadWideStage(blocks);
+        b->StartStage();
+        b->R(nes::ram_enemy_spawn_cnt) = 0;
+        for (int f = 0; f < 160; ++f) b->RunFrame();
+        b->DebugClearEnemies();
+        b->R(nes::ram_clock_timer) = 0x0A;
+        b->DebugClearBullets();
+        return b;
+    };
+    // salud por tipo: facil 1/1/1/3, normal 1/1/2/4, dificil crece con el escalon
+    {
+        const int easy[4] = {1, 1, 1, 3}, normal[4] = {1, 1, 2, 4};
+        for (int kind = 0; kind < 4; ++kind) {
+            auto a = scene(0, false, 3, 1);
+            auto n = scene(1, false, 3, 1);
+            auto h = scene(2, false, 3, 1);
+            auto hp = [&](std::unique_ptr<nes::Battle>& b) {
+                const int e = b->DebugSpawnEnemy(kind, false);
+                for (int f = 0; f < 120; ++f) b->RunFrame();
+                return b->EnemyHealth(e);
+            };
+            CHECK_EQ(hp(a), easy[kind]);
+            CHECK_EQ(hp(n), normal[kind]);
+            CHECK(hp(h) > normal[kind]);
+        }
+    }
+    // vidas iniciales
+    {
+        auto b = scene(0, false, 5, 2);
+        CHECK_EQ(b->Lives(0), 5);
+        CHECK_EQ(b->Lives(1), 5);
+        auto d = scene(2, false, 2, 2);
+        CHECK_EQ(d->Lives(0), 2);
+        auto v = scene(2, false, 10, 1);
+        CHECK_EQ(v->Lives(0), 10);
+    }
+    // items para todos: estrella, casco, pistola, velocidad e invisible; la granada no
+    {
+        auto sh = scene(0, true, 3, 3);
+        auto in = scene(1, false, 3, 3);
+        sh->DebugGiveItem(3, 0);
+        in->DebugGiveItem(3, 0);
+        CHECK(sh->Upgrade(1) > 0 && sh->Upgrade(2) > 0);
+        CHECK(in->Upgrade(0) > 0 && in->Upgrade(1) == 0 && in->Upgrade(2) == 0);
+        sh->DebugGiveItem(nes::Battle::kBonusGhost, 1);
+        CHECK(sh->TankGhost(0) && sh->TankGhost(1) && sh->TankGhost(2));
+        in->DebugGiveItem(nes::Battle::kBonusGhost, 1);
+        CHECK(!in->TankGhost(0) && in->TankGhost(1));
+        sh->DebugGiveItem(nes::Battle::kBonusSpeed, 2);
+        CHECK(sh->TankFast(0) && sh->TankFast(1));
+        sh->DebugGiveItem(6, 0);
+        CHECK_EQ(sh->Upgrade(2), 0x60);
+    }
+    // los enemigos y los items: facil no agarran, normal agarran, solo dificil los buscan
+    {
+        for (int ai = 0; ai < 3; ++ai) {
+            auto b = scene(ai, false, 3, 1);
+            b->DebugSpawnRandomBonus();
+            const int e = b->DebugSpawnEnemy(0, false);
+            for (int f = 0; f < 120; ++f) b->RunFrame();
+            b->R(nes::ram_clock_timer) = 0;
+            const int bx = b->R(nes::ram_bonus_pos_X), by = b->R(nes::ram_bonus_pos_Y);
+            b->SetTankPos(e, bx, by);
+            b->DebugSetTankFlags(e, 0xA0);
+            b->SetTankPos(0, 20, 220);
+            for (int f = 0; f < 20; ++f) b->RunFrame();
+            const bool taken = !b->BonusActive();
+            CHECK_EQ(taken, ai >= 1);
+        }
+    }
+    // balas: facil/normal frenan toda bala enemiga con una bala aliada; dificil no
+    {
+        auto clash = [&](int ai, int enemyKind, int allyUpgrade) {
+            auto b = scene(ai, false, 3, 1);
+            const int e = b->DebugSpawnEnemy(enemyKind, false);
+            for (int f = 0; f < 120; ++f) b->RunFrame();
+            b->R(nes::ram_clock_timer) = 0x0A;
+            b->DebugClearBullets();
+            b->SetUpgrade(0, static_cast<u8>(allyUpgrade));
+            b->SetTankPos(e, 216, 40);
+            b->DebugSetTankFlags(e, 0xA2);
+            b->SetTankPos(0, 216, 200);
+            b->DebugSetTankFlags(0, 0xA0);
+            b->DebugFire(e);
+            b->DebugFire(0);
+            bool enemyAlive = false;
+            for (int f = 0; f < 60; ++f) {
+                b->SetTankPos(e, 216, 40);
+                b->SetTankPos(0, 216, 200);
+                b->RunFrame();
+            }
+            enemyAlive = b->BulletActive(e);
+            return enemyAlive;
+        };
+        CHECK(!clash(0, 3, 0));                                                // facil: una bala debil frena una enemiga fuerte
+        CHECK(!clash(1, 3, 0));
+        CHECK(clash(2, 3, 0));                                                 // dificil: la de nivel mayor sigue
+    }
+    // continues: preguntan, descuentan, recargan el nivel con todas las vidas; sin respuesta terminan; se ganan al superar niveles
+    {
+        auto fx = MakeFlow(1, 2);
+        using Mode = app::GameFlow::Mode;
+        fx->flow->SetContinues(2, 1);
+        for (int f = 0; f < 200 && fx->flow->mode() != Mode::Playing; ++f) fx->flow->Step();
+        for (int f = 0; f < 60; ++f) fx->flow->Step();
+        fx->battle->SetLives(0, 0);
+        fx->battle->SetLives(1, 0);
+        fx->battle->R(nes::ram_game_over_flag) = 0;
+        for (int f = 0; f < 800 && fx->flow->mode() != Mode::ContinuePrompt; ++f) fx->flow->Step();
+        CHECK(fx->flow->mode() == Mode::ContinuePrompt);
+        CHECK_EQ(fx->flow->Continues(), 2);
+        CHECK(fx->flow->ContinueSecondsLeft() >= 9);
+        const int loaded0 = fx->loaded;
+        fx->flow->PressStart();
+        fx->flow->Step();
+        CHECK(fx->flow->mode() == Mode::StageIntro);
+        CHECK_EQ(fx->flow->Continues(), 1);
+        CHECK_EQ(fx->loaded, loaded0 + 1);                                     // el mismo nivel se recarga
+        CHECK_EQ(fx->flow->level(), 1);
+        CHECK_EQ(fx->battle->Lives(0), 3);
+        CHECK_EQ(fx->battle->Lives(1), 3);
+        CHECK(!fx->battle->GameOver());
+        // sin respuesta: game over
+        for (int f = 0; f < 300 && fx->flow->mode() != Mode::Playing; ++f) fx->flow->Step();
+        for (int f = 0; f < 60; ++f) fx->flow->Step();
+        fx->battle->SetLives(0, 0);
+        fx->battle->SetLives(1, 0);
+        fx->battle->R(nes::ram_game_over_flag) = 0;
+        for (int f = 0; f < 800 && fx->flow->mode() != Mode::ContinuePrompt; ++f) fx->flow->Step();
+        CHECK(fx->flow->mode() == Mode::ContinuePrompt);
+        for (int f = 0; f < app::GameFlow::kContinueFrames + 5 && fx->flow->mode() == Mode::ContinuePrompt; ++f) fx->flow->Step();
+        CHECK(fx->flow->mode() == Mode::GameOver);
+        // sin continues: directo al game over
+        auto none = MakeFlow(1, 1);
+        none->flow->SetContinues(0, 5);
+        for (int f = 0; f < 260; ++f) none->flow->Step();
+        none->battle->R(nes::ram_game_over_flag) = 0;
+        for (int f = 0; f < 800 && none->flow->mode() != Mode::GameOver; ++f) {
+            CHECK(none->flow->mode() != Mode::ContinuePrompt);
+            none->flow->Step();
+        }
+        CHECK(none->flow->mode() == Mode::GameOver);
+        // se ganan al superar niveles: cada 1 nivel suma uno; cada 5 niveles, uno a los 5
+        for (int every : {1, 5}) {
+            auto g = MakeFlow(1, 1);
+            g->flow->SetContinues(0, every);
+            int gained = 0;
+            for (int lv = 1; lv <= 5; ++lv) {
+                for (int f = 0; f < 400 && g->flow->mode() != Mode::Playing; ++f) g->flow->Step();
+                for (int f = 0; f < 60; ++f) g->flow->Step();
+                g->battle->R(nes::ram_enemy_spawn_cnt) = 0;
+                g->battle->DebugClearEnemies();
+                for (int f = 0; f < 600 && g->flow->mode() != Mode::ScoreScreen; ++f) g->flow->Step();
+                CHECK(g->flow->mode() == Mode::ScoreScreen);
+                gained = g->flow->Continues();
+                g->flow->SkipToNextLevel();
+            }
+            CHECK_EQ(gained, every == 1 ? 5 : 1);
+        }
+    }
+    // battle royale: la granada revienta a todos los demas jugadores
+    {
+        auto b = MakeVsAi(8, 0x03, 4, true, false, 5);
+        for (int f = 0; f < 120; ++f) b->RunFrame();
+        for (int id = 0; id < 8; ++id) CHECK(b->TankFlags(id) >= 0x80 && b->TankFlags(id) < 0xE0);
+        b->DebugGiveItem(4, 3);
+        for (int id = 0; id < 8; ++id) {
+            if (id == 3) CHECK(b->TankFlags(id) >= 0x80 && b->TankFlags(id) < 0xE0);   // quien la agarro sigue en pie
+            else CHECK(b->TankFlags(id) >= 0x10 && b->TankFlags(id) < 0x80);           // los demas explotan
+        }
+        CHECK_EQ(b->RoyaleKills(3), 7);
+    }
+    // vidas configurables en la batalla vs y el royale (hasta 10)
+    {
+        auto b = MakeVsAi(8, 0x03, 4, true, false, 5);
+        CHECK_EQ(b->RoyaleLives(0), 3);
+        nes::Battle c;
+        c.SetStartLives(99);
+        CHECK_EQ(c.StartLives(), 10);
+        c.SetStartLives(0);
+        CHECK_EQ(c.StartLives(), 1);
+    }
 }
 
 void TestUpdater() {
@@ -3841,6 +4082,8 @@ int main() {
     TestRoyale();
     TestNewItems();
     TestUpdater();
+    TestDifficultyRulesAndContinues();
+    TestGhostWalls();
     TestVoiceChat();
     TestCampaignItems();
     TestLanSharedMaps();

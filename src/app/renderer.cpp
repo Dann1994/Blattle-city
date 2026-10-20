@@ -1139,6 +1139,21 @@ void Renderer::RenderGameOver(std::vector<uint8_t>& rgba) const {
     ToRgba(canvas, rgba);
 }
 
+void Renderer::RenderContinue(int continues, int seconds, bool canAccept, std::vector<uint8_t>& rgba) const {
+    std::vector<uint32_t> canvas(static_cast<size_t>(kScreenW) * kScreenH, 0x000000);
+    const int x0 = (kScreenW - 9 * 32) / 2;
+    DrawBrickLetters(canvas, kScreenW, "CONTINUE?", x0, 40, 0);
+    const std::string n = "CONTINUES: " + std::to_string(continues);
+    DrawText(canvas, kScreenW, (kScreenW - TextWidth(n)) / 2, 110, n, 0xF8D878);
+    const std::string t = std::to_string(seconds < 0 ? 0 : seconds);
+    DrawText(canvas, kScreenW, (kScreenW - TextWidth(t)) / 2, 140, t, 0xFCFCFC);
+    const std::string a = canAccept ? "START: CONTINUAR" : "ESPERANDO AL ANFITRION...";
+    DrawText(canvas, kScreenW, (kScreenW - TextWidth(a)) / 2, 180, a, 0xB8F8B8);
+    const std::string b = "SI NO, TERMINA LA PARTIDA";
+    DrawText(canvas, kScreenW, (kScreenW - TextWidth(b)) / 2, 200, b, 0x909090);
+    ToRgba(canvas, rgba);
+}
+
 // Pantalla de HI-SCORE de la ROM (sub_C44B): "HISCORE" enorme en (16, 50) y el puntaje debajo en (16, 100), con
 // los ceros de la izquierda sin dibujar; la paleta del fondo cicla entre 5 y 8 mientras suena.
 void Renderer::RenderHighScore(int score, int frame, std::vector<uint8_t>& rgba) const {

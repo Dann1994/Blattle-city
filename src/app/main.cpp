@@ -287,7 +287,7 @@ std::string PadButtonName(int b) {
 class TestScreen {
 public:
     enum class Scene { Title, PlayMenu, Lobby, Settings, KeysPlayer, KeysList, PadSettings, Construction, Pause, Game,
-                       LanMenu, NameEntry, LanHost, LanSearch, LanJoined, OnlineMenu, CodeEntry, LateJoin, Editor, OwnLevels, VsMenu, JoinMenu, ModeMenu, ConfirmExit, UpdateCheck, UpdatePrompt, UpdateDownload };
+                       LanMenu, NameEntry, LanHost, LanSearch, LanJoined, OnlineMenu, CodeEntry, LateJoin, Editor, OwnLevels, VsMenu, JoinMenu, ModeMenu, ConfirmExit, UpdateCheck, UpdatePrompt, UpdateDownload, DiffMenu, CustomMenu };
     enum class Capture { None, Key, Pad };
     struct Rumble { int slot; float left, right, seconds; float delay = 0.0f; };   // delay: segundos hasta empezar
     enum class Ev { Up, Down, Left, Right, Accept, Back, Fire, Start };
@@ -308,6 +308,41 @@ public:
     // Jugadores de la partida: la batalla vs y el royale siempre tienen todos los lugares (los que no ocupa una persona los juega la IA).
     int VsTotal() const { return royale_ ? 8 : 2 * vsSize_; }
 
+    // Reglas de la campania segun la dificultad elegida: facil, normal, dificil o personalizada.
+    struct CampaignRules { int ai = 1; bool shared = false; int lives = 3; int every = 5; int continues = 2; int ff = 1; };
+    CampaignRules ResolveRules() const {
+        CampaignRules r;
+        const int ffCfg = g_cfg.friendlyFire;
+        switch (g_cfg.diffPreset) {
+            case 0: r = {0, true, 5, 1, 3, ffCfg}; break;                   // facil: items para todos, 5 vidas, un continue por nivel
+            case 2: r = {2, false, 2, 10, 1, 2}; break;                     // dificil: 2 vidas, un continue cada 10 niveles, fuego amigo siempre dañino
+            case 3: r = {g_cfg.cuAi, g_cfg.cuShared, g_cfg.cuLives, g_cfg.cuEvery, 2, g_cfg.cuFriendly}; break;
+            default: r = {1, false, 3, 5, 2, ffCfg}; break;                 // normal
+        }
+        return r;
+    }
+    // Las reglas viajan en las opciones de la sala (campania): 0-1 fuego amigo, 5-6 IA, 7 items para todos, 8-9 continues cada (1, 5, 10),
+    // 10-13 vidas, 14-15 continues iniciales.
+    static int RulesToBits(const CampaignRules& r) {
+        const int ev = r.every >= 10 ? 2 : (r.every >= 5 ? 1 : 0);
+        return (r.ff & 3) | (r.ai << 5) | ((r.shared ? 1 : 0) << 7) | (ev << 8) | ((r.lives & 15) << 10) | ((r.continues & 3) << 14);
+    }
+    static CampaignRules RulesFromBits(int raw) {
+        CampaignRules r;
+        r.ff = raw & 3;
+        r.ai = std::min(2, (raw >> 5) & 3);
+        r.shared = ((raw >> 7) & 1) != 0;
+        const int ev = (raw >> 8) & 3;
+        r.every = ev == 2 ? 10 : (ev == 1 ? 5 : 1);
+        r.lives = std::max(1, std::min(10, (raw >> 10) & 15));
+        r.continues = (raw >> 14) & 3;
+        return r;
+    }
+    static std::string DiffName(int p) { return p == 0 ? "FÁCIL" : (p == 1 ? "NORMAL" : (p == 2 ? "DIFÍCIL" : "PERSONALIZADA")); }
+    std::string RulesSummary(const CampaignRules& r) const {
+        return std::string("VIDAS ") + std::to_string(r.lives) + " - CONTINUES " + std::to_string(r.continues) + " (+1 CADA " + (r.every == 1 ? "NIVEL" : std::to_string(r.every) + " NIVELES") + ")";
+    }
+
     void Reset(int players) {
         if (vsMode_) players = VsTotal();
         players_ = players;
@@ -326,6 +361,15 @@ public:
         const bool custom = wide_ && level_ > 0 && PrepareCustomLevel(level_, customBlocks, customStrip);   // nivel hecho a mano (o de la serie propia)
         if (!custom) battle_->SetStageSpec(nes::Battle::StageSpec{});
         battle_->SetLevel(wide_ ? level_ : 0);
+        if (vsMode_) {
+            battle_->SetStartLives(vsLives_);                                // batalla vs / royale: vidas configurables (hasta 10)
+        } else {
+            const CampaignRules cr = netGame_ ? netRules_ : ResolveRules();
+            nes::Battle::Rules br;
+            br.ai = cr.ai; br.itemsShared = cr.shared; br.lives = cr.lives;
+            battle_->SetRules(br);
+            if (!netGame_) friendly_ = cr.ff == 0 ? nes::Battle::FriendlyFire::Off : (cr.ff == 2 ? nes::Battle::FriendlyFire::Damage : nes::Battle::FriendlyFire::Stun);
+        }
         battle_->SetFriendlyFire(friendly_);
         for (int i = 0; i < nes::kMaxPlayers; ++i) { prevAlive_[i] = false; prevUpgrade_[i] = 0; prevFire_[i] = false; prevHits_[i] = prevPickups_[i] = prevKills_[i] = 0; }
         prevBlasts_ = prevEagles_ = 0;
@@ -393,6 +437,10 @@ public:
         }
         flow_ = std::make_unique<app::GameFlow>(*battle_, hooks);
         flow_->SetRequireStart(netGame_);
+        if (!vsMode_) {
+            const CampaignRules cr = netGame_ ? netRules_ : ResolveRules();
+            flow_->SetContinues(cr.continues, cr.every);
+        }
         flow_->SetVersus(vsMode_);                                  // en red cada nivel espera el Start del anfitrion
         flow_->SetHiScore(hiScore_);
         flow_->Begin(wide_ ? level_ : 0);
@@ -513,7 +561,7 @@ public:
             const bool start = pulseStart_;
             pulseStart_ = false;
             if (start && scene_ == Scene::Game && !showHelp_) {
-                if (flow_->WaitingForStart()) startRequested_ = lan_.IsHost();           // el anfitrion empieza el nivel
+                if (flow_->WaitingForStart() || flow_->mode() == app::GameFlow::Mode::ContinuePrompt) startRequested_ = lan_.IsHost();   // el anfitrion empieza el nivel / acepta continuar
                 else if (flow_->mode() == app::GameFlow::Mode::Playing) { scene_ = Scene::Pause; menuIndex_ = 0; }   // abre el menu
             }
             StepNet();
@@ -698,7 +746,7 @@ public:
             vsTeams_[i] = i < n ? lobby_.Team(slot) : (i & 1);
         }
         if (vsMode_) {
-            vsSeed_ = static_cast<uint32_t>(std::chrono::steady_clock::now().time_since_epoch().count() % 99991) + 1;   // el mapa al azar de esta partida
+            vsSeed_ = static_cast<uint32_t>(std::chrono::steady_clock::now().time_since_epoch().count() % 8191) + 1;   // el mapa al azar de esta partida
         }
         if (vsMode_) {                                                  // el resto de los lugares, IA: equipos parejos y colores sin repetir
             humanMask_ = (1 << n) - 1;
@@ -756,7 +804,9 @@ public:
             case Scene::ConfirmExit: return 2;
             case Scene::PlayMenu: return 2;
             case Scene::ModeMenu: return 5;
-            case Scene::VsMenu: return 6;
+            case Scene::VsMenu: return 7;
+            case Scene::DiffMenu: return 5;
+            case Scene::CustomMenu: return 7;
             case Scene::Settings: return 10;
             case Scene::UpdateCheck: return 1;
             case Scene::UpdatePrompt: return 2;
@@ -791,6 +841,8 @@ public:
                 else { scene_ = Scene::PlayMenu; menuIndex_ = 0; }
                 break;
             case Scene::OwnLevels: ownMode_ = false; scene_ = Scene::ModeMenu; menuIndex_ = 1; break;
+            case Scene::DiffMenu: scene_ = Scene::ModeMenu; menuIndex_ = 0; break;
+            case Scene::CustomMenu: scene_ = Scene::DiffMenu; menuIndex_ = 3; break;
             case Scene::VsMenu: vsMode_ = false; scene_ = Scene::ModeMenu; menuIndex_ = royale_ ? 3 : 2; royale_ = false; break;
             case Scene::LanMenu: netMode_ = false; scene_ = Scene::PlayMenu; menuIndex_ = 1; break;
             case Scene::JoinMenu: scene_ = Scene::LanMenu; menuIndex_ = 1; break;
@@ -936,19 +988,20 @@ public:
     // Opciones de la sala en un entero (viaja en el mensaje de la sala): bits 0-1 fuego amigo, 4 batalla vs, 5-7 dificultad de la IA,
     // 8-9 bombardeo, 10-11 tamano de los equipos (menos 2; 3 = battle royale), 12-13 modo del royale, 14+ semilla del mapa (todos generan el mismo).
     int VersusNetOptions(int ff, int seed) const {
-        return (ff & 3) | 16 | (vsTier_ << 5) | ((vsRank_ - 1) << 8) | ((royale_ ? 3 : vsSize_ - 2) << 10) | (royaleOpt_ << 12) | (seed << 14);
+        return (ff & 3) | 16 | (vsTier_ << 5) | ((vsRank_ - 1) << 8) | ((royale_ ? 3 : vsSize_ - 2) << 10) | (royaleOpt_ << 12) | (vsLives_ << 14) | (seed << 18);
     }
     void TryStartLan() {
         if (lan_.NumPlayers() < 2) { lanNote_ = "SE NECESITAN 2 JUGADORES O MÁS"; return; }
         int options = friendly_ == nes::Battle::FriendlyFire::Off ? 0 : (friendly_ == nes::Battle::FriendlyFire::Stun ? 1 : 2);
+        if (!vsMode_) options = RulesToBits(ResolveRules());     // campania: las reglas de la dificultad elegida
         if (vsMode_ && royale_) {
-            const int seed = vsMapKind_ == 1 ? vsMapNum_ : static_cast<int>(std::chrono::steady_clock::now().time_since_epoch().count() % 99991) + 1;
+            const int seed = vsMapKind_ == 1 ? vsMapNum_ : static_cast<int>(std::chrono::steady_clock::now().time_since_epoch().count() % 8191) + 1;
             options = VersusNetOptions(options, seed);
         } else if (vsMode_) {
             int inTeam[2] = {0, 0};                                                  // el equipo es la paridad del lugar en la sala
             for (int i = 0; i < nes::kMaxPlayers && static_cast<size_t>(i) < lan_.Owners().size(); ++i) if (lan_.Owners()[static_cast<size_t>(i)] >= 0) ++inTeam[i & 1];
             if (inTeam[0] == 0 || inTeam[1] == 0) { lanNote_ = "HACEN FALTA JUGADORES EN LOS DOS EQUIPOS (LOS LUGARES IMPARES SON DEL EQUIPO 1 Y LOS PARES DEL 2)"; return; }
-            const int seed = vsMapKind_ == 1 ? vsMapNum_ : static_cast<int>(std::chrono::steady_clock::now().time_since_epoch().count() % 99991) + 1;
+            const int seed = vsMapKind_ == 1 ? vsMapNum_ : static_cast<int>(std::chrono::steady_clock::now().time_since_epoch().count() % 8191) + 1;
             options = VersusNetOptions(options, seed) | (vsMapKind_ == 2 ? 8 : 0);
         }
         if (ownMode_) options |= 4;
@@ -981,13 +1034,15 @@ public:
             }
             if (ownNet_.empty()) { ownMode_ = false; vsOwnNet_ = false; }
         }
+        if (!vsMode_) netRules_ = RulesFromBits(raw);             // campania: dificultad, items, vidas y continues del anfitrion
         if (vsMode_) {
             vsTier_ = (raw >> 5) & 7;
             vsRank_ = ((raw >> 8) & 3) + 1;
             royale_ = ((raw >> 10) & 3) == 3;
             if (!royale_) vsSize_ = std::min(4, ((raw >> 10) & 3) + 2);
             royaleOpt_ = (raw >> 12) & 3;
-            vsSeed_ = static_cast<uint32_t>(raw >> 14);
+            vsLives_ = std::max(1, std::min(10, (raw >> 14) & 15));
+            vsSeed_ = static_cast<uint32_t>(raw >> 18);
             for (int i = 0; i < nes::kMaxPlayers; ++i) vsTeams_[i] = i & 1;
             humanMask_ = lan_.StartMask();
             FillAiColors();
@@ -1219,13 +1274,17 @@ public:
             }
             else if (ev == Ev::Start) StartLocalGame();
             else if (ev == Ev::Back) {
-                if (vsMode_) { scene_ = Scene::VsMenu; menuIndex_ = 4; }
+                if (vsMode_) { scene_ = Scene::VsMenu; menuIndex_ = 5; }
                 else if (ownMode_) { scene_ = Scene::OwnLevels; }
-                else { scene_ = Scene::ModeMenu; menuIndex_ = 0; }
+                else { scene_ = Scene::DiffMenu; menuIndex_ = std::max(0, std::min(3, g_cfg.diffPreset)); }
             }
             return;
         }
         if (scene_ == Scene::Construction || scene_ == Scene::Editor) return;       // el editor maneja sus propias teclas (EditorStep)
+        if (scene_ == Scene::CustomMenu && (ev == Ev::Left || ev == Ev::Right)) {
+            ChangeCustom(menuIndex_, ev == Ev::Right ? 1 : -1);
+            return;
+        }
         if (scene_ == Scene::VsMenu && (ev == Ev::Left || ev == Ev::Right)) {
             const int d = ev == Ev::Right ? 1 : -1;
             if (menuIndex_ == 0) CycleVersusMap(d);
@@ -1234,6 +1293,10 @@ public:
             else if (menuIndex_ == 3) {
                 if (royale_) royaleOpt_ = (royaleOpt_ + 4 + d) % 4;
                 else vsSize_ = (vsSize_ - 2 + 3 + d) % 3 + 2;
+            } else if (menuIndex_ == 4) {
+                vsLives_ = (vsLives_ - 1 + 10 + d) % 10 + 1;
+                g_cfg.vsLives = vsLives_;
+                SaveConfig();
             }
             return;
         }
@@ -1277,6 +1340,21 @@ public:
         }
     }
 
+    void StartCampaign() {                                                     // los 40 niveles con la dificultad ya elegida
+        if (netMode_) StartHost(true);
+        else { lobby_ = app::Lobby(); scene_ = Scene::Lobby; }
+    }
+    // Personalizada: 0 fuego amigo, 1 continues cada N niveles, 2 efecto de items, 3 dificultad de la IA, 4 vidas.
+    void ChangeCustom(int index, int d) {
+        if (index == 0) g_cfg.cuFriendly = (g_cfg.cuFriendly + 3 + d) % 3;
+        else if (index == 1) g_cfg.cuEvery = d > 0 ? (g_cfg.cuEvery == 1 ? 5 : (g_cfg.cuEvery == 5 ? 10 : 1)) : (g_cfg.cuEvery == 10 ? 5 : (g_cfg.cuEvery == 5 ? 1 : 10));
+        else if (index == 2) g_cfg.cuShared = !g_cfg.cuShared;
+        else if (index == 3) g_cfg.cuAi = (g_cfg.cuAi + 3 + d) % 3;
+        else if (index == 4) g_cfg.cuLives = (g_cfg.cuLives - 1 + 10 + d) % 10 + 1;
+        else return;
+        SaveConfig();
+    }
+
     void Activate(int index) {
         switch (scene_) {
             case Scene::Title:
@@ -1298,7 +1376,11 @@ public:
                 } else if (index == 3) {
                     if (royale_) royaleOpt_ = (royaleOpt_ + 1) % 4;            // a muerte -> 3 min -> 5 min -> 10 min
                     else vsSize_ = vsSize_ % 3 + 2;                            // 2 VS 2 -> 3 VS 3 -> 4 VS 4
-                } else if (index == 4) {                                       // empezar: en esta PC se eligen los equipos; en red se crea la sala
+                } else if (index == 4) {
+                    vsLives_ = vsLives_ % 10 + 1;
+                    g_cfg.vsLives = vsLives_;
+                    SaveConfig();
+                } else if (index == 5) {                                       // empezar: en esta PC se eligen los equipos; en red se crea la sala
                     vsMode_ = true;
                     ownMode_ = false;
                     if (netMode_) {
@@ -1313,8 +1395,32 @@ public:
                         lobby_ = app::Lobby();
                         scene_ = Scene::Lobby;
                     }
-                } else if (index == 5) {
+                } else if (index == 6) {
                     GoBack();
+                }
+                break;
+            case Scene::DiffMenu:                                              // dificultad de la campania
+                if (index <= 2) {
+                    g_cfg.diffPreset = index;
+                    SaveConfig();
+                    StartCampaign();
+                } else if (index == 3) {
+                    g_cfg.diffPreset = 3;
+                    scene_ = Scene::CustomMenu;
+                    menuIndex_ = 0;
+                } else {
+                    GoBack();
+                }
+                break;
+            case Scene::CustomMenu:
+                if (index == 5) {
+                    g_cfg.diffPreset = 3;
+                    SaveConfig();
+                    StartCampaign();
+                } else if (index == 6) {
+                    GoBack();
+                } else {
+                    ChangeCustom(index, +1);
                 }
                 break;
             case Scene::ModeMenu:                                              // el modo de juego (en esta PC o para crear una sala)
@@ -1322,15 +1428,16 @@ public:
                 vsMode_ = false;
                 royale_ = false;
                 pendingMaps_.clear();
-                if (index == 0) {                                              // campania: los 40 niveles
-                    if (netMode_) StartHost(true);
-                    else { lobby_ = app::Lobby(); scene_ = Scene::Lobby; }
+                if (index == 0) {                                              // campania: primero la dificultad
+                    scene_ = Scene::DiffMenu;
+                    menuIndex_ = std::max(0, std::min(3, g_cfg.diffPreset));
                 } else if (index == 1) {                                       // niveles propios (los del editor)
                     scene_ = Scene::OwnLevels;
                     ownSel_ = 1;
                     for (int s = 1; s <= app::kOwnSlots; ++s) if (OwnIsPlayable(s)) { ownSel_ = s; break; }
                 } else if (index == 2 || index == 3) {
                     royale_ = index == 3;                                      // MODO BATALLA VS / BATTLE ROYALE
+                    vsLives_ = g_cfg.vsLives;
                     vsMapKind_ = 0;
                     scene_ = Scene::VsMenu;
                     menuIndex_ = 0;
@@ -1623,8 +1730,9 @@ public:
                 v.title = royale_ ? "BATTLE ROYALE" : "MODO BATALLA VS";
                 v.items = {"MAPA: " + VersusMapText(), "DIFICULTAD IA: " + std::to_string(vsTier_ + 1) + "/8",
                            "BOMBARDEO CADA: " + std::to_string(5 - vsRank_) + (vsRank_ == 4 ? " MINUTO" : " MINUTOS"),
-                           royale_ ? "MODO: " + std::string(royaleOpt_ == 0 ? "A MUERTE (3 VIDAS)" : "POR TIEMPO " + std::to_string(royaleOpt_ == 1 ? 3 : (royaleOpt_ == 3 ? 10 : 5)) + " MIN")
+                           royale_ ? "MODO: " + std::string(royaleOpt_ == 0 ? "A MUERTE" : "POR TIEMPO " + std::to_string(royaleOpt_ == 1 ? 3 : (royaleOpt_ == 3 ? 10 : 5)) + " MIN")
                                    : "EQUIPOS: " + std::to_string(vsSize_) + " VS " + std::to_string(vsSize_),
+                           "VIDAS: " + std::to_string(vsLives_),
                            netMode_ ? "CREAR SALA" : "EMPEZAR", "VOLVER"};
                 v.note = !lanNote_.empty() ? lanNote_
                        : (royale_ ? std::string(royaleOpt_ == 0 ? "QUEDA UNO SOLO" : "GANA QUIEN MÁS DESTRUYE") + " - LA IA COMPLETA HASTA 8"
@@ -1683,6 +1791,30 @@ public:
                 v.items = {"NO", "SÍ"};
                 v.footer = NavHint();
                 break;
+            case Scene::DiffMenu: {
+                v.title = "DIFICULTAD";
+                v.items = {"FÁCIL", "NORMAL", "DIFÍCIL", "PERSONALIZADA", "VOLVER"};
+                static const char* const kNotes[3] = {"ITEMS PARA TODOS - ENEMIGOS NO AGARRAN ITEMS - 5 VIDAS - UN CONTINUE POR NIVEL",
+                                                       "ITEMS INDIVIDUALES - ENEMIGOS AGARRAN ITEMS - 3 VIDAS - UN CONTINUE CADA 5 NIVELES",
+                                                       "ENEMIGOS BUSCAN ITEMS - FUEGO AMIGO DAÑA - 2 VIDAS - UN CONTINUE CADA 10"};
+                if (menuIndex_ < 3) v.note = kNotes[menuIndex_];
+                else if (menuIndex_ == 3) v.note = "ELEGÍ VOS FUEGO AMIGO, CONTINUES, ITEMS, IA Y VIDAS";
+                v.footer = NavHint();
+                break;
+            }
+            case Scene::CustomMenu: {
+                static const char* const kFf[3] = {"NO", "PARALIZA", "DAÑA"};
+                static const char* const kAi[3] = {"FÁCIL", "NORMAL", "DIFÍCIL"};
+                v.title = "PERSONALIZADA";
+                v.items = {std::string("FUEGO AMIGO: ") + kFf[g_cfg.cuFriendly],
+                           "CONTINUES CADA: " + std::to_string(g_cfg.cuEvery) + (g_cfg.cuEvery == 1 ? " NIVEL" : " NIVELES"),
+                           std::string("EFECTO DE ITEMS: ") + (g_cfg.cuShared ? "TODOS" : "INDIVIDUAL"),
+                           std::string("DIFICULTAD DE LA IA: ") + kAi[g_cfg.cuAi],
+                           "VIDAS: " + std::to_string(g_cfg.cuLives), netMode_ ? "CREAR SALA" : "EMPEZAR", "VOLVER"};
+                v.footer = touch_ ? "CRUCETA: ELEGIR Y CAMBIAR   TOQUE A PARA ACEPTAR"
+                                  : (usingPad_ ? "{DPAD} ELEGIR Y CAMBIAR  " + PadButtonName(g_cfg.padFire) + " ACEPTAR" : "ARRIBA ABAJO ELEGIR  IZQUIERDA DERECHA CAMBIAR");
+                break;
+            }
             case Scene::ModeMenu:
                 v.title = netMode_ ? "EN RED: MODO DE JUEGO" : "LOCAL: MODO DE JUEGO";
                 v.items = {"CAMPAÑA", "NIVELES PROPIOS", "MODO BATALLA VS", "BATTLE ROYALE", "VOLVER"};
@@ -1813,7 +1945,7 @@ public:
         if (netGame_ && lan_.Desynced()) hud.banner = "DESINCRONIZADO";
         else if (netGame_ && netStall_ > 20) hud.banner = "ESPERANDO A LOS DEMÁS...";
         if (battle_->IsBossLevel()) hud.introSubtitle = "DESTRUYE LA BASE ENEMIGA";
-        if (vsMode_) hud.introSubtitle = royale_ ? (royaleOpt_ == 0 ? "QUEDA UNO SOLO: 3 VIDAS CADA UNO" : "GANA QUIEN MÁS TANQUES DESTRUYE") : "DESTRUYE EL ÁGUILA RIVAL";
+        if (vsMode_) hud.introSubtitle = royale_ ? (royaleOpt_ == 0 ? "QUEDA UNO SOLO: " + std::to_string(vsLives_) + " VIDAS CADA UNO" : "GANA QUIEN MÁS TANQUES DESTRUYE") : "DESTRUYE EL ÁGUILA RIVAL";
         hud.paused = battle_->R(nes::ram_pause_flag) != 0;
         hud.overlay = showHelp_;
         hud.leftLines = {
@@ -1874,6 +2006,8 @@ public:
         };
         if (flow_->mode() == Mode::ScoreScreen) {
             renderer_.RenderScoreScreen(flow_->tally(), rgba);
+        } else if (flow_->mode() == Mode::ContinuePrompt) {
+            renderer_.RenderContinue(flow_->Continues(), flow_->ContinueSecondsLeft(), !netGame_ || lan_.IsHost(), rgba);
         } else if (flow_->mode() == Mode::GameOver) {
             renderer_.RenderGameOver(rgba);
         } else if (flow_->mode() == Mode::HighScore) {
@@ -2077,6 +2211,8 @@ private:
     bool updatePrompted_ = false, installLaunched_ = false, manualCheck_ = false;
     Scene updateReturn_ = Scene::Title;
     int checkFrames_ = 0;
+    CampaignRules netRules_;                                 // reglas de la campania en red (las fija el anfitrion)
+    int vsLives_ = 3;                                        // vidas de la batalla vs / royale a muerte (1..10)
     bool royale_ = false;                                    // battle royale (sobre el modo batalla vs): todos contra todos
     int humanMask_ = 3;                                      // batalla vs / royale: bit p = el jugador p es una persona (los demas, IA)
     int royaleOpt_ = 2;                                      // 0 = a muerte, 1 = por tiempo 3 min, 2 = 5 min, 3 = 10 min

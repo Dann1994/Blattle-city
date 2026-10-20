@@ -28,7 +28,7 @@ struct ScoreTally {
 
 class GameFlow {
 public:
-    enum class Mode { Playing, StageIntro, ScoreScreen, GameOverMessage, GameOver, HighScore, VersusResult };
+    enum class Mode { Playing, StageIntro, ScoreScreen, GameOverMessage, GameOver, HighScore, VersusResult, ContinuePrompt };
 
     struct Hooks {
         std::function<void(int level)> loadNextLevel;   // genera el mapa y llama a Battle::NextStage
@@ -49,6 +49,13 @@ public:
     // Modo batalla vs: no hay recuento ni game over; cuando hay ganador se muestra el resultado y se vuelve.
     void SetVersus(bool v) { versus_ = v; }
     int VersusResultTimer() const { return gameOverTimer_; }
+    // ---- continues ----
+    // Al perder, si quedan continues se pregunta si seguir (Start; si no, a los 10 segundos termina). Seguir recarga el nivel actual
+    // con todas las vidas. Se ganan continues al superar niveles: 1 cada `every` niveles (1, 5 o 10).
+    void SetContinues(int start, int every) { continues_ = start; every_ = every < 1 ? 1 : every; cleared_ = 0; }
+    int Continues() const { return continues_; }
+    int ContinueSecondsLeft() const { return (continueTimer_ + 59) / 60; }
+    static constexpr int kContinueFrames = 600;
     void SkipToNextLevel();                              // tecla de prueba: pasa de nivel de una
 
     Mode mode() const { return mode_; }
@@ -88,6 +95,7 @@ private:
     bool requireStart_ = false;
     bool versus_ = false;
     bool waitingStart_ = false;
+    int continues_ = 0, every_ = 5, cleared_ = 0, continueTimer_ = 0;
     ScoreTally tally_;
 };
 

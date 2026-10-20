@@ -26,6 +26,14 @@ struct Config {
     int hiScore = 20000;                     // record guardado
     int friendlyFire = 1;                    // 0 desactivado, 1 paraliza, 2 daña
     bool useSamples = true;                  // sonido grabado (true) o sintetizador de la NES (false)
+    // campania: dificultad (0 facil, 1 normal, 2 dificil, 3 personalizada) y sus ajustes; batalla vs: vidas
+    int diffPreset = 1;
+    int cuFriendly = 1;                      // personalizada: fuego amigo (0 no, 1 paraliza, 2 daña)
+    int cuEvery = 5;                         // personalizada: se gana 1 continue cada 1, 5 o 10 niveles
+    bool cuShared = false;                   // personalizada: los items afectan a todos
+    int cuAi = 1;                            // personalizada: dificultad de la IA (0 facil, 1 normal, 2 dificil)
+    int cuLives = 3;                         // personalizada: vidas
+    int vsLives = 3;                         // batalla vs y battle royale a muerte: vidas (1..10)
     bool voiceChat = true;                   // chat de voz en las partidas en red
     bool autoUpdate = true;                  // al abrir el juego, buscar actualizaciones
 

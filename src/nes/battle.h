@@ -102,6 +102,18 @@ public:
     enum class FriendlyFire { Off, Stun, Damage };   // atraviesa / paraliza (original) / quita un nivel de arma
     void SetFriendlyFire(FriendlyFire m) { friendlyFire_ = m; }
     FriendlyFire GetFriendlyFire() const { return friendlyFire_; }
+    // ---- reglas de dificultad (campania del campo ancho) ----
+    //   ai: 0 facil (los enemigos no agarran items; salud 1/1/1/3 sin crecer; las balas aliadas frenan a las enemigas sin gastarse),
+    //       1 normal (agarran items; salud 1/1/2/4; la bala aliada frena a cualquier bala enemiga y se gasta si no es mas fuerte),
+    //       2 dificil (como siempre: agarran y buscan los items; la salud crece con los niveles).
+    //   itemsShared: estrella, casco, pistola, velocidad e invisible afectan a todos los jugadores a la vez.
+    //   lives: vidas con las que empieza cada jugador (1..10).
+    struct Rules { int ai = 2; bool itemsShared = false; int lives = 3; };
+    void SetRules(const Rules& r) { rules_ = r; rules_.lives = r.lives < 1 ? 1 : (r.lives > 10 ? 10 : r.lives); startLives_ = rules_.lives; }
+    const Rules& GetRules() const { return rules_; }
+    void SetStartLives(int n) { startLives_ = n < 1 ? 1 : (n > 10 ? 10 : n); }     // batalla vs / royale: vidas de cada jugador (hasta 10)
+    int StartLives() const { return startLives_; }
+    void ReviveForContinue();                       // "continuar": todos los jugadores vuelven con sus vidas (despues se recarga el nivel)
     int Players() const { return nPlayers_; }
     // Colores de los jugadores (0 amarillo, 1 verde, 2 azul, 3 rojo, 4 violeta, 5 naranja, 6 marron). Solo campo ancho.
     void SetPlayerColors(const int* colors, int n = 4) {      // (los jugadores 5 a 8 de la batalla vs usan el color de su equipo)
@@ -358,6 +370,7 @@ public:
     void DebugSpawnBonus(int bonusId);   // 0 casco, 1 reloj, 2 pala, 3 estrella, 4 granada, 5 tanque, 6 pistola (extension)
     void DebugKillAllEnemies();
     int BulletStatus(int i) const { return wide_ ? wd_.bstatus[i] : R(ram_bullet_status + i); }     // estado de la bala del slot i (0x4x: en vuelo)
+    bool BulletActive(int b) const;                    // la bala sigue en vuelo
     void DebugFire(int tank);                          // hace disparar a ese tanque (si puede)
     void DebugClearBullets() { Sub_E409_clear_bullet_status(); }
     void DebugAllyAutoFire(bool on) { allyAutoFire_ = on; }      // pruebas: los aliados dejan de disparar solos
@@ -659,7 +672,13 @@ private:
     u8 bulletXHi_[kMaxBullets] = {};
     u8 bonusXHi_ = 0, msgXHi_ = 0, destXHi_ = 0;
     uint16_t oamX_[64] = {};
+    Rules rules_;
+    int startLives_ = 3;
+    bool sharing_ = false;
+    int EnemyHp(int kind) const;
     int markPtr_[kMaxTanks] = {};
+    bool noMark_[kMaxTanks] = {};            // invisible: no marca el mapa (los demas lo atraviesan y el atraviesa a los demas)
+    void GhostClearBricks(int x);            // al terminar la invisibilidad: despeja los ladrillos que el tanque tiene encima
     bool onSand_[kMaxTanks] = {};                          // el tanque esta pisando arena
     struct LavaCell { int col = 0, row = 0, timer = 0; };
     struct LavaSource {

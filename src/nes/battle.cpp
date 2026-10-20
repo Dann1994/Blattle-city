@@ -545,7 +545,7 @@ void Battle::NewGame(int players, int stage) {
     if (wide_) {
         SetEnemyLimitForStage();
         for (int p = 0; p < nPlayers_; ++p) {
-            LIVES(p) = 3;
+            LIVES(p) = static_cast<u8>(startLives_);
         }
     } else {
         R(ram_enemy_limit) = players >= 2 ? con_max_tanks : con_max_tanks - 2;   // CA6F / CA74
@@ -855,6 +855,7 @@ void Battle::Sub_E181_ice_detection() {
         const uint16_t p = PointerPx(WX(TPOSX(x) - 8), U8(TPOSY(x) - 8));
         onSand_[x] = wide_ && (M(p + st + 1) & 0x7F) == kSandTile;        // el mosaico del centro del tanque es arena
         markPtr_[x] = p;
+        noMark_[x] = ghostT_[x] > 0;
         TSTLO(x) = p & 0xFF;
         TSTHI(x) = (p >> 8) & 0x03;
         if (x < nPlayers_) {
@@ -864,6 +865,7 @@ void Battle::Sub_E181_ice_detection() {
                 PLRFLAGS(x) &= 0x7F;
             }
         }
+        if (noMark_[x]) continue;
         M(p + st + 1) |= 0x80;
         if ((TPOSX(x) & 0x07) == 0) {
             TSTHI(x) |= 0x80;
@@ -881,7 +883,7 @@ void Battle::Sub_E1FA_clear_tank_marks() {
     const int st = Stride();
     for (int x = lastTank_; x >= 0; --x) {
         const u8 f = TFLAGS(x);
-        if (!(f & 0x80) || f >= 0xE0) {
+        if (!(f & 0x80) || f >= 0xE0 || noMark_[x]) {
             continue;
         }
         const int p = markPtr_[x];
@@ -1055,8 +1057,14 @@ void Battle::Loc_DC97_try_move(int x) {
     auto adjustX = [&](int value, int pos) { return value >= pos ? WX(value - 1) : value; };
     auto adjustY = [](int value, int pos) { return value >= pos ? U8(value - 1) : value; };
 
+    const bool ghost = x < nPlayers_ && ghostT_[x] > 0;      // invisible: atraviesa ladrillos y tanques (no el hierro, el agua ni el aguila)
     auto passable = [&](int px, int py) {
-        const u8 t = M(PointerPx(px, py));
+        u8 t = M(PointerPx(px, py));
+        if (ghost) {
+            if (t >= 0xC8) return false;
+            t &= 0x7F;
+            if (t <= 0x0F) return true;
+        }
         if (t & 0x80) return false;             // marcado por otro tanque (o aguila: $C8+)
         if (t == 0) return true;
         return t >= con_block_type + 0x20;      // hielo / arbustos
@@ -1436,7 +1444,7 @@ void Battle::SetHumanMask(int mask) {
     for (int p = 0; p < nPlayers_ && p < kMaxPlayers; ++p) {
         present_[p] = true;
         aiPlayer_[p] = IsVersus() && !((mask >> p) & 1);
-        LIVES(p) = 3;
+        LIVES(p) = static_cast<u8>(startLives_);
     }
 }
 
@@ -2196,10 +2204,22 @@ int Battle::ExtraIcons(ExtraIcon* out, int max) const {
     return n;
 }
 
+void Battle::GhostClearBricks(int x) {
+    const int px0 = WX(TPOSX(x) - 8), py0 = U8(TPOSY(x) - 8);
+    const int offs[3] = {0, 8, 15};
+    for (int a : offs) {
+        for (int b : offs) {
+            const uint16_t p = PointerPx(WX(px0 + a), U8(py0 + b));
+            const u8 t = M(p) & 0x7F;
+            if (t >= 1 && t <= 0x0F) Sub_D784_write_tile(p, static_cast<u8>(M(p) & 0x80));
+        }
+    }
+}
+
 void Battle::Sub_Extras() {
     if (!wide_) return;
     for (int x = 0; x <= lastTank_ && x < kMaxTanks; ++x) {
-        if (ghostT_[x] > 0) --ghostT_[x];
+        if (ghostT_[x] > 0 && --ghostT_[x] == 0 && x < nPlayers_) GhostClearBricks(x);
         if (speedT_[x] > 0) --speedT_[x];
         if (portalCd_[x] > 0) --portalCd_[x];
     }
@@ -2299,6 +2319,7 @@ void Battle::Sub_Extras() {
 
 // El item mas cercano: el principal (si esta en el campo) o el segundo (campania con 3 o 4 jugadores).
 bool Battle::NearestItem(int x, int y, int& ix, int& iy) const {
+    if (rules_.ai < 2) return false;                      // solo en dificil los enemigos buscan los items
     int best = 1 << 20;
     bool found = false;
     if (BonusActive() && R(ram_0062_bonus_timer) == 0 && (R(ram_bonus_id) & 0x80) == 0) {
@@ -2342,7 +2363,7 @@ void Battle::CampaignItemsStep() {
         BonusHandler(it.id, p);
         return;
     }
-    for (int x = nPlayers_; x <= lastEnemy_; ++x) {
+    for (int x = nPlayers_; x <= lastEnemy_ && rules_.ai >= 1; ++x) {
         const u8 f = TFLAGS(x);
         if (!(f & 0x80) || f >= 0xE0) continue;
         if (std::abs(TankX(x) - it.x) >= 12 || std::abs(TankY(x) - it.y) >= 12) continue;
@@ -2357,7 +2378,7 @@ void Battle::CampaignItemsStep() {
 // Cantidad de puntos de aparicion de enemigos y su posicion (centro del bloque, en pixeles).
 int Battle::SpawnPointCount() const {
     if (spec_.active && spec_.nSpawns > 0) return spec_.nSpawns;
-    return IsBossLevel() ? (diffPlayers_ >= 3 ? 7 : 5) : ((wide_ && diffPlayers_ >= 3) ? 5 : 3);
+    return IsBossLevel() ? (diffPlayers_ >= 4 ? 7 : 5) : ((wide_ && diffPlayers_ >= 4) ? 5 : 3);      // los dos puntos de los costados, solo con 4 jugadores
 }
 
 void Battle::SpawnPointPx(int y, int& sx, int& sy) const {
@@ -2452,9 +2473,8 @@ void Battle::Sub_E3B8_finish_respawn(int x) {
     TTYPE(x) = a;
     if (wide_ && x >= nPlayers_) {
         // salud: basico 1, rapido 1, power 2, blindado 4; +1 cada 2 escalones a power/blindado y cada 4 a los otros
-        static const int kBase[4] = {1, 1, 2, 4};
         const int kind = (a >> 5) & 3;
-        const int hp = kBase[kind] + (kind >= 2 ? tier_ / 2 : tier_ / 4);
+        const int hp = EnemyHp(kind);
         wd_.hp[x] = static_cast<u8>(hp);
         // los 2 bits bajos muestran el dano del blindado (color); el bit 2 es "parpadea con item"
         TTYPE(x) = static_cast<u8>((a & 0xFC) | (kind == 3 ? (hp - 1 < 3 ? hp - 1 : 3) : 0));
@@ -2983,6 +3003,13 @@ void Battle::Sub_E910_check_bullets_collision_with_bullets() {
             if ((BSTATUS(b) & 0xF0) != 0x40) continue;
             if (AbsDiffX(BPOSX(b), BPOSX(a)) >= 6) continue;
             if (AbsDiff8(BPOSY(b), BPOSY(a)) >= 6) continue;
+            if (wide_ && !vs && rules_.ai < 2 && BulletOwner(b) < 0) {
+                // facil y normal: cualquier bala aliada frena a cualquier bala enemiga. En facil la bala aliada sigue; en normal se gasta
+                // salvo que sea de nivel mayor.
+                BSTATUS(b) = 0;
+                if (rules_.ai == 1 && bulletLevel_[a] <= bulletLevel_[b]) { BSTATUS(a) = 0; break; }
+                continue;
+            }
             if (wide_ && bulletLevel_[a] != bulletLevel_[b]) {
                 // la bala de nivel mayor sigue; solo se destruye la de nivel inferior
                 BSTATUS(bulletLevel_[a] > bulletLevel_[b] ? b : a) = 0;
@@ -3067,7 +3094,7 @@ bool Battle::Sub_E972_try_to_pick_up_bonus() {
         BonusHandler(R(ram_bonus_id), x);
         return true;
     }
-    if (wide_ && !IsVersus() && (R(ram_bonus_id) & 0x80) == 0 && true) {   // los enemigos tambien agarran items
+    if (wide_ && !IsVersus() && rules_.ai >= 1 && (R(ram_bonus_id) & 0x80) == 0) {   // los enemigos tambien agarran items (salvo en facil)
         for (int x = nPlayers_; x <= lastEnemy_; ++x) {
             const u8 f = TFLAGS(x);
             if (!(f & 0x80) || f >= 0xE0) continue;
@@ -3119,7 +3146,7 @@ void Battle::AddPlayerLate(int p, int color) {
     if (p < 0 || p >= nPlayers_ || present_[p]) return;
     present_[p] = true;
     SetPlayerColor(p, color);
-    LIVES(p) = 3;
+    LIVES(p) = static_cast<u8>(startLives_);
     TUPGRADE(p) = 0;
     aiPlayer_[p] = false;
     Sub_E363_tank_spawn_handler(p);                      // aparece con la estrella de siempre
@@ -3340,9 +3367,22 @@ void Battle::SetEnemyLimitForStage() {
     R(ram_enemy_limit) = static_cast<u8>(limit);
 }
 
+// Disparos que aguanta un enemigo de ese tipo (0 basico, 1 rapido, 2 power, 3 blindado) segun la dificultad de la IA.
+int Battle::EnemyHp(int kind) const {
+    static const int kEasy[4] = {1, 1, 1, 3}, kNormal[4] = {1, 1, 2, 4};
+    if (IsVersus()) return kNormal[kind] + (kind >= 2 ? tier_ / 2 : tier_ / 4);
+    if (rules_.ai == 0) return kEasy[kind];
+    if (rules_.ai == 1) return kNormal[kind];
+    return kNormal[kind] + (kind >= 2 ? tier_ / 2 : tier_ / 4);                      // dificil: crece con los niveles
+}
+
+void Battle::ReviveForContinue() {
+    for (int p = 0; p < nPlayers_; ++p) if (present_[p]) LIVES(p) = static_cast<u8>(startLives_);
+    R(ram_game_over_flag) = con_not_game_over;
+}
+
 void Battle::SetEnemyKind(int x, int kind) {
-    static const int kBase[4] = {1, 1, 2, 4};
-    const int hp = kBase[kind] + (kind >= 2 ? tier_ / 2 : tier_ / 4);
+    const int hp = EnemyHp(kind);
     wd_.hp[x] = static_cast<u8>(hp);
     TTYPE(x) = static_cast<u8>((0x80 + (kind << 5)) | (TTYPE(x) & 0x04) | (kind == 3 ? (hp - 1 < 3 ? hp - 1 : 3) : 0));
 }
@@ -3519,6 +3559,15 @@ void Battle::Sub_StealLives() {
 
 // tbl_E9E2_bonus_pickup_handler (00:E9E2)
 void Battle::BonusHandler(int id, int x) {
+    if (rules_.itemsShared && wide_ && !IsVersus() && !sharing_ && x < nPlayers_ &&
+        (id == 0 || id == 3 || id == 6 || id == kBonusGhost || id == kBonusSpeed)) {      // casco, estrella, pistola, invisible y velocidad: para todos
+        sharing_ = true;
+        for (int p = 0; p < nPlayers_; ++p) {
+            const u8 f = TFLAGS(p);
+            if (p != x && present_[p] && (f & 0x80) && f < 0xE0) BonusHandler(id, p);
+        }
+        sharing_ = false;
+    }
     switch (id) {
         case 0:                                          // casco
             HELMET(x) = 0x0A;
@@ -3553,6 +3602,17 @@ void Battle::BonusHandler(int id, int x) {
             break;
         case 4:                                          // granada
             R(ram_sfx_explosion_enemy) = 1;
+            if (IsRoyale()) {                            // battle royale: revienta a todos los jugadores contrarios (cuentan como bajas de quien la agarro)
+                for (int p = 0; p < nPlayers_; ++p) {
+                    const u8 f = TFLAGS(p);
+                    if (p == x || !present_[p] || !(f & 0x80) || f >= 0xE0) continue;
+                    TFLAGS(p) = con_tank_flag_explosion + 0x03;
+                    TUPGRADE(p) = 0;
+                    TTYPE(p) = 0;
+                    R(ram_sfx_explosion_player) = 1;
+                    ++royaleKills_[x & 7];
+                }
+            }
             for (int y = lastEnemy_; y >= nPlayers_; --y) {
                 const u8 f = TFLAGS(y);
                 if (IsVersus() && vsTeam_[y] == (IsRoyale() ? x : playerTeam_[x])) continue;      // batalla vs: solo revienta a los tanques del otro equipo
@@ -4204,6 +4264,8 @@ int Battle::BulletShooter(int b) const {
     if (!wide_) return b & 0x07;
     return b >= kSecondBulletBase ? b - kSecondBulletBase : b;
 }
+
+bool Battle::BulletActive(int b) const { return (BSTATUS(b) & 0xF0) == 0x40; }
 
 void Battle::DebugFire(int tank) {
     Sub_E08C_fire_bullet(tank);
