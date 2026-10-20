@@ -3774,6 +3774,100 @@ void TestDifficultyRulesAndContinues() {
     }
 }
 
+void TestCannons() {
+    std::printf("[canones] el item cubre el aguila, pone dos canones, disparan arriba y afuera cada 5 s, aguantan 3 tiros; items a la vez\n");
+    auto scene = [&](int ai, int items, int players) {
+        auto b = std::make_unique<nes::Battle>();
+        b->SetWide(true);
+        b->SetLevel(1);
+        nes::Battle::Rules r;
+        r.ai = ai; r.items = items;
+        b->SetRules(r);
+        b->NewGame(players, 1);
+        u8 blocks[14][27];
+        std::memset(blocks, 13, sizeof(blocks));
+        b->LoadWideStage(blocks);
+        b->StartStage();
+        b->R(nes::ram_enemy_spawn_cnt) = 0;
+        for (int f = 0; f < 160; ++f) b->RunFrame();
+        b->DebugClearEnemies();
+        b->R(nes::ram_clock_timer) = 0x0A;
+        b->DebugClearBullets();
+        return b;
+    };
+    // el item: aparecen dos canones a los costados del muro de la base
+    {
+        auto b = scene(1, 2, 1);
+        CHECK(!b->CannonState(0).on && !b->CannonState(1).on);
+        b->DebugGiveItem(nes::Battle::kBonusCannon, 0);
+        CHECK(b->CannonState(0).on && b->CannonState(1).on);
+        CHECK_EQ(b->CannonState(0).hp, 3);
+        CHECK(b->CannonState(0).col == 12 && b->CannonState(1).col == 14 && b->CannonState(0).row == 14);   // pegados al aguila
+        CHECK(b->CannonState(0).side == -1 && b->CannonState(1).side == 1);
+        // los bloques son solidos: un tanque no los atraviesa
+    }
+    // solo disparan a los costados (hacia afuera): un enemigo encima no los activa; recargan 5 segundos
+    {
+        auto b = scene(1, 2, 1);
+        b->DebugGiveItem(nes::Battle::kBonusCannon, 0);
+        const int e = b->DebugSpawnEnemy(0, false);
+        for (int f = 0; f < 120; ++f) b->RunFrame();
+        b->R(nes::ram_clock_timer) = 0x0A;
+        const int cx = 12 * 16 + 8;
+        auto place = [&](int x, int y) { const u8 fl0 = b->TankFlags(e); if (fl0 >= 0x80 && fl0 < 0xE0) { b->SetTankPos(e, x, y); b->DebugSetTankFlags(e, 0xA0); } };
+        // enemigo hacia afuera (a la izquierda): dispara; arriba no
+        for (int f = 0; f < 20; ++f) { place(cx, 14 * 16 + 8 - 80); b->RunFrame(); }
+        CHECK_EQ(b->CannonState(0).cd, 0);                                       // el enemigo de arriba no se ataca
+        for (int f = 0; f < 20; ++f) { place(cx - 80, 14 * 16 + 8); b->RunFrame(); }
+        int fired = 0;
+        for (int i = 0; i < nes::Battle::kMaxCannonShots; ++i) {
+            if (!b->CannonShotState(i).on) continue;
+            ++fired;
+            CHECK(b->CannonShotState(i).dx == -1 && b->CannonShotState(i).dy == 0);           // hacia afuera, nunca hacia el aguila
+        }
+        const int cd = b->CannonState(0).cd;
+        CHECK(cd > 150 && cd <= nes::Battle::kCannonReload);                   // recarga de 4 segundos
+        // el enemigo recibe el disparo (el basico muere de uno)
+        for (int f = 0; f < 60; ++f) { place(cx - 80, 14 * 16 + 8); b->RunFrame(); }
+        const u8 fl = b->TankFlags(e);
+        CHECK(fl < 0x80 || fl >= 0xE0);                                        // el disparo del canon lo destruyo
+        (void)fired;
+    }
+    // aguantan 3 disparos enemigos y al caer dejan el lugar libre; las balas de los jugadores no los danan
+    {
+        auto b = scene(1, 2, 1);
+        b->DebugGiveItem(nes::Battle::kBonusCannon, 0);
+        const int e = b->DebugSpawnEnemy(0, false);
+        for (int f = 0; f < 120; ++f) b->RunFrame();
+        b->R(nes::ram_clock_timer) = 0x0A;
+        const int cx = 14 * 16 + 8, cy = 14 * 16 + 8;
+        for (int hit = 1; hit <= 3; ++hit) {
+            b->DebugClearBullets();
+            b->SetTankPos(e, cx + 60, cy);
+            b->DebugSetTankFlags(e, 0xA1);                                   // mirando hacia el canon (a la izquierda)
+            b->DebugFire(e);
+            for (int f = 0; f < 50; ++f) { b->SetTankPos(e, cx + 60, cy); b->DebugSetTankFlags(e, 0xA1); b->RunFrame(); }
+            CHECK_EQ(b->CannonState(1).on, hit < 3);
+        }
+        // las balas de un jugador no lo danan
+        auto c = scene(1, 2, 1);
+        c->DebugGiveItem(nes::Battle::kBonusCannon, 0);
+        c->DebugClearBullets();
+        c->SetTankPos(0, 14 * 16 + 8 + 60, 14 * 16 + 8);
+        c->DebugSetTankFlags(0, 0xA1);
+        c->DebugFire(0);
+        for (int f = 0; f < 50; ++f) c->RunFrame();
+        CHECK_EQ(c->CannonState(1).hp, 3);
+    }
+    // items a la vez: 1 (solo el principal), 2 y 3
+    for (int items = 1; items <= 3; ++items) {
+        auto b = scene(1, items, 1);
+        for (int k = 0; k < 6; ++k) b->DebugSpawnRandomBonus();
+        const int onField = (b->BonusActive() ? 1 : 0) + b->ExtraItemCount();
+        CHECK_EQ(onField, items);
+    }
+}
+
 void TestUpdater() {
     std::printf("[actualizaciones] comparar versiones, leer los releases (pc-vX / android-vX) y elegir el instalador o el APK\n");
     CHECK_EQ(app::CompareVersions("1.0.0", "1.0.0"), 0);
@@ -4082,6 +4176,7 @@ int main() {
     TestRoyale();
     TestNewItems();
     TestUpdater();
+    TestCannons();
     TestDifficultyRulesAndContinues();
     TestGhostWalls();
     TestVoiceChat();

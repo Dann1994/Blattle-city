@@ -38,6 +38,7 @@ bool Config::Load(const std::string& path) {
         else if (name == "cuevery") cuEvery = value >= 10 ? 10 : (value >= 5 ? 5 : 1);
         else if (name == "cushared") cuShared = value != 0;
         else if (name == "cuai") cuAi = value < 0 ? 0 : (value > 2 ? 2 : value);
+        else if (name == "cuitems") cuItems = value < 1 ? 1 : (value > 3 ? 3 : value);
         else if (name == "culives") cuLives = value < 1 ? 1 : (value > 10 ? 10 : value);
         else if (name == "vslives") vsLives = value < 1 ? 1 : (value > 10 ? 10 : value);
     }
@@ -69,6 +70,7 @@ bool Config::Save(const std::string& path) const {
     f << "cushared=" << (cuShared ? 1 : 0) << "\n";
     f << "cuai=" << cuAi << "\n";
     f << "culives=" << cuLives << "\n";
+    f << "cuitems=" << cuItems << "\n";
     f << "vslives=" << vsLives << "\n";
     return static_cast<bool>(f);
 }

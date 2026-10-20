@@ -584,6 +584,8 @@ void Battle::Sub_C331_prepare_tanks_and_spawn_players() {
     vsSpawned_[0] = vsSpawned_[1] = 0;
     std::memset(teamClock_, 0, sizeof(teamClock_));
     for (auto& h : heli_) h = Heli{};
+    for (Cannon& cn : cannons_) cn = Cannon{};
+    for (CannonShot& sh : cshots_) sh = CannonShot{};
     for (auto& m : mines_) m = Mine{};
     portal_ = Portal{};
     for (auto& b : booms_) b = Boom{};
@@ -1032,6 +1034,7 @@ void Battle::Status_90(int x) {
 // ofs_000_DC7C_A0 (00:DC7C): tanque activo; los enemigos alineados a 8 px
 // pueden cambiar de objetivo con probabilidad 1/16.
 void Battle::Status_A0(int x) {
+    if (wide_ && !IsVersus() && IsAlly(x)) { AllyDrive(x); return; }          // los aliados juegan con la IA de los combatientes del royale
     if (x >= nPlayers_ && (TPOSX(x) & 0x07) == 0 && (TPOSY(x) & 0x07) == 0) {
         int ix, iy;
         const bool seeking = wide_ && !IsVersus() && !IsAlly(x) && ((TTYPE(x) >> 5) & 3) == 0 && NearestItem(TankX(x), TankY(x), ix, iy);
@@ -1045,6 +1048,10 @@ void Battle::Status_A0(int x) {
 
 // loc_DC97 (00:DC97): intento de avanzar 1 px con dos sondas en el frente.
 void Battle::Loc_DC97_try_move(int x) {
+    if (!StepForward(x)) Loc_DD11_blocked(x);
+}
+
+bool Battle::StepForward(int x) {
     const int dir = TFLAGS(x) & 0x03;
     const int dy = S8(tbl_E470[dir]);
     const int dx = S8(tbl_E46C[dir]);
@@ -1079,10 +1086,10 @@ void Battle::Loc_DC97_try_move(int x) {
             TPOSX(x) = t56;
             TPOSY(x) = t57;
             TWHEELS(x) ^= 0x04;                  // loc_DD29
-            return;
+            return true;
         }
     }
-    Loc_DD11_blocked(x);
+    return false;
 }
 
 // bra_DD11 (00:DD11): el paso esta bloqueado.
@@ -2204,6 +2211,128 @@ int Battle::ExtraIcons(ExtraIcon* out, int max) const {
     return n;
 }
 
+// ---------------------------------------------------------------------------
+// Canones
+// ---------------------------------------------------------------------------
+
+// Cubre el aguila de ladrillos y pone un canon pegado a cada lado del aguila (en lugar de los ladrillos laterales del muro; asi
+// no tapan los lugares donde aparecen los jugadores). Si ya habia canones, los repara.
+void Battle::SpawnCannons() {
+    if (!wide_ || IsVersus()) return;
+    if (R(ram_game_over_flag) & 0x80) {
+        R(ram_shovel_timer) = 0;
+        Sub_CAF5_draw_default_base();                    // los ladrillos de siempre, enteros
+    }
+    static const int kCol[kMaxCannons] = {12, 14};
+    for (int i = 0; i < kMaxCannons; ++i) {
+        Cannon& cn = cannons_[i];
+        cn = Cannon{true, kCol[i], 14, i == 0 ? -1 : 1, kCannonHp, 0, 0};
+        const int x0 = cn.col * 16, y0 = cn.row * 16;
+        for (int a = 0; a < 2; ++a)
+            for (int b = 0; b < 2; ++b) Sub_D784_write_tile(PointerPx(x0 + a * 8, y0 + b * 8), con_block_type + 0x10);
+        AddBoom(x0 + 8, y0 + 8);
+    }
+}
+
+void Battle::CannonKill(int i) {
+    Cannon& cn = cannons_[i];
+    const int x0 = cn.col * 16, y0 = cn.row * 16;
+    for (int a = 0; a < 2; ++a)
+        for (int b = 0; b < 2; ++b) Sub_D784_write_tile(PointerPx(x0 + a * 8, y0 + b * 8), 0);
+    AddBoom(x0 + 8, y0 + 8);
+    R(ram_sfx_explosion_enemy) = 1;
+    cn.on = false;
+}
+
+bool Battle::CannonHit(int px, int py, int bi) {
+    for (int i = 0; i < kMaxCannons; ++i) {
+        Cannon& cn = cannons_[i];
+        if (!cn.on || px < cn.col * 16 || px >= cn.col * 16 + 16 || py < cn.row * 16 || py >= cn.row * 16 + 16) continue;
+        const bool live = (BSTATUS(bi) & 0xF0) == 0x40;                   // (la sonda puede pasar dos veces por la misma bala)
+        BSTATUS(bi) = 0x33;
+        if (live && BulletOwner(bi) < 0) {                       // solo danan los disparos enemigos (las balas de los jugadores se apagan)
+            cn.flash = 8;
+            if (--cn.hp <= 0) CannonKill(i);
+            else R(ram_sfx_bullet_hit_tank) = 1;
+        }
+        return true;
+    }
+    return false;
+}
+
+// Un disparo de canon le pega a un enemigo: como una bala comun (casco, item que suelta, salud).
+void Battle::CannonDamageEnemy(int e) {
+    ++cannonHits_;
+    if (shieldHp_[e] > 0) { ShieldHit(e, 1); R(ram_sfx_bullet_hit_tank) = 1; return; }
+    if (TTYPE(e) & 0x04) {
+        Sub_E8BE_spawn_bonus();
+        TTYPE(e) = static_cast<u8>(TTYPE(e) & 0xFB);
+    }
+    if (wd_.hp[e] > 1) {
+        wd_.hp[e] = static_cast<u8>(wd_.hp[e] - 1);
+        if (((TTYPE(e) >> 5) & 3) == 3) TTYPE(e) = static_cast<u8>((TTYPE(e) & 0xFC) | (wd_.hp[e] - 1 < 3 ? wd_.hp[e] - 1 : 3));
+        R(ram_sfx_bullet_hit_tank) = 1;
+    } else {
+        TFLAGS(e) = con_tank_flag_explosion + 0x03;
+        R(ram_sfx_explosion_enemy) = 1;
+        TTYPE(e) = 0;
+    }
+}
+
+void Battle::CannonsStep() {
+    for (Cannon& cn : cannons_) {
+        if (!cn.on) continue;
+        if (cn.flash > 0) --cn.flash;
+        if (cn.cd > 0) { --cn.cd; continue; }
+        const int cx = cn.col * 16 + 8, cy = cn.row * 16 + 8;
+        int best = 1 << 20, bdx = 0, bdy = 0;
+        for (int e = nPlayers_; e <= lastEnemy_; ++e) {                 // el enemigo mas cercano en la linea hacia afuera (solo a los costados)
+            const u8 f = TFLAGS(e);
+            if (!(f & 0x80) || f >= 0xE0 || IsAlly(e)) continue;
+            const int dx = TankX(e) - cx, dy = TankY(e) - cy;
+            if (dx * cn.side > 0 && dx * cn.side <= 240 && std::abs(dy) <= 48 && dx * cn.side < best) { best = dx * cn.side; bdx = cn.side; bdy = 0; }
+        }
+        if (best == (1 << 20)) continue;
+        for (CannonShot& sh : cshots_) {
+            if (sh.on) continue;
+            sh = CannonShot{true, cx + bdx * 10, cy + bdy * 10, bdx, bdy};
+            cn.cd = kCannonReload;
+            R(ram_sfx_shot) = 1;
+            break;
+        }
+    }
+    for (CannonShot& sh : cshots_) {
+        if (!sh.on) continue;
+        for (int k = 0; k < 4 && sh.on; ++k) {                          // 4 pixeles por cuadro, de a uno
+            sh.x += sh.dx;
+            sh.y += sh.dy;
+            if (sh.x < 0 || sh.x >= MapCols() * 8 || sh.y < 8 || sh.y >= 240) { sh.on = false; break; }
+            if (sh.x >= 192 && sh.x < 240 && sh.y >= 208) continue;         // pasa sobre los ladrillos de la base sin romperlos (el tiro hacia arriba sale por encima del muro)
+            const uint16_t p = PointerPx(sh.x, sh.y);
+            const u8 t = M(p) & 0x7F;
+            if ((t & 0xFC) == 0xC8) { sh.on = false; break; }            // el aguila: nunca la toca
+            if (t == 0x10) { sh.on = false; break; }                     // acero, piedra o canon
+            if (t >= 1 && t <= 0x0F) {
+                const u8 mask = Sub_D725_tile_mask(sh.x, sh.y);
+                if (t & mask) {
+                    Sub_D784_write_tile(p, static_cast<u8>(M(p) & ~mask));
+                    R(ram_sfx_bullet_hit_brick) = 1;
+                    sh.on = false;
+                    break;
+                }
+            }
+            for (int e = nPlayers_; e <= lastEnemy_; ++e) {
+                const u8 f = TFLAGS(e);
+                if (!(f & 0x80) || f >= 0xE0 || IsAlly(e)) continue;
+                if (std::abs(TankX(e) - sh.x) >= 10 || std::abs(TankY(e) - sh.y) >= 10) continue;
+                CannonDamageEnemy(e);
+                sh.on = false;
+                break;
+            }
+        }
+    }
+}
+
 void Battle::GhostClearBricks(int x) {
     const int px0 = WX(TPOSX(x) - 8), py0 = U8(TPOSY(x) - 8);
     const int offs[3] = {0, 8, 15};
@@ -2224,6 +2353,7 @@ void Battle::Sub_Extras() {
         if (portalCd_[x] > 0) --portalCd_[x];
     }
     if (enemyGhostT_ > 0) --enemyGhostT_;
+    if (!IsVersus()) CannonsStep();
     for (Boom& b : booms_) if (b.t > 0) --b.t;
     // helicopteros: vuelan sobre todo, van tras el enemigo mas cercano (despacio, para que se pueda escapar), se posan y sueltan una bomba
     const int worldW = MapCols() * 8;
@@ -2328,9 +2458,12 @@ bool Battle::NearestItem(int x, int y, int& ix, int& iy) const {
         best = std::abs(ix - x) + std::abs(iy - y);
         found = true;
     }
-    if (!IsVersus() && rItems_[0].on) {
-        const int d = std::abs(rItems_[0].x - x) + std::abs(rItems_[0].y - y);
-        if (!found || d < best) { ix = rItems_[0].x; iy = rItems_[0].y; found = true; }
+    if (!IsVersus()) {
+        for (const RoyaleItem& it : rItems_) {
+            if (!it.on) continue;
+            const int d = std::abs(it.x - x) + std::abs(it.y - y);
+            if (!found || d < best) { ix = it.x; iy = it.y; best = d; found = true; }
+        }
     }
     return found;
 }
@@ -2348,30 +2481,32 @@ void Battle::EnemiesGoForItem() {
 // El segundo item de la campania con 3 o 4 jugadores: lo agarra quien lo toque (jugadores o enemigos).
 void Battle::CampaignItemsStep() {
     if (!wide_ || IsVersus()) return;
-    RoyaleItem& it = rItems_[0];
-    if (!it.on) return;
-    for (int p = nPlayers_ - 1; p >= 0; --p) {
-        const u8 f = TFLAGS(p);
-        if (!(f & 0x80) || f >= 0xE0) continue;
-        if (std::abs(TankX(p) - it.x) >= 12 || std::abs(TankY(p) - it.y) >= 12) continue;
-        it.on = false;
-        Sub_D9E1_calculate_decimal_number(0x50);                 // 500 puntos
-        Sub_D9BE_add_score(p);
-        Sub_D138_gain_extra_life_for_20000_pts();
-        R(ram_sfx_bonus_pickup) = 1;
-        ++itemPickups_[p];
-        BonusHandler(it.id, p);
-        return;
-    }
-    for (int x = nPlayers_; x <= lastEnemy_ && rules_.ai >= 1; ++x) {
-        const u8 f = TFLAGS(x);
-        if (!(f & 0x80) || f >= 0xE0) continue;
-        if (std::abs(TankX(x) - it.x) >= 12 || std::abs(TankY(x) - it.y) >= 12) continue;
-        const int id = it.id;
-        it.on = false;
-        R(ram_sfx_bonus_pickup) = 1;
-        EnemyBonus(id, x);
-        return;
+    for (RoyaleItem& it : rItems_) {
+        if (!it.on) continue;
+        bool taken = false;
+        for (int p = nPlayers_ - 1; p >= 0 && !taken; --p) {
+            const u8 f = TFLAGS(p);
+            if (!(f & 0x80) || f >= 0xE0) continue;
+            if (std::abs(TankX(p) - it.x) >= 12 || std::abs(TankY(p) - it.y) >= 12) continue;
+            it.on = false;
+            Sub_D9E1_calculate_decimal_number(0x50);                 // 500 puntos
+            Sub_D9BE_add_score(p);
+            Sub_D138_gain_extra_life_for_20000_pts();
+            R(ram_sfx_bonus_pickup) = 1;
+            ++itemPickups_[p];
+            BonusHandler(it.id, p);
+            taken = true;
+        }
+        for (int x = nPlayers_; x <= lastEnemy_ && rules_.ai >= 1 && !taken; ++x) {
+            const u8 f = TFLAGS(x);
+            if (!(f & 0x80) || f >= 0xE0) continue;
+            if (std::abs(TankX(x) - it.x) >= 12 || std::abs(TankY(x) - it.y) >= 12) continue;
+            const int id = it.id;
+            it.on = false;
+            R(ram_sfx_bonus_pickup) = 1;
+            EnemyBonus(id, x);
+            taken = true;
+        }
     }
 }
 
@@ -2695,6 +2830,7 @@ void Battle::Sub_E604_bullets_movement() {
 // sub_E693 / sub_E69A (00:E693): una sonda de la bala contra el mosaico.
 // Devuelve 1 si rompio un cuarto de ladrillo (habilita la segunda sonda).
 int Battle::Sub_E693_bullet_probe(int px, int py, int bi) {
+    if (wide_ && !IsVersus() && CannonHit(px, py, bi)) return 0;
     const uint16_t p = PointerPx(px, py);
     const u8 mask = Sub_D725_tile_mask(px, py);
     const u8 tile = M(p);
@@ -3028,13 +3164,18 @@ void Battle::Sub_E910_check_bullets_collision_with_bullets() {
 
 // sub_E8BE_spawn_bonus (00:E8BE)
 void Battle::Sub_E8BE_spawn_bonus() {
-    if (SecondItemsAllowed() && BONUSX != 0 && !rItems_[0].on) {         // 3 o 4 jugadores: el nuevo item va al segundo lugar y el primero se queda
+    int freeSlot = -1;                                                   // lugares de items extra libres (hasta MaxItems() - 1)
+    for (int i = 0; i < MaxItems() - 1 && i < 3; ++i) if (!rItems_[i].on) { freeSlot = i; break; }
+    if (SecondItemsAllowed() && BONUSX != 0 && freeSlot >= 0) {          // ya hay un item: el nuevo va a un lugar aparte y los demas se quedan
         const int sx = R(ram_bonus_pos_X), shi = bonusXHi_, sy = R(ram_bonus_pos_Y), sid = R(ram_bonus_id), st = R(ram_0062_bonus_timer);
-        for (int tries = 0; tries < 8; ++tries) {
+        for (int tries = 0; tries < 12; ++tries) {
             SpawnBonusCore();
-            if (std::abs((R(ram_bonus_pos_X) | (bonusXHi_ << 8)) - (sx | (shi << 8))) >= 16 || std::abs(R(ram_bonus_pos_Y) - sy) >= 16) break;     // en otro lugar
+            const int nx = R(ram_bonus_pos_X) | (bonusXHi_ << 8), ny = R(ram_bonus_pos_Y);
+            bool apart = std::abs(nx - (sx | (shi << 8))) >= 16 || std::abs(ny - sy) >= 16;
+            for (const RoyaleItem& o : rItems_) if (o.on && std::abs(nx - o.x) < 16 && std::abs(ny - o.y) < 16) apart = false;
+            if (apart) break;                                                                                      // en otro lugar
         }
-        rItems_[0] = RoyaleItem{true, R(ram_bonus_pos_X) | (bonusXHi_ << 8), R(ram_bonus_pos_Y), R(ram_bonus_id), 1 << 30};
+        rItems_[freeSlot] = RoyaleItem{true, R(ram_bonus_pos_X) | (bonusXHi_ << 8), R(ram_bonus_pos_Y), R(ram_bonus_id), 1 << 30};
         R(ram_bonus_pos_X) = static_cast<u8>(sx);
         bonusXHi_ = static_cast<u8>(shi);
         R(ram_bonus_pos_Y) = static_cast<u8>(sy);
@@ -3061,7 +3202,7 @@ void Battle::SpawnBonusCore() {
         Sub_E972_try_to_pick_up_bonus();                  // solo para evitar que caiga encima de un jugador
     } while (R(ram_0062_bonus_timer) != 0);
     {
-        static const u8 kWideBonus[16] = {0, 1, 2, 3, 4, 5, 7, 3, 8, 9, 10, 11, 12, 0, 3, 12};   // en el campo ancho una de las granadas repetidas es el item de aliados; 8-12 = items nuevos
+        static const u8 kWideBonus[16] = {0, 1, 2, 3, 4, 5, 7, 3, 8, 9, 10, 11, 12, 0, 3, 13};   // en el campo ancho una de las granadas repetidas es el item de aliados; 8-12 = items nuevos
         static const u8 kVsBonus[16] = {0, 1, 3, 4, 5, 6, 3, 0, 8, 9, 10, 11, 12, 6, 3, 8};     // batalla vs: sin pala ni aliados
         const u8 roll = Sub_D44D_generate_random_number() & (wide_ ? 0x0F : 0x07);
         R(ram_bonus_id) = IsVersus() ? kVsBonus[roll] : (wide_ ? kWideBonus[roll] : tbl_E8FA_bonus[roll]);
@@ -3653,6 +3794,9 @@ void Battle::BonusHandler(int id, int x) {
         case kBonusSpeed:                                // el doble de velocidad
             speedT_[x] = kItemFrames;
             break;
+        case kBonusCannon:                               // canones: el aguila se cubre de ladrillos y dos canones la cuidan
+            if (!IsVersus()) SpawnCannons();
+            break;
         default:
             break;
     }
@@ -3995,9 +4139,171 @@ int Battle::NearestEnemy(int x) const {
     return best;
 }
 
+// Un aliado de la campania: pide botones a la IA y los aplica (gira alineado a la grilla de 8 px, o media vuelta en cualquier momento).
+void Battle::AllyDrive(int x) {
+    const u8 btn = AllyAiButtons(x);
+    static const u8 kDirBtn[4] = {con_btn_Up, con_btn_Left, con_btn_Down, con_btn_Right};
+    int want = TFLAGS(x) & 3;
+    bool moves = false;
+    for (int d = 0; d < 4; ++d) if (btn & kDirBtn[d]) { want = d; moves = true; }
+    const int cur = TFLAGS(x) & 3;
+    const bool aligned = (TPOSX(x) & 7) == 0 && (TPOSY(x) & 7) == 0;
+    if (want != cur && (aligned || want == ((cur + 2) & 3))) TFLAGS(x) = static_cast<u8>((TFLAGS(x) & ~3) | want);
+    if (moves) StepForward(x);
+    if ((btn & con_btn_A) && allyAutoFire_) Sub_E08C_fire_bullet(x);
+}
+
+// Los botones de la IA de un aliado: el mismo esquema que AiButtons (los combatientes del royale), con otros objetivos.
+u8 Battle::AllyAiButtons(int p) {
+    const u8 fl = TFLAGS(p);
+    if (!(fl & 0x80) || fl >= 0xE0 || R(ram_pause_flag) != 0) { aiStuck_[p] = 0; aiTimer_[p] = 0; aiGoalT_[p] = 0; return 0; }
+    const int x = TankX(p), y = TankY(p);
+    const int facing = fl & 3;
+    const int sc = std::max(0, std::min(kWideBlocksX - 1, x >> 4)), sr = std::max(0, std::min(kWideBlocksY, y >> 4));
+    if (x == aiLastX_[p] && y == aiLastY_[p]) ++aiStuck_[p]; else aiStuck_[p] = 0;
+    aiLastX_[p] = x;
+    aiLastY_[p] = y;
+    if (aiTimer_[p] > 0) --aiTimer_[p];
+    if (aiGoalT_[p] > 0) --aiGoalT_[p];
+    if (aiFireCool_[p] > 0) --aiFireCool_[p];
+    if (aiDodgeT_[p] > 0) --aiDodgeT_[p];
+    if (aiWanderT_[p] > 0) --aiWanderT_[p];
+    const bool wander = aiWanderT_[p] > 0;
+    auto hostile = [&](int e) {
+        const u8 f = TFLAGS(e);
+        return e >= nPlayers_ && e <= lastEnemy_ && (f & 0x80) && f < 0xE0;
+    };
+    auto rnd = [&]() { return static_cast<int>(Sub_D44D_generate_random_number()); };
+    const int owner = allyOwner_[p];
+    const bool ownerAlive = owner >= 0 && owner < nPlayers_ && (TFLAGS(owner) & 0x80) && TFLAGS(owner) < 0xE0;
+    // 1) esquivar un disparo enemigo que viene de frente
+    if (aiDodgeT_[p] <= 0) {
+        for (int b = 0; b < nBullets_; ++b) {
+            if ((BSTATUS(b) & 0xF0) != 0x40 || BulletOwner(b) >= 0) continue;     // solo las balas enemigas
+            const int bx = wd_.bposX[b] | (bulletXHi_[b] << 8), by = wd_.bposY[b];
+            const int bd = BSTATUS(b) & 3;
+            int dodge = -1;
+            if (bd == 1 || bd == 3) {
+                const bool toward = bd == 3 ? bx < x : bx > x;
+                if (toward && std::abs(by - y) < 11 && std::abs(bx - x) < 56) dodge = by < y ? 2 : 0;
+            } else {
+                const bool toward = bd == 2 ? by < y : by > y;
+                if (toward && std::abs(bx - x) < 11 && std::abs(by - y) < 56) dodge = bx < x ? 3 : 1;
+            }
+            if (dodge >= 0) { aiDir_[p] = dodge; aiDodgeT_[p] = 12; aiGoalT_[p] = 0; break; }
+        }
+    }
+    // 2) destino
+    int best = -1, bestDist = 1 << 20;
+    for (int e = nPlayers_; e <= lastEnemy_; ++e) {
+        if (!hostile(e)) continue;
+        const int d = std::abs(TankX(e) - x) + std::abs(TankY(e) - y);
+        if (d < bestDist) { bestDist = d; best = e; }
+    }
+    int ox = -1, oy = -1;                                        // el aguila enemiga de los niveles especiales
+    if (IsBossLevel() && enemyEagleAlive_) { ox = EagleCol() * 16 + 8; oy = EagleRow() * 16 + 8; }
+    const bool atGoal = sc == aiGoalC_[p] && sr == aiGoalR_[p];
+    if (aiGoalT_[p] <= 0 || atGoal || aiStuck_[p] > 24) {
+        bool picked = false;
+        if (!wander && !IsBossLevel() && (R(ram_game_over_flag) & 0x80)) {       // defiende el aguila si un enemigo se le acerca
+            int threat = -1, td = 1 << 20;
+            for (int e = nPlayers_; e <= lastEnemy_; ++e) {
+                if (!hostile(e)) continue;
+                const int d = std::abs(TankX(e) - 216) + std::abs(TankY(e) - 232);
+                if (d < td) { td = d; threat = e; }
+            }
+            if (threat >= 0 && td < 150) { aiGoalC_[p] = TankX(threat) >> 4; aiGoalR_[p] = TankY(threat) >> 4; aiGoalT_[p] = 20; picked = true; }
+        }
+        if (!picked && !wander && best >= 0 && bestDist < 130) {  // un enemigo cerca: va a su encuentro
+            aiGoalC_[p] = TankX(best) >> 4;
+            aiGoalR_[p] = TankY(best) >> 4;
+            aiGoalT_[p] = 20;
+            picked = true;
+        }
+        if (!picked && ownerAlive) {                             // acompana a quien lo trajo: lo alcanza y se queda cerca
+            const int oxp = TankX(owner), oyp = TankY(owner);
+            if (std::abs(oxp - x) + std::abs(oyp - y) > 90) {
+                aiGoalC_[p] = oxp >> 4;
+                aiGoalR_[p] = oyp >> 4;
+                aiGoalT_[p] = 25;
+            } else {
+                for (int tries = 0; tries < 10; ++tries) {       // cerca del dueno: patrulla en un radio de 3 bloques
+                    const int c = (oxp >> 4) + rnd() % 7 - 3, r = (oyp >> 4) + rnd() % 7 - 3;
+                    if (c >= 1 && c < kWideBlocksX - 1 && r >= 1 && r <= kWideBlocksY - 1 && AiBlockCost(c, r) < 255) { aiGoalC_[p] = c; aiGoalR_[p] = r; break; }
+                }
+                aiGoalT_[p] = 60 + rnd() % 60;
+            }
+            picked = true;
+        }
+        if (!picked) {                                           // sin dueno: a recorrer el mapa (a veces, a por el aguila enemiga)
+            if (ox >= 0 && (rnd() % 3) == 0) { aiGoalC_[p] = ox >> 4; aiGoalR_[p] = oy >> 4; }
+            else {
+                for (int tries = 0; tries < 12; ++tries) {
+                    const int c = 1 + rnd() % (kWideBlocksX - 2), r = 1 + rnd() % (kWideBlocksY - 1);
+                    if (AiBlockCost(c, r) < 255 && (std::abs(c - sc) + std::abs(r - sr)) >= 4) { aiGoalC_[p] = c; aiGoalR_[p] = r; break; }
+                }
+            }
+            aiGoalT_[p] = 90 + rnd() % 90;
+        }
+        aiStuck_[p] = aiStuck_[p] > 24 ? 0 : aiStuck_[p];
+    }
+    // trabado: primero a tiros, despues por otro lado
+    bool breakWall = false;
+    if (aiStuck_[p] > 6) breakWall = true;
+    if (aiStuck_[p] > 14) {
+        static const int kDc[4] = {0, -1, 0, 1}, kDr[4] = {-1, 0, 1, 0};
+        int free[4], nf = 0;
+        for (int k = 0; k < 4; ++k) if (AiBlockCost(sc + kDc[k], sr + kDr[k]) < 255 && k != facing) free[nf++] = k;
+        if (nf == 0) free[nf++] = (facing + 2) & 3;
+        aiDir_[p] = free[rnd() % nf];
+        aiTimer_[p] = 22 + rnd() % 20;
+        aiWanderT_[p] = 120;
+        aiGoalT_[p] = 0;
+        aiStuck_[p] = 0;
+        breakWall = false;
+    }
+    // 3) rumbo
+    int dir = facing, nextCost = 1;
+    if (aiDodgeT_[p] > 0) {
+        dir = aiDir_[p];
+    } else if (aiTimer_[p] > 0) {
+        dir = aiDir_[p];
+    } else {
+        int d = AiPathDir(sc, sr, aiGoalC_[p], aiGoalR_[p], nextCost);
+        if (d < 0) {
+            const int gx = aiGoalC_[p] * 16 + 8, gy = aiGoalR_[p] * 16 + 8;
+            if (std::abs(gx - x) >= 4 || std::abs(gy - y) >= 4) d = std::abs(gx - x) >= std::abs(gy - y) ? (gx > x ? 3 : 1) : (gy > y ? 2 : 0);
+            else { d = facing; aiGoalT_[p] = 0; }
+        } else {
+            const int cx = sc * 16 + 8, cy = sr * 16 + 8;
+            if ((d == 1 || d == 3) && std::abs(cy - y) >= 5) d = cy > y ? 2 : 0;
+            else if ((d == 0 || d == 2) && std::abs(cx - x) >= 5) d = cx > x ? 3 : 1;
+        }
+        dir = d;
+        aiDir_[p] = d;
+        aiTimer_[p] = 6;
+    }
+    // quieto cuando ya esta cerca de su dueno y no hay nada que hacer
+    bool hold = false;
+    if (ownerAlive && !wander && best < 0 && aiDodgeT_[p] <= 0 && std::abs(TankX(owner) - x) + std::abs(TankY(owner) - y) < 40) hold = true;
+    // 4) disparo: apunta antes de tirar y nunca hacia el aguila propia ni hacia el jugador que lo trajo
+    bool fire = breakWall;
+    if (aiFireCool_[p] <= 0 && !fire) {
+        for (int e = nPlayers_; e <= lastEnemy_ && !fire; ++e) if (hostile(e) && LineOfFirePoint(p, TankX(e), TankY(e), 140)) fire = (rnd() % 2) == 0;
+        if (!fire && ox >= 0 && LineOfFirePoint(p, ox, oy, 100)) fire = (rnd() % 3) == 0;
+        if (!fire && (rnd() % 160) == 0) fire = true;
+    }
+    if (!IsBossLevel() && AimsAtEagleAt(p, 13, 14, 1)) fire = false;
+    if (fire && ownerAlive && LineOfFirePoint(p, TankX(owner), TankY(owner), 140)) fire = breakWall;       // no le tira a su dueno
+    static const u8 kDirBtn[4] = {con_btn_Up, con_btn_Left, con_btn_Down, con_btn_Right};
+    u8 out = hold ? 0 : kDirBtn[dir & 3];                       // (quieto: sin botones de rumbo)
+    if (fire && (R(ram_frm_cnt_lo) & 1)) { out = static_cast<u8>(out | con_btn_A); aiFireCool_[p] = breakWall ? 12 : 36; }
+    return out;
+}
+
 // Los aliados disparan cuando tienen un enemigo en la mira y de vez en cuando al azar.
 void Battle::Sub_AllyFire() {
-    if (!wide_ || !allyAutoFire_) {
+    if (!wide_ || !allyAutoFire_ || !IsVersus()) {                // en la campania disparan desde AllyDrive (IA nueva)
         return;
     }
     for (int x = allyBegin_; x <= lastTank_; ++x) {
@@ -4206,8 +4512,8 @@ uint32_t Battle::StateHash() const {
         mixInt(royaleFrames_);
         mixInt(royaleBonusT_);
         for (const RoyaleItem& it : rItems_) { mixInt(it.on ? 1 : 0); mixInt(it.x); mixInt(it.y); mixInt(it.id); mixInt(it.life); }
-        for (int i = 0; i < nPlayers_; ++i) { mixInt(aiGoalC_[i]); mixInt(aiGoalR_[i]); mixInt(aiGoalT_[i]); mixInt(aiFireCool_[i]); mixInt(aiDodgeT_[i]); mixInt(aiWanderT_[i]); }
-        for (int i = 0; i < nPlayers_; ++i) { mixInt(aiPlayer_[i] ? 1 : 0); mixInt(aiDir_[i]); mixInt(aiTimer_[i]); mixInt(aiStuck_[i]); mixInt(aiLastX_[i]); mixInt(aiLastY_[i]); }
+        for (int i = 0; i <= lastTank_ && i < kMaxTanks; ++i) { mixInt(aiGoalC_[i]); mixInt(aiGoalR_[i]); mixInt(aiGoalT_[i]); mixInt(aiFireCool_[i]); mixInt(aiDodgeT_[i]); mixInt(aiWanderT_[i]); }
+        for (int i = 0; i <= lastTank_ && i < kMaxTanks; ++i) { mixInt(i < kMaxPlayers && aiPlayer_[i] ? 1 : 0); mixInt(aiDir_[i]); mixInt(aiTimer_[i]); mixInt(aiStuck_[i]); mixInt(aiLastX_[i]); mixInt(aiLastY_[i]); }
         for (int i = nPlayers_; i <= lastEnemy_; ++i) mixInt(vsTeam_[i]);
         mixInt(vsSize_);
     }
@@ -4236,6 +4542,8 @@ uint32_t Battle::StateHash() const {
     mixInt(mineSeq_);
     for (const Heli& h : heli_) { mixInt(h.on ? 1 : 0); mixInt(h.owner); mixInt(h.x); mixInt(h.y); mixInt(h.state); mixInt(h.timer); mixInt(h.life); mixInt(h.target); mixInt(h.dir); mixInt(h.acc); }
     for (const Mine& m : mines_) { mixInt(m.on ? 1 : 0); mixInt(m.owner); mixInt(m.col); mixInt(m.row); mixInt(m.age); mixInt(m.seq); }
+    for (const Cannon& cn : cannons_) { mixInt(cn.on ? 1 : 0); mixInt(cn.col); mixInt(cn.row); mixInt(cn.hp); mixInt(cn.cd); }
+    for (const CannonShot& sh : cshots_) { mixInt(sh.on ? 1 : 0); mixInt(sh.x); mixInt(sh.y); mixInt(sh.dx); mixInt(sh.dy); }
     mixInt(portal_.on ? 1 : 0); mixInt(portal_.uses);
     for (int i = 0; i < 2; ++i) { mixInt(portal_.col[i]); mixInt(portal_.row[i]); }
     for (const Boom& b : booms_) { mixInt(b.t); mixInt(b.x); mixInt(b.y); }

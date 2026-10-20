@@ -170,7 +170,7 @@ constexpr int kNesHeightPx = 240;
 // ---- items nuevos (ids 8..12), minas, portal y helicopteros ----
 // Los items nuevos usan el mismo marco y los mismos colores que los originales (paleta de sprites 2): 0 negro, 1 fondo verde azulado,
 // 2 gris, 3 blanco. El dibujo ocupa el interior: 12 columnas por 11 filas (columnas 2..13, filas 2..12 del item de 16x16).
-constexpr const char* kItemArt[5][11] = {
+constexpr const char* kItemArt[6][11] = {
     {   // 8: invisible (fantasma)
         "111133331111", "111333333111", "113333333311", "113303303311", "113303303311", "113333333311",
         "113333333311", "113333333311", "113333333311", "113323323311", "113313313311",
@@ -190,6 +190,10 @@ constexpr const char* kItemArt[5][11] = {
     {   // 12: velocidad (doble flecha)
         "311111311111", "331111331111", "333111333111", "333311333311", "333331333331", "333333333333",
         "333331333331", "333311333311", "333111333111", "331111331111", "311111311111",
+    },
+    {   // 13: canones (un canon con el caño hacia arriba)
+        "111133331111", "111132231111", "111132231111", "111132231111", "111132231111", "113222222311",
+        "132222222231", "132233332231", "132222222231", "113222222311", "111333333111",
     },
 };
 
@@ -244,7 +248,7 @@ void DrawItemIcon(std::vector<uint32_t>& rgb, int w, int cx, int cy, int id) {
         for (int x = 0; x < 16; ++x) {
             int idx = kItemFrame[y][x] - '0';
             const bool inner = x >= 2 && x <= 13 && y >= 2 && y <= 12;
-            if (inner && k >= 0 && k <= 4) idx = kItemArt[k][y - 2][x - 2] - '0';
+            if (inner && k >= 0 && k <= 5) idx = kItemArt[k][y - 2][x - 2] - '0';
             const bool ring = y == 1 || x == 1 || x == 14 || inner;
             if (idx == 0 && !(ring && !(y == 15 || (y == 14 && (x == 0 || x == 15))))) continue;   // lo transparente del marco queda transparente; lo negro de adentro, negro
             BlendPx(rgb, w, x0 + x, y0 + y, 0xFF000000 | col[idx]);
@@ -277,8 +281,41 @@ void DrawDoor(std::vector<uint32_t>& rgb, int w, int cx, int cy, uint32_t c1, ui
         }
 }
 
+// Bloque de canon (16x16): base gris oscura con remaches, torreta redonda y un cano largo apuntando hacia afuera (a su costado). La luz de la torreta es verde cuando
+// esta listo y roja mientras recarga; tres lucecitas abajo muestran la salud. Destella en blanco cuando lo golpean.
+void DrawCannon(std::vector<uint32_t>& rgb, int w, const nes::Battle::Cannon& cn) {
+    const int x0 = cn.col * 16, y0 = cn.row * 16;
+    const bool flash = cn.flash > 0 && ((cn.flash >> 1) & 1) != 0;
+    const uint32_t body = flash ? 0xFCFCFC : 0x585858, edge = 0x101010, hi = flash ? 0xFCFCFC : 0x9C9C9C, barrel = flash ? 0xFCFCFC : 0xC8C8C8;
+    for (int y = 0; y < 16; ++y)
+        for (int x = 0; x < 16; ++x) {
+            uint32_t col = body;
+            if (x == 0 || y == 0 || x == 15 || y == 15) col = edge;
+            else if (x == 1 || y == 1) col = hi;                                              // reborde de luz arriba y a la izquierda
+            else if ((x == 2 || x == 13) && (y == 2 || y == 13)) col = 0xD8D8D8;              // remaches
+            BlendPx(rgb, w, x0 + x, y0 + y, 0xFF000000 | col);
+        }
+    for (int dy = -6; dy <= 6; ++dy)                                                          // torreta
+        for (int dx = -6; dx <= 6; ++dx) {
+            const int r2 = dx * dx + dy * dy;
+            if (r2 > 30) continue;
+            BlendPx(rgb, w, x0 + 8 + dx, y0 + 8 + dy, 0xFF000000 | (r2 > 22 ? edge : 0x383838));
+        }
+    for (int i = 0; i < 9; ++i) {                                                             // cano hacia afuera, con la boca mas ancha
+        const int ex = cn.side > 0 ? 15 - i : i;
+        const bool mouth = i <= 2;
+        for (int k = mouth ? -2 : -1; k <= (mouth ? 2 : 1); ++k) BlendPx(rgb, w, x0 + ex, y0 + 8 + k, 0xFF000000 | ((k == 0 || (!mouth && k == -1)) ? barrel : edge));
+    }
+    const bool ready = cn.cd == 0;
+    for (int dy = -1; dy <= 0; ++dy)
+        for (int dx = -1; dx <= 0; ++dx) BlendPx(rgb, w, x0 + 8 + dx, y0 + 8 + dy, 0xFF000000 | (ready ? 0x38FC38 : 0xFC3838));
+    for (int h = 0; h < cn.hp; ++h)                                                           // salud
+        for (int k = 0; k < 2; ++k) BlendPx(rgb, w, x0 + 4 + h * 3 + k, y0 + 13, 0xFF000000 | 0xFC7838);
+}
+
 // Lo que esta pegado al piso: minas y portal (debajo de los tanques).
 void DrawExtraGround(const nes::Battle& b, std::vector<uint32_t>& rgb, int w) {
+    for (int i = 0; i < nes::Battle::kMaxCannons; ++i) if (b.CannonState(i).on) DrawCannon(rgb, w, b.CannonState(i));
     for (int i = 0; i < nes::Battle::kMaxMines; ++i) {
         if (!b.MineVisible(i)) continue;
         const auto& m = b.MineState(i);
@@ -300,6 +337,12 @@ void DrawExtraGround(const nes::Battle& b, std::vector<uint32_t>& rgb, int w) {
 
 // Lo que va por encima: helicopteros (hoja de sprites propia), explosiones, iconos de los items nuevos y la marca de velocidad.
 void DrawExtraAir(const nes::Battle& b, std::vector<uint32_t>& rgb, int w) {
+    for (int i = 0; i < nes::Battle::kMaxCannonShots; ++i) {                              // disparos de los canones
+        const auto& sh = b.CannonShotState(i);
+        if (!sh.on) continue;
+        for (int dy = -2; dy <= 1; ++dy)
+            for (int dx = -2; dx <= 1; ++dx) BlendPx(rgb, w, sh.x + dx, sh.y + dy, 0xFF000000 | ((dx >= -1 && dx <= 0 && dy >= -1 && dy <= 0) ? 0xFCFCA8 : 0xFC9838));
+    }
     nes::Battle::ExtraIcon icons[8];
     const int n = b.ExtraIcons(icons, 8);
     for (int i = 0; i < n; ++i) DrawItemIcon(rgb, w, icons[i].x, icons[i].y, icons[i].id);
@@ -511,6 +554,36 @@ bool Renderer::HasGlyph(int code) const {
            (code >= kAcute && code <= kInvExclaim) || FindCustom(code) != nullptr;
 }
 
+std::string Renderer::Fit(const std::string& text, int maxPx) const {
+    if (TextWidth(text) <= maxPx) return text;
+    std::string t = text;
+    while (!t.empty() && TextWidth(t + "...") > maxPx) {
+        size_t cut = t.size() - 1;
+        while (cut > 0 && (static_cast<unsigned char>(t[cut]) & 0xC0) == 0x80) --cut;       // sin partir un caracter UTF-8
+        t.erase(cut);
+    }
+    while (!t.empty() && t.back() == ' ') t.pop_back();
+    return t + "...";
+}
+
+std::vector<std::string> Renderer::Wrap(const std::string& text, int maxPx) const {
+    std::vector<std::string> lines;
+    std::string cur;
+    size_t i = 0;
+    while (i <= text.size()) {
+        size_t e = text.find(' ', i);
+        if (e == std::string::npos) e = text.size();
+        const std::string word = text.substr(i, e - i);
+        const std::string next = cur.empty() ? word : cur + " " + word;
+        if (!cur.empty() && TextWidth(next) > maxPx) { lines.push_back(cur); cur = word; }
+        else cur = next;
+        i = e + 1;
+    }
+    if (!cur.empty()) lines.push_back(cur);
+    for (std::string& l : lines) l = Fit(l, maxPx);                    // (una palabra sola que no entra)
+    return lines;
+}
+
 int Renderer::TextWidth(const std::string& text) const {
     int w = 0;
     for (size_t i = 0; i < text.size();) {
@@ -568,7 +641,34 @@ void Renderer::DrawIcon(std::vector<uint32_t>& canvas, int w, int x, int y, cons
     }
 }
 
+// ---- auditoria de textos (solo con la variable BCNES_TEXT_AUDIT): avisa de los textos que se salen de la pantalla o se pisan entre si ----
+namespace {
+struct AuditRect { int x, y, w; std::string text; };
+std::vector<AuditRect>& AuditRects() { static std::vector<AuditRect> v; return v; }
+bool AuditOn() { static const bool on = std::getenv("BCNES_TEXT_AUDIT") != nullptr; return on; }
+} // namespace
+
+void TextAuditFlush(const char* tag) {
+    if (!AuditOn()) return;
+    auto& v = AuditRects();
+    FILE* f = std::fopen(std::getenv("BCNES_TEXT_AUDIT"), "a");                // el valor de la variable es el archivo donde se escriben los avisos
+    if (!f) { v.clear(); return; }
+    for (size_t i = 0; i < v.size(); ++i) {
+        if (v[i].x < 0 || v[i].x + v[i].w > kScreenW || v[i].y < 0 || v[i].y + 8 > kScreenH)
+            std::fprintf(f, "[texto] SE SALE (%s): \"%s\" x=%d y=%d ancho=%d\n", tag, v[i].text.c_str(), v[i].x, v[i].y, v[i].w);
+        for (size_t j = i + 1; j < v.size(); ++j) {
+            if (v[i].text == v[j].text && v[i].x == v[j].x && v[i].y == v[j].y) continue;
+            const bool ox = v[i].x < v[j].x + v[j].w && v[j].x < v[i].x + v[i].w;
+            const bool oy = v[i].y < v[j].y + 8 && v[j].y < v[i].y + 8;
+            if (ox && oy) std::fprintf(f, "[texto] SE PISAN (%s): \"%s\" (%d,%d) con \"%s\" (%d,%d)\n", tag, v[i].text.c_str(), v[i].x, v[i].y, v[j].text.c_str(), v[j].x, v[j].y);
+        }
+    }
+    std::fclose(f);
+    v.clear();
+}
+
 void Renderer::DrawText(std::vector<uint32_t>& canvas, int w, int x, int y, const std::string& text, uint32_t color) const {
+    if (AuditOn() && w == kScreenW && !text.empty()) AuditRects().push_back({x, y, TextWidth(text), text});
     int cx = x;
     for (size_t i = 0; i < text.size();) {
         if (text[i] == '{') {
@@ -1032,6 +1132,7 @@ void Renderer::FinishFrame(std::vector<uint32_t>& canvas, const HudInfo& hud, st
         DrawText(canvas, kScreenW, (kScreenW - 5 * 8) / 2, 100, "PAUSE", 0xFCFCFC);
     }
 
+    TextAuditFlush("juego");
     rgba.resize(canvas.size() * 4);
     for (size_t i = 0; i < canvas.size(); ++i) {
         rgba[i * 4 + 0] = static_cast<uint8_t>((canvas[i] >> 16) & 0xFF);
@@ -1075,6 +1176,7 @@ std::string PadLeft(const std::string& s, size_t width) {
 }
 
 void ToRgba(const std::vector<uint32_t>& canvas, std::vector<uint8_t>& rgba) {
+    TextAuditFlush("pantalla");
     rgba.resize(canvas.size() * 4);
     for (size_t i = 0; i < canvas.size(); ++i) {
         rgba[i * 4 + 0] = static_cast<uint8_t>((canvas[i] >> 16) & 0xFF);
@@ -1232,34 +1334,52 @@ void Renderer::RenderMenu(const MenuView& m, std::vector<uint8_t>& rgba) const {
     }
     if (false) {
     } else if (!m.title.empty()) {
-        DrawText(canvas, kScreenW, (kScreenW - TextWidth(m.title)) / 2, dense ? 18 : 40, m.title, 0xFCA044);
+        const std::string title = Fit(m.title, kScreenW - 16);
+        DrawText(canvas, kScreenW, (kScreenW - TextWidth(title)) / 2, dense ? 18 : 40, title, 0xFCA044);
         y = dense ? 42 : 90;
     }
     // El bloque de opciones va centrado en la pantalla y las opciones alineadas a la izquierda entre si, como en el original.
+    std::vector<std::string> items;
+    for (const std::string& it : m.items) items.push_back(Fit(it, kScreenW - 80));
     int widest = 0;
-    for (const std::string& it : m.items) widest = std::max(widest, TextWidth(it));
+    for (const std::string& it : items) widest = std::max(widest, TextWidth(it));
     const int blockX = (kScreenW - widest) / 2;
-    for (size_t i = 0; i < m.items.size(); ++i) {
+    for (size_t i = 0; i < items.size(); ++i) {
         const bool selected = static_cast<int>(i) == m.selected;
         const bool enabled = i >= m.enabled.size() || m.enabled[i];
         const uint32_t color = !enabled ? 0x7C7C7C : (selected ? 0xF8D878 : 0xFCFCFC);
         const int x = blockX;
-        DrawText(canvas, kScreenW, x, y, m.items[i], color);
+        DrawText(canvas, kScreenW, x, y, items[i], color);
         if (selected) {
             DrawSprite16(canvas, kScreenW, x - 28, y - 4, 0x18, 0);   // el tanque de P1 mirando a la derecha hace de cursor
         }
-        y += dense ? 18 : 20;
+        y += m.items.size() >= 9 ? 16 : (dense ? 18 : 20);        // las listas de 9 o mas (configuracion) van mas juntas
     }
-    if (!m.note.empty()) {
-        DrawText(canvas, kScreenW, (kScreenW - TextWidth(m.note)) / 2, dense ? y + 2 : y + 8, m.note, 0xF83800);
+    if (!m.note.empty()) {                                                 // el aviso se parte en renglones si no entra
+        int ny = dense ? y + 2 : y + 8;
+        const int room = std::max(1, (220 - ny) / 10);                    // renglones que caben antes de las indicaciones de abajo
+        std::vector<std::string> lines = Wrap(m.note, kScreenW - 24);
+        if (static_cast<int>(lines.size()) > room) { lines.resize(static_cast<size_t>(room)); lines.back() = Fit(lines.back() + "...", kScreenW - 24); }
+        for (const std::string& ln : lines) {
+            DrawText(canvas, kScreenW, (kScreenW - TextWidth(ln)) / 2, ny, ln, 0xF83800);
+            ny += 10;
+        }
     }
     if (!m.footer.empty()) {
-        DrawText(canvas, kScreenW, (kScreenW - TextWidth(m.footer)) / 2, 224, m.footer, 0x7C7C7C);
+        const std::string footer = Fit(m.footer, kScreenW - 16);
+        DrawText(canvas, kScreenW, (kScreenW - TextWidth(footer)) / 2, 224, footer, 0x7C7C7C);
     }
     ToRgba(canvas, rgba);
 }
 
-void Renderer::RenderLobby(const LobbyView& l, std::vector<uint8_t>& rgba) const {
+void Renderer::RenderLobby(const LobbyView& lIn, std::vector<uint8_t>& rgba) const {
+    LobbyView l = lIn;                                                  // con los textos largos ajustados a la pantalla
+    l.title = Fit(l.title, kScreenW - 16);
+    l.hint = Fit(l.hint, kScreenW - 16);
+    l.addHint = Fit(l.addHint, kScreenW - 16);
+    l.note = Fit(l.note, kScreenW - 16);
+    l.startText = Fit(l.startText, kScreenW - 16);
+    l.backText = Fit(l.backText, kScreenW - 16);
     std::vector<uint32_t> canvas(static_cast<size_t>(kScreenW) * kScreenH, 0x000000);
     static const int kPaletteOf[8] = {0, 1, 4, 5, 6, 7, 8, 9};
     static const char* const kNames[8] = {"AMARILLO", "VERDE", "AZUL", "ROJO", "VIOLETA", "NARANJA", "MARRON", "ROSA"};

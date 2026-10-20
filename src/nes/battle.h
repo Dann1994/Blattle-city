@@ -108,7 +108,7 @@ public:
     //       2 dificil (como siempre: agarran y buscan los items; la salud crece con los niveles).
     //   itemsShared: estrella, casco, pistola, velocidad e invisible afectan a todos los jugadores a la vez.
     //   lives: vidas con las que empieza cada jugador (1..10).
-    struct Rules { int ai = 2; bool itemsShared = false; int lives = 3; };
+    struct Rules { int ai = 2; bool itemsShared = false; int lives = 3; int items = 0; };      // items: a la vez en el campo (1 a 3); 0 = automatico (2 con 3 o 4 jugadores)
     void SetRules(const Rules& r) { rules_ = r; rules_.lives = r.lives < 1 ? 1 : (r.lives > 10 ? 10 : r.lives); startLives_ = rules_.lives; }
     const Rules& GetRules() const { return rules_; }
     void SetStartLives(int n) { startLives_ = n < 1 ? 1 : (n > 10 ? 10 : n); }     // batalla vs / royale: vidas de cada jugador (hasta 10)
@@ -187,10 +187,18 @@ public:
     bool IsRoyale() const { return IsVersus() && spec_.royale; }
 
     // ---- items nuevos (ids 8..12): invisible, helicoptero aliado, minas, portal y velocidad ----
-    static constexpr int kBonusGhost = 8, kBonusHeli = 9, kBonusMine = 10, kBonusPortal = 11, kBonusSpeed = 12;
+    static constexpr int kBonusGhost = 8, kBonusHeli = 9, kBonusMine = 10, kBonusPortal = 11, kBonusSpeed = 12, kBonusCannon = 13;
     static constexpr int kItemFrames = 0x0A * 64;             // lo mismo que dura el casco (unos 10 segundos)
     static constexpr int kMaxHelis = 6, kMaxMines = 9, kMaxBooms = 12;
     struct Heli { bool on = false; int owner = -1; int x = 0, y = 0, state = 0, timer = 0, life = 0, target = -1, frame = 0, dir = 0, acc = 0; };   // owner -1: de los enemigos; dir 0..7 = hacia donde mira (0 arriba, de a 45 grados en el sentido del reloj)
+    // Canones: el item cubre el aguila de ladrillos y pone dos bloques de canon a sus costados. Disparan hacia arriba o hacia afuera (nunca hacia
+    // el aguila) cada 5 segundos, cuando hay un enemigo cerca en esa linea. Aguantan 3 disparos enemigos.
+    static constexpr int kMaxCannons = 2, kMaxCannonShots = 8, kCannonHp = 3, kCannonReload = 240;
+    struct Cannon { bool on = false; int col = 0, row = 0, side = 1, hp = 0, cd = 0, flash = 0; };
+    struct CannonShot { bool on = false; int x = 0, y = 0, dx = 0, dy = 0; };
+    const Cannon& CannonState(int i) const { return cannons_[i]; }
+    int CannonHits() const { return cannonHits_; }
+    const CannonShot& CannonShotState(int i) const { return cshots_[i]; }
     struct Mine { bool on = false; int owner = -1; int col = 0, row = 0, age = 0, seq = 0; };
     struct Portal { bool on = false; int col[2] = {0, 0}, row[2] = {0, 0}, uses = 0; };
     struct Boom { int x = 0, y = 0, t = 0; };
@@ -524,7 +532,8 @@ private:
     void BonusHandler(int id, int player);
     // items nuevos
     // Campania con 3 o 4 jugadores: hasta 2 items a la vez (el segundo vive en rItems_[0]); los tanques enemigos de tipo 1 van tras los items.
-    bool SecondItemsAllowed() const { return wide_ && !IsVersus() && diffPlayers_ >= 3; }
+    int MaxItems() const { return rules_.items > 0 ? std::min(3, rules_.items) : (diffPlayers_ >= 3 ? 2 : 1); }
+    bool SecondItemsAllowed() const { return wide_ && !IsVersus() && MaxItems() >= 2; }
     void SpawnBonusCore();                                        // la aparicion de siempre de un item (en el lugar principal)
     void CampaignItemsStep();                                     // el segundo item: lo agarran jugadores o enemigos
     bool NearestItem(int x, int y, int& ix, int& iy) const;       // el item mas cercano (principal o segundo)
@@ -536,6 +545,14 @@ private:
     bool ExtraHostile(int owner, int tank);                       // el tanque es enemigo de lo que puso `owner` (jugador, o -1 = los enemigos)
     void ExtraKill(int tank, int owner);                          // lo destruye un helicoptero o una mina (el casco aguanta una vez)
     void AddBoom(int x, int y);
+    Cannon cannons_[kMaxCannons];
+    CannonShot cshots_[kMaxCannonShots];
+    void SpawnCannons();
+    void CannonsStep();
+    bool CannonHit(int px, int py, int bi);                  // una bala toca un bloque de canon (true: la bala termina ahi)
+    void CannonKill(int i);
+    void CannonDamageEnemy(int e);
+    int cannonHits_ = 0;                                     // disparos de canon que dieron en un enemigo (estadistica)
     bool FreeBlockForExtra(int col, int row);
     Heli heli_[kMaxHelis];
     Mine mines_[kMaxMines];
@@ -631,8 +648,13 @@ private:
     int royaleFrames_ = 0;
     int royaleBonusT_ = 0;
     bool aiPlayer_[kMaxPlayers] = {};                     // jugador manejado por la IA
-    int aiDir_[kMaxPlayers] = {}, aiTimer_[kMaxPlayers] = {}, aiStuck_[kMaxPlayers] = {}, aiLastX_[kMaxPlayers] = {}, aiLastY_[kMaxPlayers] = {};
-    int aiGoalC_[kMaxPlayers] = {}, aiGoalR_[kMaxPlayers] = {}, aiGoalT_[kMaxPlayers] = {}, aiFireCool_[kMaxPlayers] = {}, aiDodgeT_[kMaxPlayers] = {}, aiWanderT_[kMaxPlayers] = {};
+    int aiDir_[kMaxTanks] = {}, aiTimer_[kMaxTanks] = {}, aiStuck_[kMaxTanks] = {}, aiLastX_[kMaxTanks] = {}, aiLastY_[kMaxTanks] = {};     // (los aliados de la campania usan los lugares de sus tanques)
+    int aiGoalC_[kMaxTanks] = {}, aiGoalR_[kMaxTanks] = {}, aiGoalT_[kMaxTanks] = {}, aiFireCool_[kMaxTanks] = {}, aiDodgeT_[kMaxTanks] = {}, aiWanderT_[kMaxTanks] = {};
+    // IA de los aliados de la campania: la misma de los combatientes del battle royale (esquivan balas, buscan camino, apuntan antes de tirar),
+    // pero atacan a los enemigos, defienden el aguila y acompanian al jugador que los trajo.
+    u8 AllyAiButtons(int x);
+    void AllyDrive(int x);
+    bool StepForward(int x);                                     // avanza 1 px en el rumbo actual (false: bloqueado, sin tocar el estado)
     int AiBlockCost(int col, int row) const;                      // cuanto cuesta pasar por un bloque (255 = no se puede, ladrillo = hay que romperlo)
     int AiPathDir(int fromCol, int fromRow, int toCol, int toRow, int& nextCost);   // primer paso del camino mas barato (-1 = ninguno)
     // Battle royale: tres items a la vez cada 20 segundos

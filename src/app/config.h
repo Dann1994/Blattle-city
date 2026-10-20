@@ -32,6 +32,7 @@ struct Config {
     int cuEvery = 5;                         // personalizada: se gana 1 continue cada 1, 5 o 10 niveles
     bool cuShared = false;                   // personalizada: los items afectan a todos
     int cuAi = 1;                            // personalizada: dificultad de la IA (0 facil, 1 normal, 2 dificil)
+    int cuItems = 2;                         // personalizada: items a la vez en el campo (1 a 3)
     int cuLives = 3;                         // personalizada: vidas
     int vsLives = 3;                         // batalla vs y battle royale a muerte: vidas (1..10)
     bool voiceChat = true;                   // chat de voz en las partidas en red

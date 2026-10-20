@@ -136,6 +136,9 @@ private:
     int ChrPixel(int table, int tile, int x, int y) const;
     int FontPixel(int code, int x, int y) const;       // letras, digitos y los caracteres propios (X, Z, tilde, acentos, signos)
     bool HasGlyph(int code) const;
+    // Ajustes para que un texto nunca se salga de la pantalla: Fit lo corta con "..." y Wrap lo parte en renglones (por palabras).
+    std::string Fit(const std::string& text, int maxPx) const;
+    std::vector<std::string> Wrap(const std::string& text, int maxPx) const;
     int TextWidth(const std::string& text) const;      // ancho en px; los iconos {A} {B} {X} {Y} {DPAD} {START} miden 14
     void DrawIcon(std::vector<uint32_t>& canvas, int w, int x, int y, const std::string& token) const;
     void DrawText(std::vector<uint32_t>& canvas, int w, int x, int y, const std::string& text, uint32_t color) const;

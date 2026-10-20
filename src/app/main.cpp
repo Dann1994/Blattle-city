@@ -309,15 +309,15 @@ public:
     int VsTotal() const { return royale_ ? 8 : 2 * vsSize_; }
 
     // Reglas de la campania segun la dificultad elegida: facil, normal, dificil o personalizada.
-    struct CampaignRules { int ai = 1; bool shared = false; int lives = 3; int every = 5; int continues = 2; int ff = 1; };
+    struct CampaignRules { int ai = 1; bool shared = false; int lives = 3; int every = 5; int continues = 2; int ff = 1; int items = 2; };
     CampaignRules ResolveRules() const {
         CampaignRules r;
         const int ffCfg = g_cfg.friendlyFire;
         switch (g_cfg.diffPreset) {
-            case 0: r = {0, true, 5, 1, 3, ffCfg}; break;                   // facil: items para todos, 5 vidas, un continue por nivel
-            case 2: r = {2, false, 2, 10, 1, 2}; break;                     // dificil: 2 vidas, un continue cada 10 niveles, fuego amigo siempre dañino
-            case 3: r = {g_cfg.cuAi, g_cfg.cuShared, g_cfg.cuLives, g_cfg.cuEvery, 2, g_cfg.cuFriendly}; break;
-            default: r = {1, false, 3, 5, 2, ffCfg}; break;                 // normal
+            case 0: r = {0, true, 5, 1, 3, ffCfg, 0}; break;                   // facil: items para todos, 5 vidas, un continue por nivel
+            case 2: r = {2, false, 2, 10, 1, 2, 0}; break;                     // dificil: 2 vidas, un continue cada 10 niveles, fuego amigo siempre dañino
+            case 3: r = {g_cfg.cuAi, g_cfg.cuShared, g_cfg.cuLives, g_cfg.cuEvery, 2, g_cfg.cuFriendly, g_cfg.cuItems}; break;
+            default: r = {1, false, 3, 5, 2, ffCfg, 2}; break;                 // normal
         }
         return r;
     }
@@ -325,7 +325,7 @@ public:
     // 10-13 vidas, 14-15 continues iniciales.
     static int RulesToBits(const CampaignRules& r) {
         const int ev = r.every >= 10 ? 2 : (r.every >= 5 ? 1 : 0);
-        return (r.ff & 3) | (r.ai << 5) | ((r.shared ? 1 : 0) << 7) | (ev << 8) | ((r.lives & 15) << 10) | ((r.continues & 3) << 14);
+        return (r.ff & 3) | (r.ai << 5) | ((r.shared ? 1 : 0) << 7) | (ev << 8) | ((r.lives & 15) << 10) | ((r.continues & 3) << 14) | ((r.items & 3) << 16);
     }
     static CampaignRules RulesFromBits(int raw) {
         CampaignRules r;
@@ -336,6 +336,7 @@ public:
         r.every = ev == 2 ? 10 : (ev == 1 ? 5 : 1);
         r.lives = std::max(1, std::min(10, (raw >> 10) & 15));
         r.continues = (raw >> 14) & 3;
+        r.items = (raw >> 16) & 3;
         return r;
     }
     static std::string DiffName(int p) { return p == 0 ? "FÁCIL" : (p == 1 ? "NORMAL" : (p == 2 ? "DIFÍCIL" : "PERSONALIZADA")); }
@@ -366,7 +367,7 @@ public:
         } else {
             const CampaignRules cr = netGame_ ? netRules_ : ResolveRules();
             nes::Battle::Rules br;
-            br.ai = cr.ai; br.itemsShared = cr.shared; br.lives = cr.lives;
+            br.ai = cr.ai; br.itemsShared = cr.shared; br.lives = cr.lives; br.items = cr.items;
             battle_->SetRules(br);
             if (!netGame_) friendly_ = cr.ff == 0 ? nes::Battle::FriendlyFire::Off : (cr.ff == 2 ? nes::Battle::FriendlyFire::Damage : nes::Battle::FriendlyFire::Stun);
         }
@@ -806,7 +807,7 @@ public:
             case Scene::ModeMenu: return 5;
             case Scene::VsMenu: return 7;
             case Scene::DiffMenu: return 5;
-            case Scene::CustomMenu: return 7;
+            case Scene::CustomMenu: return 8;
             case Scene::Settings: return 10;
             case Scene::UpdateCheck: return 1;
             case Scene::UpdatePrompt: return 2;
@@ -1000,7 +1001,7 @@ public:
         } else if (vsMode_) {
             int inTeam[2] = {0, 0};                                                  // el equipo es la paridad del lugar en la sala
             for (int i = 0; i < nes::kMaxPlayers && static_cast<size_t>(i) < lan_.Owners().size(); ++i) if (lan_.Owners()[static_cast<size_t>(i)] >= 0) ++inTeam[i & 1];
-            if (inTeam[0] == 0 || inTeam[1] == 0) { lanNote_ = "HACEN FALTA JUGADORES EN LOS DOS EQUIPOS (LOS LUGARES IMPARES SON DEL EQUIPO 1 Y LOS PARES DEL 2)"; return; }
+            if (inTeam[0] == 0 || inTeam[1] == 0) { lanNote_ = "FALTAN JUGADORES: IMPARES EQUIPO 1, PARES EQUIPO 2"; return; }
             const int seed = vsMapKind_ == 1 ? vsMapNum_ : static_cast<int>(std::chrono::steady_clock::now().time_since_epoch().count() % 8191) + 1;
             options = VersusNetOptions(options, seed) | (vsMapKind_ == 2 ? 8 : 0);
         }
@@ -1344,13 +1345,14 @@ public:
         if (netMode_) StartHost(true);
         else { lobby_ = app::Lobby(); scene_ = Scene::Lobby; }
     }
-    // Personalizada: 0 fuego amigo, 1 continues cada N niveles, 2 efecto de items, 3 dificultad de la IA, 4 vidas.
+    // Personalizada: 0 fuego amigo, 1 continues cada N niveles, 2 efecto de items, 3 dificultad de la IA, 4 vidas, 5 items a la vez (1 a 3).
     void ChangeCustom(int index, int d) {
         if (index == 0) g_cfg.cuFriendly = (g_cfg.cuFriendly + 3 + d) % 3;
         else if (index == 1) g_cfg.cuEvery = d > 0 ? (g_cfg.cuEvery == 1 ? 5 : (g_cfg.cuEvery == 5 ? 10 : 1)) : (g_cfg.cuEvery == 10 ? 5 : (g_cfg.cuEvery == 5 ? 1 : 10));
         else if (index == 2) g_cfg.cuShared = !g_cfg.cuShared;
         else if (index == 3) g_cfg.cuAi = (g_cfg.cuAi + 3 + d) % 3;
         else if (index == 4) g_cfg.cuLives = (g_cfg.cuLives - 1 + 10 + d) % 10 + 1;
+        else if (index == 5) g_cfg.cuItems = (g_cfg.cuItems - 1 + 3 + d) % 3 + 1;
         else return;
         SaveConfig();
     }
@@ -1413,11 +1415,11 @@ public:
                 }
                 break;
             case Scene::CustomMenu:
-                if (index == 5) {
+                if (index == 6) {
                     g_cfg.diffPreset = 3;
                     SaveConfig();
                     StartCampaign();
-                } else if (index == 6) {
+                } else if (index == 7) {
                     GoBack();
                 } else {
                     ChangeCustom(index, +1);
@@ -1564,7 +1566,7 @@ public:
         return usingPad_ ? "{DPAD} ELEGIR  " + PadButtonName(g_cfg.padFire) + " ACEPTAR" : "ARRIBA ABAJO ELEGIR  P ACEPTAR";
     }
     std::string ChangeHint() const {
-        if (touch_) return "CRUCETA: CAMBIAR   TOQUE A: ACEPTAR   TOQUE B: VOLVER";
+        if (touch_) return "CRUCETA: CAMBIAR  TOQUE A: ACEPTAR  TOQUE B: VOLVER";
         return usingPad_ ? "{DPAD} CAMBIAR  " + PadButtonName(g_cfg.padFire) + " ACEPTAR  " + PadButtonName(g_cfg.padCancel) + " VOLVER"
                          : "IZQUIERDA DERECHA CAMBIAR  ESC VOLVER";
     }
@@ -1628,7 +1630,7 @@ public:
                     lv.color[sl] = app::Lobby::TeamColor(lobby_.Team(sl));
                     lv.tag[sl] = lobby_.Team(sl) == 0 ? "EQUIPO 1" : "EQUIPO 2";
                 }
-                if (!lobby_.VersusReady(vsSize_)) lv.note = "HACE FALTA DE 1 A " + std::to_string(vsSize_) + " JUGADORES EN CADA EQUIPO (LOS DEMÁS LOS JUEGA LA IA)";
+                if (!lobby_.VersusReady(vsSize_)) lv.note = "HACE FALTA DE 1 A " + std::to_string(vsSize_) + " JUGADORES POR EQUIPO (LA IA COMPLETA)";
             }
             lv.backText = BackHint();
             lv.upDownText = usingPad_ ? "{DPAD}" : "ARRIBA ABAJO";
@@ -1688,7 +1690,7 @@ public:
                 std::string waiting = lan_.NumPlayers() < 2 ? "ESPERANDO JUGADORES..." : (notReady > 0 ? "TODAVÍA HAY JUGADORES SIN ESTAR LISTOS" : "");
                 if (net == Net::Ready) {                                             // la sala se entra con este codigo desde cualquier lado
                     lv.hint = "CÓDIGO DE LA SALA: " + lan_.RoomCode();
-                    lv.addHint = touch_ ? "EN LA MISMA RED: UNIRSE > BUSCAR EN RED" : "MISMA RED: UNIRSE > BUSCAR EN RED   C: COPIAR EL CÓDIGO";
+                    lv.addHint = touch_ ? "EN LA MISMA RED: UNIRSE > BUSCAR EN RED" : "MISMA RED: UNIRSE > BUSCAR   C: COPIAR CÓDIGO";
                     if (lan_.InternetNote().compare(0, 8, "SIN UPNP") == 0) waiting = lan_.InternetNote();      // hay que abrir el puerto a mano
                 } else if (net == Net::Working) {
                     lv.hint = lanLine.empty() ? "ABRIENDO LA SALA PARA ENTRAR CON CÓDIGO..." : lanLine;
@@ -1702,7 +1704,7 @@ public:
                 lv.startText = touch_ ? "TOQUE START PARA EMPEZAR   " + readyKey + " LISTO"
                                       : (usingPad_ ? PadButtonName(g_cfg.padStart) : std::string("ENTER")) + " EMPEZAR  " + readyKey + " LISTO";
             } else if (late) {
-                lv.hint = "PARTIDA EN CURSO: ELEGÍ TU COLOR Y TOCÁ LISTO PARA ENTRAR";
+                lv.hint = "PARTIDA EN CURSO: ELEGÍ COLOR Y TOCÁ LISTO";
                 lv.note = CaughtUp() ? "" : "PONIÉNDOME AL DÍA CON LA PARTIDA...";
                 lv.startText = "ENTRÁS EN CUANTO ESTÉS LISTO  " + readyKey + " LISTO";
             } else {
@@ -1735,9 +1737,9 @@ public:
                            "VIDAS: " + std::to_string(vsLives_),
                            netMode_ ? "CREAR SALA" : "EMPEZAR", "VOLVER"};
                 v.note = !lanNote_.empty() ? lanNote_
-                       : (royale_ ? std::string(royaleOpt_ == 0 ? "QUEDA UNO SOLO" : "GANA QUIEN MÁS DESTRUYE") + " - LA IA COMPLETA HASTA 8"
-                       : netMode_ ? "EN RED: HASTA " + std::to_string(royale_ ? 8 : 2 * vsSize_) + " JUGADORES - LA IA COMPLETA LOS CUPOS"
-                                   : "EN ESTA PC: HASTA 4 JUGADORES - LA IA COMPLETA LOS CUPOS");
+                       : (royale_ ? std::string(royaleOpt_ == 0 ? "QUEDA UNO SOLO" : "GANA QUIEN MÁS DESTRUYE") + ", LA IA COMPLETA HASTA 8"
+                       : netMode_ ? "EN RED: HASTA " + std::to_string(royale_ ? 8 : 2 * vsSize_) + " JUGADORES, LA IA COMPLETA LOS CUPOS"
+                                   : "EN ESTA PC: HASTA 4 JUGADORES, LA IA COMPLETA LOS CUPOS");
                 v.footer = touch_ ? "CRUCETA: ELEGIR Y CAMBIAR   TOQUE A PARA ACEPTAR"
                                   : (usingPad_ ? "{DPAD} ELEGIR Y CAMBIAR  " + PadButtonName(g_cfg.padFire) + " ACEPTAR" : "ARRIBA ABAJO ELEGIR  IZQUIERDA DERECHA CAMBIAR");
                 break;
@@ -1794,9 +1796,9 @@ public:
             case Scene::DiffMenu: {
                 v.title = "DIFICULTAD";
                 v.items = {"FÁCIL", "NORMAL", "DIFÍCIL", "PERSONALIZADA", "VOLVER"};
-                static const char* const kNotes[3] = {"ITEMS PARA TODOS - ENEMIGOS NO AGARRAN ITEMS - 5 VIDAS - UN CONTINUE POR NIVEL",
-                                                       "ITEMS INDIVIDUALES - ENEMIGOS AGARRAN ITEMS - 3 VIDAS - UN CONTINUE CADA 5 NIVELES",
-                                                       "ENEMIGOS BUSCAN ITEMS - FUEGO AMIGO DAÑA - 2 VIDAS - UN CONTINUE CADA 10"};
+                static const char* const kNotes[3] = {"ITEMS PARA TODOS, ENEMIGOS NO AGARRAN ITEMS, 5 VIDAS, UN CONTINUE POR NIVEL",
+                                                       "ITEMS INDIVIDUALES (2 A LA VEZ), ENEMIGOS AGARRAN ITEMS, 3 VIDAS, UN CONTINUE CADA 5 NIVELES",
+                                                       "ENEMIGOS BUSCAN ITEMS, FUEGO AMIGO DAÑA, 2 VIDAS, UN CONTINUE CADA 10 NIVELES"};
                 if (menuIndex_ < 3) v.note = kNotes[menuIndex_];
                 else if (menuIndex_ == 3) v.note = "ELEGÍ VOS FUEGO AMIGO, CONTINUES, ITEMS, IA Y VIDAS";
                 v.footer = NavHint();
@@ -1810,7 +1812,8 @@ public:
                            "CONTINUES CADA: " + std::to_string(g_cfg.cuEvery) + (g_cfg.cuEvery == 1 ? " NIVEL" : " NIVELES"),
                            std::string("EFECTO DE ITEMS: ") + (g_cfg.cuShared ? "TODOS" : "INDIVIDUAL"),
                            std::string("DIFICULTAD DE LA IA: ") + kAi[g_cfg.cuAi],
-                           "VIDAS: " + std::to_string(g_cfg.cuLives), netMode_ ? "CREAR SALA" : "EMPEZAR", "VOLVER"};
+                           "VIDAS: " + std::to_string(g_cfg.cuLives),
+                           "ITEMS A LA VEZ: " + std::to_string(g_cfg.cuItems), netMode_ ? "CREAR SALA" : "EMPEZAR", "VOLVER"};
                 v.footer = touch_ ? "CRUCETA: ELEGIR Y CAMBIAR   TOQUE A PARA ACEPTAR"
                                   : (usingPad_ ? "{DPAD} ELEGIR Y CAMBIAR  " + PadButtonName(g_cfg.padFire) + " ACEPTAR" : "ARRIBA ABAJO ELEGIR  IZQUIERDA DERECHA CAMBIAR");
                 break;
@@ -1967,13 +1970,13 @@ public:
             "F5 GRANADA",
             "F6 TANQUE",
             "F7 PISTOLA",
-            "CTRL+F1-F5 ITEMS NUEVOS",
+            "CTRL+F1-5 NUEVOS",
             "F8 MUSICA",
             "F9 RECORD",
             "F10 GAME OVER",
             "M SILENCIO",
             "ALT+ENTER PANTALLA",
-            "N ORIGINAL/REMASTER.",
+            "N SONIDO",
             "K MATAR TODOS",
             "C LIMPIAR",
             "R REINICIAR",
