@@ -357,7 +357,7 @@ public:
         if (vsMode_) players = VsTotal();
         players_ = players;
         showHelp_ = false;
-        app::UseCustomLevels(!netGame_);                    // en red solo valen los 40 niveles de fabrica (todas las PC juegan lo mismo)
+        app::UseCustomLevels(true);                         // los niveles de la campania (editados) valen tambien en red: la huella va en la version y nadie entra con niveles distintos
         apu_.Reset();
         battle_ = std::make_unique<nes::Battle>();
         battle_->apuWrite = [this](uint16_t addr, u8 value) { apu_.Write(addr, value); };
@@ -3108,6 +3108,7 @@ int main(int argc, char** argv) {
             }
         }
 #endif
+        app::Lan::SetLevelsTag(app::MainLevelsTag());          // los niveles editados cuentan para poder jugar en red juntos
     }
     if (updateCheck > 0) {
         app::Updater up;

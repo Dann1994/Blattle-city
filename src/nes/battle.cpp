@@ -3321,14 +3321,14 @@ void Battle::SpawnBonusCore() {
         Sub_E972_try_to_pick_up_bonus();                  // solo para evitar que caiga encima de un jugador
     } while (R(ram_0062_bonus_timer) != 0);
     {
-        static const u8 kWideBonus[16] = {0, 1, 2, 3, 4, 5, 7, 3, 8, 9, 10, 11, 12, 0, 3, 13};   // en el campo ancho una de las granadas repetidas es el item de aliados; 8-12 = items nuevos
-        static const u8 kVsBonus[16] = {0, 1, 3, 4, 5, 6, 3, 0, 8, 9, 10, 11, 12, 6, 3, 8};     // batalla vs: sin pala ni aliados
+        static const u8 kWideBonus[16] = {0, 1, 2, 3, 4, 5, 7, 3, 8, 9, 10, 12, 12, 0, 3, 13};   // en el campo ancho una de las granadas repetidas es el item de aliados; 8-12 = items nuevos
+        static const u8 kVsBonus[16] = {0, 1, 3, 4, 5, 6, 3, 0, 8, 9, 10, 12, 12, 6, 3, 8};     // batalla vs: sin pala ni aliados
         const u8 roll = Sub_D44D_generate_random_number() & (wide_ ? 0x0F : 0x07);
         R(ram_bonus_id) = IsVersus() ? kVsBonus[roll] : (wide_ ? kWideBonus[roll] : tbl_E8FA_bonus[roll]);
         if (wide_ && !IsVersus()) {
-            // campania: la estrella y la pistola aparecen 10 puntos mas (28,8% y 10%); el resto se reparte lo que queda, como antes entre si
-            static const struct { int id, weight; } kItems[14] = {{3, 2877}, {6, 1000}, {0, 942}, {1, 471}, {2, 471}, {4, 471}, {5, 471}, {7, 471},
-                                                                  {8, 471}, {9, 471}, {10, 471}, {11, 471}, {12, 471}, {13, 471}};
+            // campania: estrella 28,8% y pistola 10%; el resto (sin el item puerta, que ya no sale) se reparte lo que queda, con el casco doble
+            static const struct { int id, weight; } kItems[13] = {{3, 2877}, {6, 1000}, {0, 1023}, {1, 510}, {2, 510}, {4, 510}, {5, 510}, {7, 510},
+                                                                  {8, 510}, {9, 510}, {10, 510}, {12, 510}, {13, 510}};
             const int r = ((Sub_D44D_generate_random_number() << 8) | Sub_D44D_generate_random_number()) % 10000;
             int acc = 0;
             for (const auto& it : kItems) {

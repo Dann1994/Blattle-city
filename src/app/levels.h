@@ -103,6 +103,8 @@ std::string OwnLevelFile(int slot);
 // Si es false (partidas en red) se ignoran los archivos y valen solo los 40 niveles de fabrica: todas las PC tienen que jugar lo mismo.
 void UseCustomLevels(bool on);
 bool CustomLevelsEnabled();
+// Huella (hexa) de los archivos de los niveles del modo principal: en red tiene que ser igual en todas las PC.
+std::string MainLevelsTag();
 bool MainLevelHasFile(int level);
 int MainLevelCount();                                    // 40, o mas si hay niveles 41, 42... guardados
 // El nivel del modo principal: su archivo si existe, si no el de fabrica (solo hasta el 40).

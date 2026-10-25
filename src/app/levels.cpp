@@ -700,6 +700,23 @@ std::string OwnLevelFile(int slot) {
 void UseCustomLevels(bool on) { g_useCustom = on; }
 bool CustomLevelsEnabled() { return g_useCustom && !g_levelRoot.empty(); }
 
+std::string MainLevelsTag() {
+    uint32_t h = 2166136261u;
+    auto mix = [&h](unsigned char b) { h = (h ^ b) * 16777619u; };
+    for (int level = 1; level <= kMaxMainLevel; ++level) {
+        std::error_code ec;
+        const std::string f = MainLevelFile(level);
+        if (g_levelRoot.empty() || !std::filesystem::exists(f, ec)) continue;
+        mix(static_cast<unsigned char>(level));
+        std::ifstream in(f, std::ios::binary);
+        char ch;
+        while (in.get(ch)) if (ch != 13) mix(static_cast<unsigned char>(ch));          // sin los retornos de carro: igual en Windows y en Android
+    }
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%08x", h);
+    return buf;
+}
+
 bool MainLevelHasFile(int level) {
     if (!CustomLevelsEnabled() || level < 1 || level > kMaxMainLevel) return false;
     std::error_code ec;

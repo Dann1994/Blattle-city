@@ -63,6 +63,8 @@ public:
 
     // Identifica la version del programa: todos los equipos tienen que correr el mismo ejecutable.
     static std::string BuildId();
+    // Huella de los niveles del modo principal que usa esta PC: se suma a la version, asi nadie juega con niveles distintos.
+    static void SetLevelsTag(const std::string& tag);
 
     // Deja el nombre limpio: sin '|' ni caracteres de control, en mayusculas y de hasta kMaxName letras.
     static std::string CleanName(const std::string& name);
