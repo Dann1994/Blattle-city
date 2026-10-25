@@ -43,17 +43,21 @@ bool LevelCellPassable(uint8_t id);
 // Niveles hechos a mano (editor de niveles)
 // ---------------------------------------------------------------------------
 
+uint8_t EngineBlockId(uint8_t id);            // id de bloque de un nivel del editor -> id del motor
+
 constexpr int kGridRows = 15;                 // fila 0 = la franja de arriba (16 px) y filas 1..14 = el campo
 constexpr int kMaxSpawns = 12;                // puntos de aparicion de enemigos que puede tener un nivel
 constexpr int kOwnSlots = 40;                 // casilleros de la seccion "niveles propios"
 constexpr int kMaxMainLevel = 99;             // el modo principal puede crecer hasta el nivel 99
 
 struct LevelDef {
-    uint8_t cells[kGridRows][kLevelCols];     // ids de bloque 0..15 (ver GenerateWideLevel; 14 = arena, 15 = lava)
+    uint8_t cells[kGridRows][kLevelCols];     // ids de bloque 0..23 (ver GenerateWideLevel; 14 = arena, 15 = lava, 16..19 = una punta de ladrillo, 20..23 = una punta de hierro)
     bool boss = false;                        // nivel especial: aguila enemiga, enemigos sin fin y bombardeos
     int tier = 0;                             // dificultad 0..7 (mas enemigos, mas fuertes y mas agresivos)
     int rank = 1;                             // fuerza del aguila enemiga 1..4 (capas de hierro, salud, premio, bombardeos)
     int eagleCol = 13, eagleRow = 1;          // lugar del aguila enemiga (bloque; la fila 0 es la franja de arriba)
+    int baseCol = 13, baseRow = 14;           // el aguila de los jugadores (la base ocupa 3 bloques de ancho por 2 de alto; el aguila va abajo al centro)
+    uint8_t playerCol[4] = {11, 15, 10, 16}, playerRow[4] = {14, 14, 14, 14};      // lugares donde empiezan los jugadores (se pueden mover en el editor)
     int nSpawns = 0;                          // puntos de aparicion de enemigos
     uint8_t spawnCol[kMaxSpawns] = {}, spawnRow[kMaxSpawns] = {};
     // MODO BATALLA VS: dos equipos, una aguila en cada esquina opuesta. Las apariciones son los puntos de los tanques con IA (2 por equipo:

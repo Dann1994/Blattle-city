@@ -52,6 +52,7 @@ public:
     // por cada segundo que se quede encima.
     static constexpr u8 kLavaTile = 0x24;
     static constexpr int kLavaBlockId = 16;
+    static constexpr int kCornerBrickBase = 17, kCornerSteelBase = 21;       // ids 17..20 (ladrillo) y 21..24 (hierro): un solo mosaico en la punta arriba izq., arriba der., abajo izq. o abajo der.
     static constexpr int kMaxLavaSources = 24;
     static constexpr int kLavaMaxFlow = 8;
     static constexpr int kLavaSpreadFrames = 90;        // una celda nueva cada 1,5 segundos
@@ -62,6 +63,7 @@ public:
     int LavaSourceCount() const { return nLava_; }
     bool LavaAtBlock(int col, int row) const;           // el bloque es lava (fuente o esparcida)
     static constexpr int kRockHealth = 3;               // piedra de lava: 3 de salud por mosaico
+    int TileAt(int tx, int ty) const;                   // el valor del mosaico (tx, ty) del campo (sin la marca de tanque)
     bool RockAt(int tx, int ty) const;                  // el mosaico (tx, ty) es piedra de lava (se dibuja morado; para el motor es hierro)
     bool RockBlockAt(int col, int row) const;           // el bloque (col, row) es de piedra
     static constexpr u8 kSandTile = 0x23;
@@ -163,6 +165,8 @@ public:
         int tier = 0;                 // dificultad 0..7
         int rank = 1;                 // aguila enemiga 1..4: capas de hierro, salud, premio y tiempo entre bombardeos
         int eagleCol = 13, eagleRow = 1;      // aguila enemiga: bloque (columna 0..26, fila 0..14; la fila 0 es la franja de arriba)
+        int playerCol[4] = {11, 15, 10, 16}, playerRow[4] = {14, 14, 14, 14};      // donde empiezan los jugadores (bloque; los de siempre, a los lados de la base)
+        int baseCol = 13, baseRow = 14;      // el aguila de los jugadores (bloque; la base ocupa 3 de ancho por 2 de alto con el aguila abajo al centro)
         int nSpawns = 0;              // puntos de aparicion de enemigos (0 = los de siempre)
         int spawnCol[kMaxSpawns] = {}, spawnRow[kMaxSpawns] = {};
         // MODO BATALLA VS: dos equipos con su aguila a cada lado. Las apariciones son los 4 puntos de los tanques con IA de cada equipo
@@ -300,7 +304,11 @@ public:
         struct Blast { int cx = 0, cy = 0, age = -1; } blast[kMaxPlanes * 3];      // age >= 0: explosion en curso
     };
     // Tiempo entre bombardeos: nivel 10: 4 min, 20: 3 min, 30: 2 min, 40: 1 min (60 cuadros por segundo).
-    int BombInterval() const { return (5 - Rank()) * 60 * 60; }
+    // Tiempo entre bombardeos en los niveles del aguila enemiga segun su fuerza (niveles 10, 20, 30 y 40): 3:00, 2:00, 1:30 y 1:00. En la batalla vs: 4, 3, 2 o 1 minuto.
+    int BombInterval() const {
+        static const int kBossSeconds[4] = {180, 120, 90, 60};
+        return (IsVersus() ? (5 - Rank()) * 60 : kBossSeconds[Rank() - 1]) * 60;
+    }
     static constexpr int kBombAlertFrames = 150;
     static constexpr int kBombFuse = 90;                // un segundo y medio entre la marca roja y la explosion
     static constexpr int kBombBlastFrames = 40;         // duracion de la animacion de la explosion
@@ -430,6 +438,13 @@ private:
     static constexpr u8 kColorAttr[8] = {0, 1, 4, 5, 6, 7, 0x10, 0x11};
     static constexpr u8 kColorPalette[8] = {0, 1, 4, 5, 6, 7, 8, 9};   // indice de paleta de sprites que usa el renderer
     u8 PlayerPalette(int x) const { return wide_ ? kColorAttr[playerColor_[x]] : static_cast<u8>(x < 2 ? x : x + 2); }
+    // La base de los jugadores en un nivel hecho a mano puede estar en otro lugar: desplazamiento en pixeles respecto al lugar de siempre (columna 13, fila 14).
+    int BaseCol() const { return wide_ && spec_.active && !spec_.versus ? spec_.baseCol : 13; }
+    int BaseRow() const { return wide_ && spec_.active && !spec_.versus ? spec_.baseRow : 14; }
+    int BaseDX() const { return (BaseCol() - 13) * 16; }
+    int BaseDY() const { return (BaseRow() - 14) * 16; }
+    int BaseShiftX() const { return ShiftX() + BaseDX(); }
+    int BaseShiftY() const { return ShiftY() + BaseDY(); }
     int ShiftX() const { return wide_ ? 96 : 0; }
     int ShiftY() const { return wide_ ? 16 : 0; }                    // el campo ancho tiene una fila de bloques mas (sin borde inferior)                    // desplazamiento de la base al centro del campo ancho
 

@@ -712,6 +712,7 @@ void Renderer::DrawHudTile(std::vector<uint32_t>& canvas, int w, int x, int y, i
 // HUD como el original (columna de la derecha: enemigos que faltan arriba, vidas de cada jugador, bandera y etapa abajo) pero
 // semitransparente sobre el campo, para no gastar espacio de pantalla.
 void Renderer::DrawWideHudOverlay(std::vector<uint32_t>& world, int w, const nes::Battle& battle, const HudInfo& hud) const {
+    if (hud.hideHud) return;                                      // la informacion se oculta con Select
     std::vector<uint32_t> layer(world.size(), 0u);               // 0 = transparente
     static const char* const kLabels[4] = {"IP", "IIP", "IIIP", "IVP"};
     const int xr = w - 3;                                         // borde derecho visible (se recortan 3 px por lado)
@@ -800,31 +801,58 @@ void Renderer::DrawWideHudOverlay(std::vector<uint32_t>& world, int w, const nes
         const uint32_t bl = ((c & 0xFF) * 166 + (b & 0xFF) * 90) >> 8;
         world[i] = (r << 16) | (g << 8) | bl;
     }
-    // temporizador del bombardeo: solo el tiempo (o la alerta), en la esquina superior derecha, en rojo y mas transparente que el resto
-    if (battle.BombingActive()) {
-        const auto& bs = battle.Bombing();
-        const int frame = battle.R(nes::ram_frm_cnt_lo);
-        std::string label;
-        if (bs.phase == 0) {
-            const int secs = (bs.countdown + 59) / 60;
-            label = std::to_string(secs / 60) + ":" + (secs % 60 < 10 ? "0" : "") + std::to_string(secs % 60);
-        } else {
-            label = "¡ALERTA!";
+}
+
+// Temporizador del bombardeo: arriba en el centro de la pantalla (se oculta con el resto de la informacion). Cuando se acaba el tiempo aparece la palabra
+// ALERTA en rojo en el medio de la pantalla, parpadeando de a poco; esa si se ve siempre.
+void Renderer::DrawBombingTimer(std::vector<uint32_t>& world, int w, const nes::Battle& battle, const HudInfo& hud) const {
+    if (!battle.BombingActive()) return;
+    const auto& bs = battle.Bombing();
+    const int frame = battle.R(nes::ram_frm_cnt_lo);
+    auto blend = [&](const std::vector<uint32_t>& layer, int num, int den) {          // num/den = opacidad del texto
+        for (size_t i = 0; i < layer.size(); ++i) {
+            if (layer[i] == 0) continue;
+            const uint32_t c = layer[i], b = world[i];
+            const uint32_t r = (((c >> 16) & 0xFF) * num + ((b >> 16) & 0xFF) * (den - num)) / den;
+            const uint32_t g = (((c >> 8) & 0xFF) * num + ((b >> 8) & 0xFF) * (den - num)) / den;
+            const uint32_t bl = ((c & 0xFF) * num + (b & 0xFF) * (den - num)) / den;
+            world[i] = (r << 16) | (g << 8) | bl;
         }
-        const bool blink = bs.phase != 0 || bs.countdown < 600;
-        if (!blink || ((frame >> 3) & 1)) {
-            std::vector<uint32_t> timer(world.size(), 0u);
-            DrawText(timer, w, (w - 3) - TextWidth(label) - 2, 3, label, 0xFC2020);          // esquina superior derecha
-            for (size_t i = 0; i < timer.size(); ++i) {
-                if (timer[i] == 0) continue;
-                const uint32_t c = timer[i], b = world[i];
-                const uint32_t r = (((c >> 16) & 0xFF) * 105 + ((b >> 16) & 0xFF) * 151) >> 8;      // ~41% de opacidad
-                const uint32_t g = (((c >> 8) & 0xFF) * 105 + ((b >> 8) & 0xFF) * 151) >> 8;
-                const uint32_t bl = ((c & 0xFF) * 105 + (b & 0xFF) * 151) >> 8;
-                world[i] = (r << 16) | (g << 8) | bl;
-            }
-        }
+    };
+    if (bs.phase == 0) {
+        if (hud.hideHud) return;
+        const int secs = (bs.countdown + 59) / 60;
+        const std::string label = std::to_string(secs / 60) + ":" + (secs % 60 < 10 ? "0" : "") + std::to_string(secs % 60);
+        const bool blink = bs.countdown < 600;                                        // el ultimo tramo parpadea, de a poco
+        if (blink && ((frame >> 5) & 1)) return;
+        std::vector<uint32_t> timer(world.size(), 0u);
+        std::vector<uint32_t> shadow(world.size(), 0u);
+        DrawText(shadow, w, (w - TextWidth(label)) / 2 + 1, 4, label, 0x200000);       // sombra: se lee sobre cualquier fondo
+        blend(shadow, 150, 256);
+        DrawText(timer, w, (w - TextWidth(label)) / 2, 3, label, 0xFC2020);          // arriba, en el centro
+        blend(timer, 200, 256);
+        return;
     }
+    if ((frame >> 5) & 1) return;                                                      // parpadea: medio segundo si, medio segundo no
+    std::vector<uint32_t> alert(world.size(), 0u);
+    const std::string word = "ALERTA";
+    const int sc = 2, tw = TextWidth(word) * sc, th = 8 * sc;
+    const int x0 = (w - tw) / 2, y0 = (kNesH - th) / 2;
+    for (int pass = 0; pass < 2; ++pass) {                                             // primero el borde negro, despues el rojo
+        const int ox = pass == 0 ? 1 : 0, oy = pass == 0 ? 1 : 0;
+        std::vector<uint32_t> small(world.size(), 0u);
+        DrawText(small, w, 0, 0, word, 0xFC2020);                                      // (las letras a tamano normal, en la esquina)
+        for (int py = 0; py < 8; ++py)
+            for (int px = 0; px < TextWidth(word); ++px) {
+                if (small[static_cast<size_t>(py) * w + px] == 0) continue;
+                for (int sy = 0; sy < sc; ++sy)
+                    for (int sx = 0; sx < sc; ++sx) {
+                        const int dx = x0 + px * sc + sx + ox * 2, dy = y0 + py * sc + sy + oy * 2;
+                        if (dx >= 0 && dx < w && dy >= 0 && dy < kNesH) alert[static_cast<size_t>(dy) * w + dx] = pass == 0 ? 0x300000 | 0x01000000u : 0xFC2020;
+                    }
+            }
+    }
+    for (size_t i = 0; i < alert.size(); ++i) if (alert[i] != 0) world[i] = alert[i] & 0xFFFFFF;
 }
 
 // Como DrawHudTile pero sin pintar el fondo (el color 0 queda transparente).
@@ -996,6 +1024,7 @@ void Renderer::RenderWide(const nes::Battle& battle, const HudInfo& hud, std::ve
     DrawBombing(world, w, battle);
     if (nes::Battle::kOpenTopStrip) DrawWideHudOverlay(world, w, battle, hud);
     else DrawWideHud(world, w, battle, hud);
+    DrawBombingTimer(world, w, battle, hud);
     // el mundo mide 432 px y la pantalla 426: se recorta un poco de borde a cada lado
     const int cropX = (w - kScreenW) / 2;
     const int shx = battle.ShakeX(), shy = battle.ShakeY();            // el escenario tiembla con cada explosion
@@ -1006,9 +1035,25 @@ void Renderer::RenderWide(const nes::Battle& battle, const HudInfo& hud, std::ve
                 (sx >= 0 && sx < w && sy >= 0 && sy < kNesH) ? world[static_cast<size_t>(sy) * w + sx] : 0u;
         }
     }
+    // partida en red: el nombre de cada jugador real sobre su tanque (se oculta con la demas informacion)
+    if (!hud.hideHud) {
+        for (int p = 0; p < 8; ++p) {
+            if (hud.playerNames[p].empty() || p >= battle.Players()) continue;
+            const int f = battle.TankFlags(p);
+            if (!(f & 0x80) || f >= 0xE0) continue;                             // solo con el tanque en el campo
+            const std::string name = Fit(hud.playerNames[p], 100);
+            const int tw = TextWidth(name);
+            const int x = std::max(1, std::min(kScreenW - tw - 1, battle.TankX(p) - cropX - tw / 2));
+            const int y = std::max(1, battle.TankY(p) - 8 - 10);                // justo encima del tanque (cada tanque mide 16 px)
+            const uint32_t color = NesColor(SpritePaletteColor(battle.PlayerPaletteIndex(p), 2));
+            DrawText(canvas, kScreenW, x + 1, y + 1, name, 0x000000);          // sombra para que se lea sobre cualquier fondo
+            DrawText(canvas, kScreenW, x, y, name, color);
+        }
+    }
 }
 
 void Renderer::Render(const nes::Battle& battle, const HudInfo& hud, std::vector<uint8_t>& rgba) const {
+    hits_.clear();
     std::vector<uint32_t> canvas(static_cast<size_t>(kScreenW) * kScreenH, 0x101018);
     if (battle.IsWide()) {
         RenderWide(battle, hud, canvas);
@@ -1099,6 +1144,7 @@ void Renderer::FinishFrame(std::vector<uint32_t>& canvas, const HudInfo& hud, st
         for (size_t i = 0; i < hud.pauseItems.size(); ++i) {
             const bool sel = static_cast<int>(i) == hud.pauseSelected;
             const int tx = bx + (boxW - widest) / 2, ty = by + 30 + static_cast<int>(i) * 22;   // bloque centrado, opciones a la izquierda
+            hits_.push_back({bx + 4, ty - 6, bx + boxW - 4, ty + 15, static_cast<int>(i)});
             DrawText(canvas, kScreenW, tx, ty, hud.pauseItems[i], sel ? 0xF8D878 : 0xFCFCFC);
             if (sel) DrawSprite16(canvas, kScreenW, tx - 28, ty - 4, 0x18, 0);
         }
@@ -1188,6 +1234,7 @@ void ToRgba(const std::vector<uint32_t>& canvas, std::vector<uint8_t>& rgba) {
 } // namespace
 
 void Renderer::RenderScoreScreen(const ScoreTally& t, std::vector<uint8_t>& rgba) const {
+    hits_.clear();
     std::vector<uint32_t> canvas(static_cast<size_t>(kScreenW) * kScreenH, 0x000000);
     constexpr uint32_t kRed = 0xF83800, kOrange = 0xFCA044, kWhite = 0xFCFCFC;
     static const char* const kLabels[4] = {"I-PLAYER", "II-PLAYER", "III-PLAYER", "IV-PLAYER"};
@@ -1234,6 +1281,7 @@ void Renderer::RenderScoreScreen(const ScoreTally& t, std::vector<uint8_t>& rgba
 }
 
 void Renderer::RenderGameOver(std::vector<uint8_t>& rgba) const {
+    hits_.clear();
     std::vector<uint32_t> canvas(static_cast<size_t>(kScreenW) * kScreenH, 0x000000);
     const int x0 = (kScreenW - 256) / 2;                 // posiciones originales de la ROM: GAME en (60, 70) y OVER en (60, 120)
     DrawBrickLetters(canvas, kScreenW, "GAME", x0 + 60, 70, 0);
@@ -1242,6 +1290,8 @@ void Renderer::RenderGameOver(std::vector<uint8_t>& rgba) const {
 }
 
 void Renderer::RenderContinue(int continues, int seconds, bool canAccept, std::vector<uint8_t>& rgba) const {
+    hits_.clear();
+    hits_.push_back({0, 0, kScreenW, kScreenH, 0});                      // tocar en cualquier lado = continuar
     std::vector<uint32_t> canvas(static_cast<size_t>(kScreenW) * kScreenH, 0x000000);
     const int x0 = (kScreenW - 9 * 32) / 2;
     DrawBrickLetters(canvas, kScreenW, "CONTINUE?", x0, 40, 0);
@@ -1259,6 +1309,7 @@ void Renderer::RenderContinue(int continues, int seconds, bool canAccept, std::v
 // Pantalla de HI-SCORE de la ROM (sub_C44B): "HISCORE" enorme en (16, 50) y el puntaje debajo en (16, 100), con
 // los ceros de la izquierda sin dibujar; la paleta del fondo cicla entre 5 y 8 mientras suena.
 void Renderer::RenderHighScore(int score, int frame, std::vector<uint8_t>& rgba) const {
+    hits_.clear();
     std::vector<uint32_t> canvas(static_cast<size_t>(kScreenW) * kScreenH, 0x000000);
     const int x0 = (kScreenW - 256) / 2;
     const int pal = 5 + (frame & 3);
@@ -1301,6 +1352,7 @@ void Renderer::DrawBrickLetters(std::vector<uint32_t>& canvas, int w, const char
 }
 
 void Renderer::RenderMenu(const MenuView& m, std::vector<uint8_t>& rgba) const {
+    hits_.clear();
     std::vector<uint32_t> canvas(static_cast<size_t>(kScreenW) * kScreenH, 0x000000);
     const bool dense = m.items.size() > 5;               // listas largas: mas arriba y mas juntas para no pisar las indicaciones de abajo
     int y = 100;
@@ -1320,6 +1372,7 @@ void Renderer::RenderMenu(const MenuView& m, std::vector<uint8_t>& rgba) const {
         for (size_t i = 0; i < m.items.size(); ++i) {
             const int row = 17 + static_cast<int>(i) * 2;
             text(11, row, m.items[i], static_cast<int>(i) == m.selected ? 0xF8D878 : 0xFCFCFC);
+            if (sc == 0) hits_.push_back({x0 + 11 * 8 - 32, row * 8 - 6, x0 + 11 * 8 + TextWidth(m.items[i]) + 24, row * 8 + 14, static_cast<int>(i)});
             if (static_cast<int>(i) == m.selected) DrawSprite16(canvas, kScreenW, x0 + 64, row * 8 - 4 + sc, 0x18, 0);
         }
         if (!m.footer.empty() && sc == 0) {
@@ -1349,6 +1402,7 @@ void Renderer::RenderMenu(const MenuView& m, std::vector<uint8_t>& rgba) const {
         const bool enabled = i >= m.enabled.size() || m.enabled[i];
         const uint32_t color = !enabled ? 0x7C7C7C : (selected ? 0xF8D878 : 0xFCFCFC);
         const int x = blockX;
+        if (enabled) hits_.push_back({x - 32, y - 5, x + widest + 16, y + (m.items.size() >= 9 ? 12 : (dense ? 14 : 15)), static_cast<int>(i)});
         DrawText(canvas, kScreenW, x, y, items[i], color);
         if (selected) {
             DrawSprite16(canvas, kScreenW, x - 28, y - 4, 0x18, 0);   // el tanque de P1 mirando a la derecha hace de cursor
@@ -1373,6 +1427,7 @@ void Renderer::RenderMenu(const MenuView& m, std::vector<uint8_t>& rgba) const {
 }
 
 void Renderer::RenderLobby(const LobbyView& lIn, std::vector<uint8_t>& rgba) const {
+    hits_.clear();
     LobbyView l = lIn;                                                  // con los textos largos ajustados a la pantalla
     l.title = Fit(l.title, kScreenW - 16);
     l.hint = Fit(l.hint, kScreenW - 16);
@@ -1416,6 +1471,8 @@ void Renderer::RenderLobby(const LobbyView& lIn, std::vector<uint8_t>& rgba) con
             }
         }
         if (!l.note.empty()) DrawText(canvas, kScreenW, (kScreenW - TextWidth(l.note)) / 2, 200, l.note, 0xF83800);
+        hits_.push_back({(kScreenW - TextWidth(l.startText)) / 2 - 6, 208, (kScreenW + TextWidth(l.startText)) / 2 + 6, 222, 100});
+        hits_.push_back({(kScreenW - TextWidth(l.backText)) / 2 - 6, 222, (kScreenW + TextWidth(l.backText)) / 2 + 6, 236, 101});
         DrawText(canvas, kScreenW, (kScreenW - TextWidth(l.startText)) / 2, 212, l.startText, 0xF8D878);
         DrawText(canvas, kScreenW, (kScreenW - TextWidth(l.backText)) / 2, 226, l.backText, 0x7C7C7C);
         ToRgba(canvas, rgba);
@@ -1424,6 +1481,7 @@ void Renderer::RenderLobby(const LobbyView& lIn, std::vector<uint8_t>& rgba) con
     for (int s = 0; s < 4; ++s) {
         const int x0 = 22 + s * 100;
         const int y0 = 56;
+        hits_.push_back({x0, y0, x0 + 92, y0 + 128, s});                                  // tocar una casilla = unirse / cambiar de color
         const uint32_t frame = l.joined[s] ? 0xFCFCFC : 0x4C4C4C;
         FillRect(canvas, kScreenW, x0, y0, x0 + 92, y0 + 2, frame);
         FillRect(canvas, kScreenW, x0, y0 + 126, x0 + 92, y0 + 128, frame);
@@ -1466,6 +1524,8 @@ void Renderer::RenderLobby(const LobbyView& lIn, std::vector<uint8_t>& rgba) con
         }
     }
     if (!l.note.empty()) DrawText(canvas, kScreenW, (kScreenW - TextWidth(l.note)) / 2, 192, l.note, 0xF83800);
+    hits_.push_back({(kScreenW - TextWidth(l.startText)) / 2 - 6, 202, (kScreenW + TextWidth(l.startText)) / 2 + 6, 216, 100});     // empezar
+    hits_.push_back({(kScreenW - TextWidth(l.backText)) / 2 - 6, 218, (kScreenW + TextWidth(l.backText)) / 2 + 6, 234, 101});       // volver
     DrawText(canvas, kScreenW, (kScreenW - TextWidth(l.startText)) / 2, 206, l.startText, 0xF8D878);
     DrawText(canvas, kScreenW, (kScreenW - TextWidth(l.backText)) / 2, 222, l.backText, 0x7C7C7C);
     ToRgba(canvas, rgba);
@@ -1520,19 +1580,103 @@ void Renderer::DrawBlockIcon(std::vector<uint32_t>& canvas, int x, int y, int id
         for (int k = 0; k < 4; ++k) DrawColoredTile(canvas, kScreenW, x + (k & 1) * 8, y + (k >> 1) * 8, kSnowTile, colors);
         return;
     }
+    if (id >= 16 && id <= 23) {                                       // ladrillo o hierro de un solo mosaico, en una punta
+        const bool steel = id >= 20;
+        const int attr = nes::tbl_DABB_nametable_attribute[steel ? 9 : 4] & 3;
+        for (int k = 0; k < 4; ++k) {
+            const int tile = k == ((id - 16) & 3) ? (steel ? 0x10 : 0x0F) : 0;
+            DrawHudTile(canvas, kScreenW, x + (k & 1) * 8, y + (k >> 1) * 8, tile, battle, attr);
+        }
+        return;
+    }
     const int attr = nes::tbl_DABB_nametable_attribute[id & 15] & 3;
     for (int k = 0; k < 4; ++k) {
         DrawHudTile(canvas, kScreenW, x + (k & 1) * 8, y + (k >> 1) * 8, nes::tbl_DACB_block_data[(id & 15) * 4 + k], battle, attr);
     }
 }
 
+// Dibujo reducido de un nivel (cada bloque son cs x cs pixeles, 8 o 12): bloques, apariciones, lugares de los jugadores, la base y las aguilas.
+void Renderer::DrawLevelPreview(std::vector<uint32_t>& canvas, int x0, int y0, const LevelDef& d, int cs) const {
+    auto fill = [&](int x, int y, int w, int h, uint32_t color) {
+        for (int yy = 0; yy < h; ++yy)
+            for (int xx = 0; xx < w; ++xx) {
+                const int px = x + xx, py = y + yy;
+                if (px >= 0 && px < kScreenW && py >= 0 && py < kScreenH) canvas[static_cast<size_t>(py) * kScreenW + px] = color;
+            }
+    };
+    const int h = cs / 2;
+    auto u = [&](int v) { return v * cs / 8; };                                           // medidas pensadas para 8 px, a escala
+    // que cuarto del bloque ocupa cada id: bits 1 = arriba izq., 2 = arriba der., 4 = abajo izq., 8 = abajo der.
+    auto quarters = [](int id, bool& steel) {
+        steel = false;
+        switch (id) {
+            case 4: return 15;
+            case 0: return 10;  case 1: return 12;  case 2: return 5;  case 3: return 3;
+            case 16: return 1;  case 17: return 2;  case 18: return 4;  case 19: return 8;
+            case 9: steel = true; return 15;
+            case 5: steel = true; return 10;  case 6: steel = true; return 12;  case 7: steel = true; return 5;  case 8: steel = true; return 3;
+            case 20: steel = true; return 1;  case 21: steel = true; return 2;  case 22: steel = true; return 4;  case 23: steel = true; return 8;
+            default: return 0;
+        }
+    };
+    for (int r = 0; r < kGridRows; ++r) {
+        for (int c = 0; c < kLevelCols; ++c) {
+            const int id = d.cells[r][c], x = x0 + c * cs, y = y0 + r * cs;
+            bool steel = false;
+            const int q = quarters(id, steel);
+            if (q != 0) {
+                for (int k = 0; k < 4; ++k) {
+                    if (!(q & (1 << k))) continue;
+                    const int qx = x + (k & 1) * h, qy = y + (k >> 1) * h;
+                    fill(qx, qy, h, h, steel ? 0xB4B4B4 : 0xC84C0C);
+                    fill(qx, qy + h - 1, h, 1, steel ? 0x6C6C6C : 0x7C2C00);                    // la junta
+                    fill(qx + h - 1, qy, 1, h, steel ? 0x6C6C6C : 0x7C2C00);
+                }
+            } else if (id == 10) {
+                fill(x, y, cs, cs, 0x2038EC);
+                fill(x, y + u(2), cs, 1, 0x5C94FC); fill(x, y + u(5), cs, 1, 0x5C94FC);
+            } else if (id == 11) {
+                fill(x, y, cs, cs, 0x007800);
+                fill(x + u(1), y + u(1), u(3), u(3), 0x00B800); fill(x + u(4), y + u(4), u(3), u(3), 0x00B800);
+            } else if (id == 12) {
+                fill(x, y, cs, cs, 0xB8E8FC);
+                fill(x + u(1), y + u(1), u(2), u(2), 0xFCFCFC); fill(x + u(5), y + u(5), u(2), u(2), 0xFCFCFC);
+            } else if (id == 14) {
+                fill(x, y, cs, cs, 0xF8D878);
+                fill(x + u(1), y + u(2), u(2), 1, 0xC8A040); fill(x + u(4), y + u(5), u(2), 1, 0xC8A040);
+            } else if (id == 15) {
+                fill(x, y, cs, cs, 0xD83800);
+                fill(x + u(1), y + u(1), u(3), u(2), 0xFC9838); fill(x + u(4), y + u(5), u(3), u(2), 0xFC9838);
+            }
+        }
+    }
+    auto marker = [&](int col, int row, uint32_t color) {
+        fill(x0 + col * cs + 1, y0 + row * cs + 1, cs - 2, cs - 2, 0xFCFCFC);
+        fill(x0 + col * cs + 2, y0 + row * cs + 2, cs - 4, cs - 4, color);
+    };
+    if (d.versus) {
+        for (int t = 0; t < 2; ++t) {
+            fill(x0 + (d.vsEagleCol[t] - 1) * cs, y0 + (d.vsEagleRow[t] - 1) * cs, 3 * cs, 3 * cs, 0x606060);
+            marker(d.vsEagleCol[t], d.vsEagleRow[t], t == 0 ? 0xF8D878 : 0xD82800);
+        }
+    } else {
+        for (int r = d.baseRow - 1; r <= d.baseRow; ++r)                                      // la base: muro de ladrillo y el aguila abajo al centro
+            for (int c = d.baseCol - 1; c <= d.baseCol + 1; ++c) fill(x0 + c * cs, y0 + r * cs, cs, cs, 0xC84C0C);
+        fill(x0 + d.baseCol * cs, y0 + d.baseRow * cs, cs, cs, 0xB4B4B4);
+        for (int p = 0; p < 4; ++p) marker(d.playerCol[p], d.playerRow[p], 0x58A8F8);
+        if (d.boss) marker(d.eagleCol, d.eagleRow, 0xFC9838);
+    }
+    for (int i = 0; i < d.nSpawns; ++i) marker(d.spawnCol[i], d.spawnRow[i], 0xD82800);
+}
+
 void Renderer::RenderEditor(const nes::Battle& stage, const EditorView& v, std::vector<uint8_t>& rgba) const {
+    hits_.clear();
     std::vector<uint32_t> canvas;
     RenderNesScreen(stage, canvas);
     const int worldW = stage.MapCols() * 8;
     if (worldW != kScreenW) canvas.resize(static_cast<size_t>(kScreenW) * kScreenH, 0);
     DrawBombing(canvas, kScreenW, stage);
-    const bool plain = v.slotOnly || v.page == 2;                     // la lista de casilleros va sobre fondo negro
+    const bool plain = v.slotOnly || v.page == 2 || v.page == 5;                     // la lista de casilleros va sobre fondo negro
     if (plain) std::fill(canvas.begin(), canvas.end(), 0u);
 
     if (!plain) {
@@ -1548,9 +1692,8 @@ void Renderer::RenderEditor(const nes::Battle& stage, const EditorView& v, std::
             px = Blend(px, 0xFFFFFF, 14);
         }
     // lugares donde empiezan los jugadores (no se tocan)
-    static const int kPlayerCols[4] = {11, 15, 10, 16};
     for (int p = 0; p < 4 && !v.versus; ++p) {
-        const int x0 = kPlayerCols[p] * 16, y0 = (kGridRows - 1) * 16;
+        const int x0 = v.playerCol[p] * 16, y0 = v.playerRow[p] * 16;
         Frame(canvas, x0 + 1, y0 + 1, x0 + 15, y0 + 15, 0x58A8F8);
         DrawText(canvas, kScreenW, x0 + 4, y0 + 4, std::to_string(p + 1), 0x58A8F8);
     }
@@ -1579,44 +1722,100 @@ void Renderer::RenderEditor(const nes::Battle& stage, const EditorView& v, std::
         const std::string n = std::to_string(i + 1);
         DrawText(canvas, kScreenW, x0 + 8 - TextWidth(n) / 2, y0 + 4, n, 0xFCFCFC);
     }
-    // cursor
+    // el bloque elegido hace de puntero: se ve (semitransparente) en la celda donde esta el mouse
     if (v.showCursor) {
-        const uint32_t color = v.tool == 1 ? 0xF83800 : (v.tool == 2 ? 0xFC9838 : 0xF8D878);
-        Frame(canvas, v.cursorCol * 16, v.cursorRow * 16, v.cursorCol * 16 + 16, v.cursorRow * 16 + 16, color, 2);
-    }
-
-    }
-
-    // barra de herramientas (arriba o abajo, del lado opuesto al cursor)
-    if (!plain) {
-        const int y0 = v.barTop ? 0 : kScreenH - kEditorBarH;
-        Rect(canvas, 0, y0, kScreenW, y0 + kEditorBarH, 0x101018);
-        Rect(canvas, 0, v.barTop ? kEditorBarH - 1 : y0, kScreenW, v.barTop ? kEditorBarH : y0 + 1, 0x7C7C7C);
-        static const char* const kTools[3] = {"BLOQUE", "APARICIÓN", "ÁGUILA"};
-        for (int t = 0; t < 3; ++t) {
-            if (t == 2 && !v.boss && !v.versus) continue;
-            DrawText(canvas, kScreenW, kEditorToolX[t], y0 + 2, kTools[t], t == v.tool ? 0xF8D878 : 0x7C7C7C);
-            if (t == v.tool) Rect(canvas, kEditorToolX[t], y0 + 10, kEditorToolX[t] + TextWidth(kTools[t]), y0 + 11, 0xF8D878);
-        }
-        DrawText(canvas, kScreenW, 214, y0 + 2, v.status, 0xFCFCFC);
+        const int cx = v.cursorCol * 16, cy = v.cursorRow * 16;
         if (v.tool == 0) {
-            for (size_t i = 0; i < v.paletteIds.size(); ++i) {
-                const int x = kEditorPalX + static_cast<int>(i) * kEditorPalStep;
-                DrawBlockIcon(canvas, x, y0 + 12, v.paletteIds[i], stage);
-                if (v.paletteIds[i] == 13) Frame(canvas, x, y0 + 12, x + 16, y0 + 28, 0x404040);
-                if (static_cast<int>(i) == v.palette) Frame(canvas, x - 1, y0 + 11, x + 17, y0 + 29, 0xF8D878);
+            const int id = v.variantIds.empty() ? 13 : v.variantIds[static_cast<size_t>(std::min(v.variant, static_cast<int>(v.variantIds.size()) - 1))];
+            std::vector<uint32_t> before(256);
+            for (int yy = 0; yy < 16; ++yy)
+                for (int xx = 0; xx < 16; ++xx) before[static_cast<size_t>(yy * 16 + xx)] = canvas[static_cast<size_t>(cy + yy) * kScreenW + cx + xx];
+            if (id == 13) {                                                       // borrar: una cruz roja
+                for (int k = 2; k < 14; ++k) {
+                    canvas[static_cast<size_t>(cy + k) * kScreenW + cx + k] = 0xF83800;
+                    canvas[static_cast<size_t>(cy + k) * kScreenW + cx + 15 - k] = 0xF83800;
+                }
+            } else {
+                DrawBlockIcon(canvas, cx, cy, id, stage);
+                for (int yy = 0; yy < 16; ++yy)
+                    for (int xx = 0; xx < 16; ++xx) {
+                        uint32_t& px = canvas[static_cast<size_t>(cy + yy) * kScreenW + cx + xx];
+                        px = Blend(before[static_cast<size_t>(yy * 16 + xx)], px, 78);
+                    }
             }
-            const int helpX = kEditorPalX + static_cast<int>(v.paletteIds.size()) * kEditorPalStep + 4;
-            if (helpX + TextWidth(v.help) <= kScreenW) DrawText(canvas, kScreenW, helpX, y0 + 16, v.help, 0x7C7C7C);       // (si no entra, no se muestra)
+            Frame(canvas, cx, cy, cx + 16, cy + 16, id == 13 ? 0xF83800 : 0xF8D878, 1);
+        } else if (v.tool == 3) {                                                  // puntero: resalta lo que se puede arrastrar
+            bool hot = false;
+            for (int i = 0; i < v.nSpawns; ++i) hot = hot || (v.spawnCol[i] == v.cursorCol && v.spawnRow[i] == v.cursorRow);
+            for (int p = 0; p < 4 && !v.versus; ++p) hot = hot || (v.playerCol[p] == v.cursorCol && v.playerRow[p] == v.cursorRow);
+            if (!v.versus && std::abs(v.cursorCol - v.baseCol) <= 1 && v.cursorRow >= v.baseRow - 1 && v.cursorRow <= v.baseRow) {      // la base entera
+                Frame(canvas, (v.baseCol - 1) * 16, (v.baseRow - 1) * 16, (v.baseCol + 2) * 16, (v.baseRow + 1) * 16, 0xFC9838, 2);
+            }
+            if (v.versus) { for (int t = 0; t < 2; ++t) hot = hot || (v.vsEagleCol[t] == v.cursorCol && v.vsEagleRow[t] == v.cursorRow); }
+            else if (v.boss) hot = hot || (v.eagleCol == v.cursorCol && v.eagleRow == v.cursorRow);
+            if (hot) Frame(canvas, cx, cy, cx + 16, cy + 16, 0xFC9838, 2);
         } else if (v.tool == 1) {
-            DrawText(canvas, kScreenW, 4, y0 + 17, v.versus ? "APARICIONES DE LA IA: 2 POR EQUIPO (" + std::to_string(v.nSpawns) + "/4)  PONER/QUITAR"
-                                                          : "APARICIONES: " + std::to_string(v.nSpawns) + "/" + std::to_string(kMaxSpawns) + "  PONER/QUITAR EN EL CURSOR", 0xB8F8B8);
+            Shade(canvas, cx + 2, cy + 2, cx + 14, cy + 14, 0xD82800, 70);
+            Frame(canvas, cx + 2, cy + 2, cx + 14, cy + 14, 0xFCFCFC);
+            Frame(canvas, cx, cy, cx + 16, cy + 16, 0xF83800, 1);
         } else {
-            DrawText(canvas, kScreenW, 4, y0 + 17, v.versus ? "MOVÉ EL ÁGUILA DEL EQUIPO DE ESE LADO" : "MOVÉ EL ÁGUILA ENEMIGA CON EL CURSOR", 0xFC9838);
+            Frame(canvas, cx, cy, cx + 16, cy + 16, 0xFC9838, 2);
         }
-        if (!v.warnings.empty()) {
-            DrawText(canvas, kScreenW, kScreenW - 8 - TextWidth("AVISOS: " + std::to_string(v.warnings.size())), y0 + 20, "AVISOS: " + std::to_string(v.warnings.size()), 0xF83800);
+    }
+    }
+
+    // tira con el bloque elegido (arriba o abajo, del lado opuesto al cursor)
+    if (!plain && v.page == 0) {
+        const int sy = v.cursorRow >= 8 ? 0 : kScreenH - 12;
+        Shade(canvas, 0, sy, kScreenW, sy + 12, 0x000000, 70);
+        const std::string hint = v.tool == 0 ? (v.variantIds.size() > 1 ? "FLECHAS O WASD: VARIANTE" : "RUEDA: OTRO BLOQUE")
+                                             : (v.tool == 1 ? "CLIC: PONER O QUITAR" : (v.tool == 2 ? "CLIC: MOVER EL ÁGUILA" : "ARRASTRÁ JUGADORES, APARICIONES, BASE Y ÁGUILA"));
+        const std::string label = v.tool == 0 ? v.blockLabel : (v.tool == 1 ? "APARICIÓN " + std::to_string(v.nSpawns) + "/" + std::to_string(v.versus ? 4 : kMaxSpawns) : (v.tool == 2 ? "ÁGUILA ENEMIGA" : "PUNTERO"));
+        DrawText(canvas, kScreenW, 4, sy + 2, label, 0xF8D878);
+        if (v.side < 0.05f) {
+            const int hx = kScreenW - 4 - TextWidth(hint);
+            if (hx > 8 + TextWidth(label) + 16) DrawText(canvas, kScreenW, hx, sy + 2, hint, 0x9C9C9C);
         }
+    }
+    // barra lateral desplegable (mouse en el borde derecho)
+    if (!plain && v.page == 0 && v.side > 0.01f) {
+        const int left = kScreenW - static_cast<int>(kEditorSideW * v.side);
+        Rect(canvas, left, 0, kScreenW, kScreenH, 0x101018);
+        Rect(canvas, left, 0, left + 1, kScreenH, 0x7C7C7C);
+        static const char* const kNames[7] = {"LADRILLO", "HIERRO", "AGUA", "ARBUSTO", "HIELO", "ARENA", "LAVA"};
+        static const int kGroupIcon[7] = {4, 9, 10, 11, 12, 14, 15};
+        static const char* const kRowText[4] = {"PUNTERO", "APARICIÓN", "ÁGUILA", "MENÚ"};
+        for (int r = 0; r < kEditorRows; ++r) {
+            if (r == 9 && !v.boss && !v.versus) continue;
+            const int ry = EditorRowY(r);
+            const bool selected = (r < 7 && v.tool == 0 && v.group == r) || (r == 7 && v.tool == 3) || (r == 8 && v.tool == 1) || (r == 9 && v.tool == 2);
+            if (selected) Rect(canvas, left + 1, ry, kScreenW, ry + kEditorRowH, 0x2C2C40);
+            else if (r == v.hover) Rect(canvas, left + 1, ry, kScreenW, ry + kEditorRowH, 0x1C1C2C);
+            const int ix = left + 1;
+            if (r < 7) {
+                DrawBlockIcon(canvas, ix, ry, kGroupIcon[r], stage);
+                DrawText(canvas, kScreenW, left + 18, ry + 4, kNames[r], selected ? 0xF8D878 : 0xC8C8C8);
+            } else {
+                if (r == 7) {                                                           // puntero (flecha del mouse)
+                    static const char* const kArrow[14] = {"X", "XX", "XWX", "XWWX", "XWWWX", "XWWWWX", "XWWWWWX", "XWWWWWWX", "XWWWWXXXX", "XWWXWX", "XWX XWX", "XX  XWX", "X    XWX", "      XX"};
+                    for (int yy = 0; yy < 14; ++yy)
+                        for (int xx = 0; kArrow[yy][xx]; ++xx)
+                            if (kArrow[yy][xx] != ' ') canvas[static_cast<size_t>(ry + 1 + yy) * kScreenW + ix + 3 + xx] = kArrow[yy][xx] == 'W' ? 0xFCFCFC : 0x101018 + 0x000000;
+                } else if (r == 8) {
+                    Rect(canvas, ix + 2, ry + 2, ix + 14, ry + 14, 0xD82800);
+                    Frame(canvas, ix + 2, ry + 2, ix + 14, ry + 14, 0xFCFCFC);
+                } else if (r == 9) {
+                    Frame(canvas, ix + 1, ry + 1, ix + 15, ry + 15, 0xFC9838, 2);
+                } else {
+                    for (int k = 0; k < 3; ++k) Rect(canvas, ix + 2, ry + 3 + k * 4, ix + 14, ry + 5 + k * 4, 0xC8C8C8);
+                }
+                DrawText(canvas, kScreenW, left + 18, ry + 4, Fit(kRowText[r - 7], 72), selected ? 0xF8D878 : 0xC8C8C8);
+            }
+        }
+        if (v.tool == 0 && !v.variantName.empty()) DrawText(canvas, kScreenW, left + 4, 183, Fit(v.variantName, 88), 0xF8D878);     // la variante (se cambia con las flechas)
+        for (size_t i = 0; i < v.statusLines.size(); ++i) DrawText(canvas, kScreenW, left + 4, 197 + static_cast<int>(i) * 9, Fit(v.statusLines[i], 88), i == 0 && v.dirty ? 0xF8D878 : 0x9C9C9C);
+        if (!v.warnings.empty()) DrawText(canvas, kScreenW, left + 4, 225, Fit("AVISOS: " + std::to_string(v.warnings.size()), 88), 0xF83800);
+        if (v.dirty) Rect(canvas, kScreenW - 8, 2, kScreenW - 3, 7, 0xF8D878);          // cambios sin guardar
     }
 
     auto panel = [&](int x0, int y0, int x1, int y1) {
@@ -1639,7 +1838,7 @@ void Renderer::RenderEditor(const nes::Battle& stage, const EditorView& v, std::
             if (sel) DrawSprite16(canvas, kScreenW, tx - 28, ty - 4, 0x18, 0);
         }
     } else if (v.page == 2) {                                         // casilleros
-        DrawText(canvas, kScreenW, (kScreenW - TextWidth(v.slotTitle)) / 2, 10, v.slotTitle, 0xFCA044);
+        DrawText(canvas, kScreenW, (kScreenW - TextWidth(v.slotTitle)) / 2, 10, Fit(v.slotTitle, kScreenW - 16), 0xFCA044);
         const int rows = (v.slotCount + v.slotCols - 1) / v.slotCols;
         const int cellW = std::min(40, 400 / v.slotCols), cellH = std::min(22, 150 / rows);
         const int gx = (kScreenW - cellW * v.slotCols) / 2, gy = 30;
@@ -1648,15 +1847,33 @@ void Renderer::RenderEditor(const nes::Battle& stage, const EditorView& v, std::
             const int st = s < static_cast<int>(v.slotState.size()) ? v.slotState[static_cast<size_t>(s)] : 0;
             const uint32_t fill = st == 1 ? 0x006800 : (st == 2 ? 0x0030A0 : 0x202028);
             Rect(canvas, x0 + 1, y0 + 1, x0 + cellW - 1, y0 + cellH - 1, fill);
+            hits_.push_back({x0, y0, x0 + cellW, y0 + cellH, s + 1});                       // tocar una casilla la elige
             const std::string n = std::to_string(s + 1);
             DrawText(canvas, kScreenW, x0 + (cellW - TextWidth(n)) / 2, y0 + (cellH - 8) / 2, n, st == 0 ? 0x7C7C7C : 0xFCFCFC);
             if (s + 1 == v.slotSel) Frame(canvas, x0, y0, x0 + cellW, y0 + cellH, 0xF8D878, 2);
         }
         const int iy = gy + rows * cellH + 10;
-        DrawText(canvas, kScreenW, (kScreenW - TextWidth(v.slotInfo)) / 2, iy, v.slotInfo, 0xFCFCFC);
-        DrawText(canvas, kScreenW, (kScreenW - TextWidth(v.slotLegend)) / 2, iy + 14, v.slotLegend, 0x7C7C7C);
-        const std::string foot = v.slotFooter.empty() ? std::string("ACEPTAR ELEGIR   BORRAR: SUPR / X   VOLVER") : v.slotFooter;
+        DrawText(canvas, kScreenW, (kScreenW - TextWidth(Fit(v.slotInfo, kScreenW - 16))) / 2, iy, Fit(v.slotInfo, kScreenW - 16), 0xFCFCFC);
+        DrawText(canvas, kScreenW, (kScreenW - TextWidth(Fit(v.slotLegend, kScreenW - 16))) / 2, iy + 14, Fit(v.slotLegend, kScreenW - 16), 0x7C7C7C);
+        const std::string foot = Fit(v.slotFooter.empty() ? std::string("ACEPTAR VER   BORRAR: SUPR / X   VOLVER") : v.slotFooter, kScreenW - 16);
         DrawText(canvas, kScreenW, (kScreenW - TextWidth(foot)) / 2, 224, foot, 0x7C7C7C);
+    } else if (v.page == 5) {                                         // vista previa del nivel: las flechas pasan de un nivel a otro
+        DrawText(canvas, kScreenW, (kScreenW - TextWidth(Fit(v.slotTitle, kScreenW - 16))) / 2, 6, Fit(v.slotTitle, kScreenW - 16), 0xFCA044);
+        const int cs = 12, pw = kLevelCols * cs, ph = kGridRows * cs;
+        const int px0 = (kScreenW - pw) / 2, py0 = 16;
+        Rect(canvas, px0 - 2, py0 - 2, px0 + pw + 2, py0 + ph + 2, 0x606060);
+        Rect(canvas, px0, py0, px0 + pw, py0 + ph, 0x000000);
+        if (v.hasPreview) DrawLevelPreview(canvas, px0, py0, v.preview, cs);
+        else DrawText(canvas, kScreenW, px0 + (pw - TextWidth("VACÍO")) / 2, py0 + ph / 2 - 4, "VACÍO", 0x7C7C7C);
+        const int ay = py0 + ph / 2 - 8;                                                   // flechas a los costados
+        DrawText(canvas, kScreenW, 18, ay, "<", 0xF8D878);
+        DrawText(canvas, kScreenW, kScreenW - 26, ay, ">", 0xF8D878);
+        const std::string info = Fit(v.slotInfo, kScreenW - 16);
+        DrawText(canvas, kScreenW, (kScreenW - TextWidth(info)) / 2, py0 + ph + 6, info, 0xFCFCFC);
+        const std::string legend = Fit(v.slotLegend, kScreenW - 16);
+        DrawText(canvas, kScreenW, (kScreenW - TextWidth(legend)) / 2, py0 + ph + 17, legend, 0x7C7C7C);
+        const std::string foot = Fit(v.slotFooter, kScreenW - 16);
+        DrawText(canvas, kScreenW, (kScreenW - TextWidth(foot)) / 2, 229, foot, 0xB8F8B8);
     } else if (v.page == 3) {                                         // confirmacion
         const int w = std::max(TextWidth(v.confirmText) + 40, 200), h = 70;
         const int bx = (kScreenW - w) / 2, by = (kScreenH - h) / 2;

@@ -36,6 +36,7 @@ struct Config {
     int cuLives = 3;                         // personalizada: vidas
     int vsLives = 3;                         // batalla vs y battle royale a muerte: vidas (1..10)
     bool voiceChat = true;                   // chat de voz en las partidas en red
+    bool hideHud = false;                    // ocultar la informacion de la pantalla al jugar (vidas, tanques enemigos, etapa...); Select / Tab
     bool autoUpdate = true;                  // al abrir el juego, buscar actualizaciones
 
     // Valores por defecto de teclas y mando: los carga el programa (conoce los codigos).

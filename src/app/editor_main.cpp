@@ -7,6 +7,7 @@
 #include <raylib.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -82,7 +83,23 @@ int main(int argc, char** argv) {
             const std::string t = keys.substr(from, to - from);
             from = to + 1;
             app::EditorKeys k;
-            if (t == "left") k.left = true;
+            if (t.size() > 1 && (t[0] == 'm' || t[0] == 'c') && std::isdigit(static_cast<unsigned char>(t[1]))) {     // m431_100: mouse en (431,100); c200_100: clic
+                int mx = 0, my = 0;
+                std::sscanf(t.c_str() + 1, "%d_%d", &mx, &my);
+                for (int i = 0; i < 10; ++i) { app::EditorKeys mk; mk.mx = mx; mk.my = my; editor.Step(mk); }      // (la barra se despliega de a poco)
+                if (t[0] == 'c') { app::EditorKeys ck; ck.mx = mx; ck.my = my; ck.place = true; editor.Step(ck); }
+                continue;
+            }
+            if (t.size() > 1 && t[0] == 'd' && std::isdigit(static_cast<unsigned char>(t[1]))) {                  // d x1_y1_x2_y2: arrastra con el clic izquierdo de un punto a otro
+                int x1 = 0, y1 = 0, x2 = 0, y2 = 0;
+                std::sscanf(t.c_str() + 1, "%d_%d_%d_%d", &x1, &y1, &x2, &y2);
+                app::EditorKeys a; a.mx = x1; a.my = y1; a.place = true; a.placeHeld = true; editor.Step(a);
+                app::EditorKeys b; b.mx = x2; b.my = y2; b.placeHeld = true; editor.Step(b);
+                app::EditorKeys e; e.mx = x2; e.my = y2; editor.Step(e);
+                continue;
+            }
+            if (t == "v+" || t == "v-") { k.variant = t == "v+" ? 1 : -1; k.mx = 431; k.my = 100; }
+            else if (t == "left") k.left = true;
             else if (t == "right") k.right = true;
             else if (t == "up") k.up = true;
             else if (t == "down") k.down = true;
@@ -120,7 +137,9 @@ int main(int argc, char** argv) {
         const float scale = std::min(sw / app::kScreenW, sh / app::kScreenH);
         const float dw = app::kScreenW * scale, dh = app::kScreenH * scale;
         const float dx = (sw - dw) / 2, dy = (sh - dh) / 2;
+        if (IsKeyPressed(KEY_F4) || IsKeyPressed(KEY_F11)) ToggleBorderlessWindowed();            // F4: pantalla completa o ventana
         editor.Step(app::GatherEditorKeys(dx, dy, scale));
+        if (editor.WantsHiddenMouse() != IsCursorHidden()) { if (editor.WantsHiddenMouse()) HideCursor(); else ShowCursor(); }      // el bloque elegido hace de puntero
         app::EditorView view;
         editor.BuildView(view);
         renderer.RenderEditor(editor.Stage(), view, rgba);

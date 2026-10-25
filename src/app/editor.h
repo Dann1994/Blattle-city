@@ -27,12 +27,15 @@ struct EditorKeys {
     bool accept = false;                                            // aceptar en menus (Enter / A)
     int mx = -1, my = -1;                                           // mouse en pixeles de la pantalla del juego (-1: no hay)
     int wheel = 0;
+    bool tap = false;                                               // pantalla tactil: toque en (mx, my) (solo vale en los menus del editor; en el mapa se usan los botones)
+    bool mouseRight = false;                                        // clic derecho (en los menus del editor vuelve atras; en el mapa borra)
+    int variant = 0;                                                // flechas: -1 / +1 cambian la variante del bloque (entero, mitades...)
 };
 
 class LevelEditor {
 public:
     enum class Target { Own, Main };
-    enum class Tool { Block = 0, Spawn = 1, Eagle = 2 };
+    enum class Tool { Block = 0, Spawn = 1, Eagle = 2, Pointer = 3 };      // (el puntero arrastra las apariciones y el aguila)
 
     explicit LevelEditor(Target target);
 
@@ -52,16 +55,27 @@ public:
     int CursorCol() const { return col_; }
     int CursorRow() const { return row_; }
     Tool CurrentTool() const { return tool_; }
+    int CurrentGroup() const { return group_; }
+    int CurrentVariant() const { return variant_; }
+    int CurrentBlockId() const;
+    float SideOpen() const { return side_; }
+    bool WantsHiddenMouse() const { return page_ == Page::Edit && mouseOnMap_; }     // el bloque elegido reemplaza al puntero del mouse
+    static int GroupCount() { return 7; }
+    static const std::vector<int>& GroupIds(int group);                              // los ids de bloque de un grupo (el primero es el entero)
+    static const char* GroupName(int group);
+    static const char* VariantName(int group, int variant);
     bool SaveToSlot(int slot);                          // guarda el nivel actual en ese casillero / numero
     bool LoadFromSlot(int slot);                        // carga ese casillero / numero (sin preguntar nada)
     void NewLevel(bool boss);
-    static bool Protected(int col, int row);            // lugar de la base y de los jugadores: no se pinta
+    static bool Protected(int col, int row);            // lugar de la base de siempre (13, 14): no se pinta
+    bool InBase(int col, int row) const;                // dentro de la base de este nivel (3 bloques de ancho por 2 de alto)
+    bool MoveBase(int col, int row);                    // mueve el aguila de los jugadores (con su muro)
     static const std::vector<int>& PaletteIds();
     int SlotCount() const { return target_ == Target::Main ? kMaxMainLevel : kOwnSlots; }
     int SlotState(int slot) const;                      // 0 vacio, 1 con archivo, 2 de fabrica (sin archivo propio)
 
 private:
-    enum class Page { Edit, Menu, Slots, Confirm, Message };
+    enum class Page { Edit, Menu, Slots, Confirm, Message, Preview };
     enum class SlotMode { Save, Load };
     enum class Ask { Overwrite, Delete, NewLevel, Exit, LoadDiscard };
 
@@ -70,14 +84,23 @@ private:
     void ApplyTool(bool erase);
     void PlaceBlock(int id);
     void ToggleSpawn(bool removeOnly);
-    void PlaceEagle();
+    void PlaceEagle(int team = -1);
+    bool MoveSpawn(int index, int col, int row);
+    void StepPointer(const EditorKeys& k);
+    void FinishDrag();                                   // al soltar: se despeja el bloque donde queda lo que se arrastro
+    bool deferClear_ = false;                            // mientras se arrastra no se borra nada del mapa
+    bool dragMoved_ = false;
     void SetKind(int kind);                              // 0 normal, 1 especial, 2 batalla vs
     void SetBoss(bool on);
-    bool IsProtected(int col, int row) const { return !def_.versus && Protected(col, row); }
+    bool IsProtected(int col, int row) const;           // la base y los lugares de los jugadores no se pintan
+    bool MovePlayerSpawn(int player, int col, int row);
     void SetRank(int rank);
     void CycleTool();
     void StepMenu(const EditorKeys& k);
     void StepSlots(const EditorKeys& k);
+    void StepPreview(const EditorKeys& k);
+    EditorKeys PointOnPages(const EditorKeys& k);        // mouse en los menus: pasar marca la opcion, el clic la elige, el clic derecho vuelve
+    void AcceptSlot();                                   // lo que se hace con el casillero elegido: guardar ahi o abrirlo
     void StepConfirm(const EditorKeys& k);
     void OpenMenu();
     void OpenSlots(SlotMode mode);
@@ -87,7 +110,11 @@ private:
     std::string SlotLabel(int slot) const;
     std::string FileOf(int slot) const;
     std::vector<std::string> MenuItems() const;
-    bool MouseOverBar(int my) const;
+    void SelectGroup(int group);
+    void CycleVariant(int delta);
+    void SyncPalette();                                  // palette_ sigue al grupo y la variante elegidos
+    void SetFromPalette();                               // y al reves (Q/E, LB/RB)
+    int SideRowAt(int mx, int my) const;                 // fila de la barra lateral en ese punto (-1: ninguna; 100 + n: variante n)
 
     Target target_;
     LevelDef def_;
@@ -98,7 +125,16 @@ private:
     int slot_ = 0;                  // casillero abierto (0 = nivel nuevo sin guardar)
     int col_ = 13, row_ = 7;
     Tool tool_ = Tool::Block;
-    int palette_ = 1;               // posicion en PaletteIds()
+    int palette_ = 0;               // posicion en PaletteIds()
+    int group_ = 0, variant_ = 0;   // bloque elegido (ladrillo, hierro...) y su variante
+    float side_ = 0;                // barra lateral: 0 cerrada, 1 abierta
+    bool sideWanted_ = false;
+    bool mouseOnMap_ = false;
+    int hover_ = -1;
+    int dragKind_ = 0;              // puntero: 0 nada, 1 aparicion, 2 aguila enemiga, 3 lugar de un jugador, 4 la base de los jugadores
+    int dragOffCol_ = 0, dragOffRow_ = 0;   // donde se agarro la base (respecto del aguila)
+    int dragIndex_ = 0;             // numero de la aparicion o equipo del aguila que se arrastra
+    int lastDragCol_ = -1, lastDragRow_ = -1;
     Page page_ = Page::Edit;
     int menuSel_ = 0;
     SlotMode slotMode_ = SlotMode::Save;
@@ -111,7 +147,6 @@ private:
     int timers_[6] = {};            // repeticion de izquierda, derecha, arriba, abajo (+ 2 de reserva)
     bool prevPlace_ = false;
     int lastPaintCol_ = -1, lastPaintRow_ = -1;
-    bool barTop_ = false;           // la barra de herramientas esta arriba (se mueve para no tapar el cursor)
     bool prevMenuKey_ = false;
     std::string help_;
 };

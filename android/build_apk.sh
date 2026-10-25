@@ -24,6 +24,7 @@ rm -rf "$OUT" && mkdir -p "$OUT/stage/lib/$ABI" "$OUT/stage/assets"
 cp "$DEV/build-$ABI/libmain.so" "$OUT/stage/lib/$ABI/"
 cp "$SRC/assets/chr.bin" "$SRC/assets/icon.png" "$SRC/assets/plane.png" "$OUT/stage/assets/"
 cp -r "$SRC/assets/sounds" "$OUT/stage/assets/sounds"
+if [ -d "$SRC/niveles_campana" ]; then cp -r "$SRC/niveles_campana" "$OUT/stage/assets/niveles_campana"; fi      # los niveles de la campania editados
 
 "$BT/aapt2.exe" compile --dir "$SRC/android/res" -o "$OUT/res.zip"
 "$BT/aapt2.exe" link -o "$OUT/base.apk" -I "$SDK/platforms/android-34/android.jar" --manifest "$SRC/android/AndroidManifest.xml" \

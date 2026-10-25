@@ -2,7 +2,9 @@
 
 // Teclado, mando y mouse del editor de niveles (con raylib). Lo usan el juego (CONSTRUCCION) y level_editor.exe.
 //
-//   Mover el cursor ........ flechas / WASD / cruceta
+//   Mover el cursor ........ el mouse / cruceta del mando
+//   Variante del bloque ..... flechas o WASD (entero, mitades y puntas)
+//   Barra de bloques ........ llevar el mouse al borde derecho de la pantalla
 //   Poner ................... Espacio, Z, F / clic izquierdo (mantener y arrastrar pinta) / A
 //   Borrar .................. X, Supr / clic derecho / B o X del mando
 //   Bloque anterior/siguiente Q y E, RePag y AvPag / rueda del mouse / LB y RB
@@ -60,11 +62,16 @@ inline EditorKeys GatherEditorKeys(float destX, float destY, float scale, const 
         padRB = padRB || extra->rb;
         padStart = padStart || extra->start;
     }
-    k.left = IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A) || padLeft;
-    k.right = IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D) || padRight;
-    k.up = IsKeyDown(KEY_UP) || IsKeyDown(KEY_W) || padUp;
-    k.down = IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S) || padDown;
     const bool useMouse = extra == nullptr;
+    // con el mouse, las flechas y WASD cambian la variante del bloque (entero, mitades, puntas); el cursor lo mueve el mouse (o la cruceta del mando)
+    k.left = (!useMouse && (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A))) || padLeft;
+    k.right = (!useMouse && (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D))) || padRight;
+    k.up = (!useMouse && (IsKeyDown(KEY_UP) || IsKeyDown(KEY_W))) || padUp;
+    k.down = (!useMouse && (IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S))) || padDown;
+    if (useMouse) {
+        if (IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_D) || IsKeyPressed(KEY_S)) k.variant = 1;
+        else if (IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_A) || IsKeyPressed(KEY_W)) k.variant = -1;
+    }
     const bool mouseLeft = useMouse && IsMouseButtonPressed(MOUSE_BUTTON_LEFT), mouseRight = useMouse && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT);
     k.place = IsKeyPressed(KEY_SPACE) || IsKeyPressed(KEY_Z) || IsKeyPressed(KEY_F) || padA || mouseLeft;
     k.placeHeld = IsKeyDown(KEY_SPACE) || IsKeyDown(KEY_Z) || IsKeyDown(KEY_F) || padAHeld || (useMouse && IsMouseButtonDown(MOUSE_BUTTON_LEFT));
@@ -81,6 +88,12 @@ inline EditorKeys GatherEditorKeys(float destX, float destY, float scale, const 
     if (useMouse && scale > 0 && cx >= 0 && cy >= 0 && cx < kScreenW && cy < kScreenH) {
         k.mx = static_cast<int>(cx);
         k.my = static_cast<int>(cy);
+    }
+    k.mouseRight = mouseRight;
+    if (!useMouse && scale > 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {            // pantalla tactil: un toque elige en los menus del editor
+        const Vector2 tp = GetMousePosition();
+        const float tx = (tp.x - destX) / scale, ty = (tp.y - destY) / scale;
+        if (tx >= 0 && ty >= 0 && tx < kScreenW && ty < kScreenH) { k.tap = true; k.mx = static_cast<int>(tx); k.my = static_cast<int>(ty); }
     }
     k.wheel = useMouse ? static_cast<int>(GetMouseWheelMove()) : 0;
     return k;

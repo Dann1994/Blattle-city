@@ -167,6 +167,28 @@ bool AndroidInstall(long long id, std::string& err) {
     return true;
 }
 
+// Modo inmersivo: se esconden la barra de navegacion de Android (la de abajo, que sacaba del juego al tocarla sin querer) y la de estado. Con
+// IMMERSIVE_STICKY, deslizar desde el borde las muestra un momento y se vuelven a ir solas. Se llama al abrir y cada tanto (por si el sistema las devuelve).
+void AndroidEnterImmersive() {
+    Jni j;
+    if (!j.ok()) return;
+    JNIEnv* e = j.env();
+    jclass cAct = e->GetObjectClass(j.activity());
+    jmethodID getWindow = e->GetMethodID(cAct, "getWindow", "()Landroid/view/Window;");
+    if (!getWindow) { j.Threw(); return; }
+    jobject win = e->CallObjectMethod(j.activity(), getWindow);
+    if (j.Threw() || !win) return;
+    jclass cWin = e->GetObjectClass(win);
+    jobject decor = e->CallObjectMethod(win, e->GetMethodID(cWin, "getDecorView", "()Landroid/view/View;"));
+    if (j.Threw() || !decor) return;
+    jclass cView = e->GetObjectClass(decor);
+    jmethodID setVis = e->GetMethodID(cView, "setSystemUiVisibility", "(I)V");
+    if (!setVis) { j.Threw(); return; }
+    // LAYOUT_STABLE 0x100 | LAYOUT_HIDE_NAVIGATION 0x200 | LAYOUT_FULLSCREEN 0x400 | HIDE_NAVIGATION 0x2 | FULLSCREEN 0x4 | IMMERSIVE_STICKY 0x1000
+    e->CallVoidMethod(decor, setVis, static_cast<jint>(0x100 | 0x200 | 0x400 | 0x2 | 0x4 | 0x1000));
+    j.Threw();
+}
+
 } // namespace app
 
 #endif

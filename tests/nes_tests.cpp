@@ -1208,10 +1208,11 @@ void TestBombing() {
     auto& b = *fx->battle;
     for (int f = 0; f < 200 && fx->flow->mode() != Mode::Playing; ++f) fx->flow->Step();
     CHECK(b.BombingActive());
-    CHECK(b.Bombing().countdown > 14000 && b.Bombing().countdown <= b.BombInterval());
+    CHECK(b.Bombing().countdown > 9000 && b.Bombing().countdown <= b.BombInterval());
     CHECK_EQ(b.Bombing().phase, 0);
-    CHECK_EQ(b.BombInterval(), 4 * 3600);                             // nivel 10: 4 minutos
-    for (int lv : {10, 20, 30, 40}) CHECK_EQ(MakeFlow(lv, 1)->battle->BombInterval(), (5 - lv / 10) * 3600);   // 4, 3, 2 y 1 minutos
+    CHECK_EQ(b.BombInterval(), 180 * 60);                             // nivel 10: 3 minutos
+    const int kExpect[4] = {180, 120, 90, 60};                        // niveles 10, 20, 30 y 40: 3:00, 2:00, 1:30 y 1:00
+    for (int lv : {10, 20, 30, 40}) CHECK_EQ(MakeFlow(lv, 1)->battle->BombInterval(), kExpect[lv / 10 - 1] * 60);
     CHECK_EQ(nes::Battle::kBombFuse, 90);                             // 1,5 segundos
     int detonations = 0, alertFrames = 0, soundsBefore = b.BomberSoundCount();
     bool nearEagle = false, killedInside = true, terrainCleared = true, sawShake = false;
@@ -1255,7 +1256,7 @@ void TestBombing() {
     CHECK(alertFrames >= 6 * nes::Battle::kBombAlertFrames - 6);
     CHECK_EQ(b.BomberSoundCount() - soundsBefore, 18);                // tres aviones por bombardeo
     CHECK(b.EnemyEagleAlive());
-    CHECK(b.Bombing().countdown > 14000);                              // despues del bombardeo vuelve a contar (4 min en el nivel 10)
+    CHECK(b.Bombing().countdown > 9000);                               // despues del bombardeo vuelve a contar (3 minutos en el nivel 10)
     // mas aviones con la dificultad (3, 4, 5 y 6) y los hay horizontales y verticales
     bool sawHoriz = false, sawVert = false;
     for (int lv : {10, 20, 30, 40}) {
@@ -2051,7 +2052,7 @@ void TestCustomLevels() {
         CHECK_EQ(bt.Tier(), 7);
         CHECK_EQ(bt.Rank(), 2);
         CHECK_EQ(bt.EnemyEagleHealth(), 20);
-        CHECK(bt.BombInterval() == 3 * 60 * 60);                           // fuerza 2: cada 3 minutos
+        CHECK(bt.BombInterval() == 2 * 60 * 60);                           // fuerza 2: cada 2 minutos
         CHECK((bt.Tile(10, 8) & 0xFC) == 0xC8 && (bt.Tile(11, 9) & 0xFC) == 0xC8);          // el aguila esta en (columna 5, fila 4)
         CHECK(bt.Tile(8, 8) != 0 && bt.Tile(13, 8) != 0 && bt.Tile(10, 6) != 0 && bt.Tile(10, 11) != 0);   // y su fortaleza de 2 capas
         CHECK(bt.Tile(13, 13) == 0 || (bt.Tile(13, 13) & 0xFC) != 0xC8);
@@ -2111,7 +2112,7 @@ void TestCustomLevels() {
         tap([](app::EditorKeys& k) { k.right = true; });
         CHECK_EQ(ed.CursorCol(), 14);
         tap([](app::EditorKeys& k) { k.place = true; });                    // el bloque de la paleta
-        CHECK_EQ(ed.def().cells[7][14], app::LevelEditor::PaletteIds()[1]);
+        CHECK_EQ(ed.def().cells[7][14], app::LevelEditor::PaletteIds()[0]);       // el ladrillo entero es el bloque elegido al empezar
         tap([](app::EditorKeys& k) { k.nextItem = true; });
         tap([](app::EditorKeys& k) { k.place = true; });
         tap([](app::EditorKeys& k) { k.erase = true; });
@@ -2159,7 +2160,7 @@ void TestCustomLevels() {
         // la vista tiene lo necesario para dibujar
         app::EditorView view;
         ed2.BuildView(view);
-        CHECK(view.boss && view.nSpawns == ed2.def().nSpawns && view.paletteIds.size() == 16);
+        CHECK(view.boss && view.nSpawns == ed2.def().nSpawns && view.paletteIds.size() == 23);
         std::vector<uint8_t> rgba;
         app::Renderer renderer;
         (void)renderer;                                                    // (el dibujo necesita los graficos de la ROM: se prueba a mano)
@@ -3868,6 +3869,234 @@ void TestCannons() {
     }
 }
 
+void TestEditorSidebar() {
+    std::printf("[editor] barra lateral que se despliega con el mouse, el bloque elegido hace de puntero y las flechas cambian la variante\n");
+    app::LevelEditor ed(app::LevelEditor::Target::Own);
+    using Keys = app::EditorKeys;
+    int lastX = 200, lastY = 100;                                              // el mouse se queda donde estaba
+    auto step = [&](auto set) { Keys k; k.mx = lastX; k.my = lastY; set(k); ed.Step(k); };
+    auto mouseAt = [&](int x, int y, bool click = false) { lastX = x; lastY = y; Keys k; k.mx = x; k.my = y; k.place = click; ed.Step(k); };
+    CHECK(ed.SideOpen() == 0.0f);
+    mouseAt(200, 100);
+    CHECK(ed.SideOpen() == 0.0f);
+    CHECK(ed.WantsHiddenMouse());                                              // el bloque elegido reemplaza al puntero
+    CHECK_EQ(ed.CursorCol(), 12);
+    CHECK_EQ(ed.CursorRow(), 6);
+    // el mouse en el borde derecho despliega la barra (poco a poco)
+    for (int i = 0; i < 3; ++i) mouseAt(431, 100);
+    CHECK(ed.SideOpen() > 0.3f);
+    for (int i = 0; i < 6; ++i) mouseAt(431, 100);
+    CHECK(ed.SideOpen() == 1.0f);
+    CHECK(!ed.WantsHiddenMouse());                                             // sobre la barra se ve el puntero normal
+    // clic en una fila: elige el bloque (hierro) y no pinta el mapa
+    const int before = ed.def().cells[6][12];
+    mouseAt(400, app::EditorRowY(1) + 4, true);
+    CHECK_EQ(ed.CurrentGroup(), 1);
+    CHECK_EQ(ed.CurrentBlockId(), 9);
+    CHECK_EQ(ed.def().cells[6][12], before);
+    mouseAt(400, app::EditorRowY(0) + 4, true);                                // ladrillo
+    CHECK_EQ(ed.CurrentGroup(), 0);
+    CHECK_EQ(ed.CurrentBlockId(), 4);
+    // las flechas pasan por entero, las mitades y las cuatro puntas (un solo mosaico) y vuelven
+    const int expect[9] = {4, 0, 1, 2, 3, 16, 17, 18, 19};
+    for (int i = 1; i <= 9; ++i) {
+        step([](Keys& k) { k.variant = 1; });
+        CHECK_EQ(ed.CurrentBlockId(), expect[i % 9]);
+    }
+    step([](Keys& k) { k.variant = -1; });
+    CHECK_EQ(ed.CurrentBlockId(), 19);                                         // hacia atras: la ultima punta
+    // sin variantes (agua) las flechas no hacen nada
+    mouseAt(400, app::EditorRowY(2) + 4, true);
+    CHECK_EQ(ed.CurrentBlockId(), 10);
+    step([](Keys& k) { k.variant = 1; });
+    CHECK_EQ(ed.CurrentBlockId(), 10);
+    // se pinta el bloque elegido (con la variante) en el mapa; la barra se recoge al alejar el mouse
+    mouseAt(400, app::EditorRowY(0) + 4, true);
+    step([](Keys& k) { k.variant = 1; });                                      // ladrillo, mitad derecha
+    for (int i = 0; i < 9; ++i) mouseAt(150, 100);
+    CHECK(ed.SideOpen() == 0.0f);
+    mouseAt(150, 100, true);
+    CHECK_EQ(ed.def().cells[6][9], 0);
+    // la herramienta aparicion y el menu desde la barra
+    for (int i = 0; i < 9; ++i) mouseAt(431, 100);
+    mouseAt(400, app::EditorRowY(8) + 4, true);
+    CHECK(ed.CurrentTool() == app::LevelEditor::Tool::Spawn);
+    mouseAt(400, app::EditorRowY(7) + 4, true);                                // puntero: arrastra apariciones
+    CHECK(ed.CurrentTool() == app::LevelEditor::Tool::Pointer);
+    mouseAt(400, app::EditorRowY(10) + 4, true);
+    CHECK(!ed.InEditPage());
+    // Q y E siguen recorriendo todos los bloques
+    step([](Keys& k) { k.back = true; });
+    CHECK(ed.InEditPage());
+    step([](Keys& k) { k.nextItem = true; });
+    CHECK(ed.CurrentTool() == app::LevelEditor::Tool::Block);
+    // puntero: arrastrar una aparicion de un lugar a otro
+    {
+        app::LevelEditor e2(app::LevelEditor::Target::Own);
+        const int n0 = e2.def().nSpawns;
+        CHECK(n0 >= 3);
+        const int c0 = e2.def().spawnCol[0], r0 = e2.def().spawnRow[0];
+        Keys k;
+        k.mx = 100; k.my = 100;
+        for (int i = 0; i < 3; ++i) e2.Step(k);
+        k.mx = 431;                                                            // abrir la barra y elegir el puntero
+        for (int i = 0; i < 9; ++i) e2.Step(k);
+        k.mx = 400; k.my = app::EditorRowY(7) + 4; k.place = true;
+        e2.Step(k);
+        CHECK(e2.CurrentTool() == app::LevelEditor::Tool::Pointer);
+        k = Keys{};
+        k.mx = 300; k.my = 100;
+        for (int i = 0; i < 10; ++i) e2.Step(k);                               // fuera de la barra
+        k.mx = c0 * 16 + 8; k.my = r0 * 16 + 8; k.place = true; k.placeHeld = true;       // agarra la aparicion 1
+        e2.Step(k);
+        k.place = false;
+        k.mx = 5 * 16 + 8; k.my = 5 * 16 + 8;                                  // la arrastra a otra celda
+        e2.Step(k);
+        k.placeHeld = false;
+        e2.Step(k);                                                            // la suelta
+        CHECK(e2.def().spawnCol[0] == 5 && e2.def().spawnRow[0] == 5);
+        CHECK_EQ(e2.def().nSpawns, n0);
+        // soltar y arrastrar de nuevo sin agarrar nada no mueve nada
+        k.mx = 8 * 16 + 8; k.my = 8 * 16 + 8; k.placeHeld = true;
+        e2.Step(k);
+        CHECK(e2.def().spawnCol[0] == 5 && e2.def().spawnRow[0] == 5);
+    }
+    // puntas de un solo mosaico: se guardan con las letras G a N y el motor arma el mosaico en la punta correcta
+    {
+        app::LevelDef d = app::BlankLevelDef(false);
+        for (int i = 0; i < 8; ++i) d.cells[2 + i][3] = static_cast<uint8_t>(16 + i);
+        app::LevelDef back;
+        CHECK(app::LevelDefFromText(app::LevelDefToText(d), back));
+        for (int i = 0; i < 8; ++i) CHECK_EQ(back.cells[2 + i][3], 16 + i);
+        nes::Battle::StageSpec spec;
+        u8 blocks[14][27];
+        u8 strip[27];
+        app::LevelDefToStage(back, blocks, strip, spec);
+        nes::Battle b;
+        b.SetWide(true);
+        b.SetStageSpec(spec);
+        b.SetLevel(1);
+        b.NewGame(1, 1);
+        b.LoadWideStage(blocks, strip);
+        for (int i = 0; i < 8; ++i) {
+            const int tile = i < 4 ? 0x0F : 0x10;
+            int found = 0, where = -1;
+            for (int q = 0; q < 4; ++q) {
+                const int tx = 3 * 2 + (q & 1), ty = (2 + i) * 2 + (q >> 1);
+                if (b.TileAt(tx, ty) == tile) { ++found; where = q; }
+            }
+            CHECK_EQ(found, 1);                                                // un solo mosaico
+            CHECK_EQ(where, i & 3);                                            // en la punta pedida
+        }
+    }
+    // los menus del editor con el mouse: pasar marca, el clic elige y el clic derecho vuelve
+    {
+        app::LevelEditor e4(app::LevelEditor::Target::Own);
+        Keys k;
+        k.menu = true;
+        e4.Step(k);
+        CHECK(!e4.InEditPage());
+        k = Keys{};
+        k.mx = 216; k.my = 54 + 18 * 6 + 4;                                    // "NIVEL NUEVO" (sin cambios: empieza otro)
+        e4.Step(k);                                                            // pasar el mouse no hace nada
+        CHECK(!e4.InEditPage());
+        k.place = true;
+        e4.Step(k);
+        CHECK(e4.InEditPage());                                                // "nivel nuevo" vuelve al mapa
+        k = Keys{};
+        k.menu = true;
+        e4.Step(k);
+        k = Keys{};
+        k.mx = 216; k.my = 54 + 4; k.place = true;                             // "CONTINUAR"
+        e4.Step(k);
+        CHECK(e4.InEditPage());
+        k = Keys{};
+        k.menu = true;
+        e4.Step(k);
+        k = Keys{};
+        k.mx = 216; k.my = 120; k.mouseRight = true; k.erase = true;           // clic derecho: atras
+        e4.Step(k);
+        CHECK(e4.InEditPage());
+    }
+    // la vista tiene lo necesario para dibujar la barra
+    app::EditorView view;
+    ed.BuildView(view);
+    CHECK(view.statusLines.size() == 3 && !view.blockLabel.empty() && !view.variantIds.empty());
+}
+
+void TestMovableBaseAndPlayers() {
+    std::printf("[editor] el puntero mueve el lugar de los jugadores y el aguila (la base); el motor los respeta\n");
+    // el puntero arrastra a un jugador y a la base
+    app::LevelEditor ed(app::LevelEditor::Target::Own);
+    using Keys = app::EditorKeys;
+    auto frame = [&](int mx, int my, bool place, bool held) { Keys k; k.mx = mx; k.my = my; k.place = place; k.placeHeld = held; ed.Step(k); };
+    for (int i = 0; i < 3; ++i) frame(100, 100, false, false);
+    for (int i = 0; i < 10; ++i) frame(431, 100, false, false);
+    frame(400, app::EditorRowY(7) + 4, true, false);                              // herramienta puntero
+    CHECK(ed.CurrentTool() == app::LevelEditor::Tool::Pointer);
+    for (int i = 0; i < 10; ++i) frame(300, 100, false, false);
+    CHECK_EQ(ed.def().playerCol[0], 11);
+    frame(11 * 16 + 8, 14 * 16 + 8, true, true);                                  // agarra al jugador 1
+    frame(4 * 16 + 8, 10 * 16 + 8, false, true);
+    frame(4 * 16 + 8, 10 * 16 + 8, false, false);
+    CHECK(ed.def().playerCol[0] == 4 && ed.def().playerRow[0] == 10);
+    frame(13 * 16 + 8, 14 * 16 + 8, true, true);                                  // el aguila (la base)
+    frame(20 * 16 + 8, 9 * 16 + 8, false, true);
+    frame(20 * 16 + 8, 9 * 16 + 8, false, false);
+    CHECK(ed.def().baseCol == 20 && ed.def().baseRow == 9);
+    // al arrastrar no se borra nada del camino: solo se despeja el bloque donde se suelta
+    {
+        app::LevelEditor e3(app::LevelEditor::Target::Own);
+        auto f3 = [&](int mx, int my, bool place, bool held) { Keys k; k.mx = mx; k.my = my; k.place = place; k.placeHeld = held; e3.Step(k); };
+        for (int i = 0; i < 3; ++i) f3(100, 100, false, false);
+        for (int i = 0; i < 10; ++i) f3(431, 100, false, false);
+        f3(400, app::EditorRowY(7) + 4, true, false);
+        for (int i = 0; i < 10; ++i) f3(300, 100, false, false);
+        auto& cells = e3.mutableDef().cells;
+        for (int c = 1; c <= 9; ++c) cells[8][c] = 4;                              // una hilera de ladrillo en el camino y en el destino
+        const int c0 = e3.def().spawnCol[0], r0 = e3.def().spawnRow[0];
+        f3(c0 * 16 + 8, r0 * 16 + 8, true, true);
+        for (int c = 2; c <= 8; ++c) f3(c * 16 + 8, 8 * 16 + 8, false, true);      // pasa por encima de la hilera
+        for (int c = 2; c <= 7; ++c) CHECK_EQ(e3.def().cells[8][c], 4);            // el camino queda intacto
+        CHECK_EQ(e3.def().cells[8][8], 4);                                         // y el destino tambien hasta soltar
+        f3(8 * 16 + 8, 8 * 16 + 8, false, false);                                  // suelta
+        CHECK(e3.def().spawnCol[0] == 8 && e3.def().spawnRow[0] == 8);
+        CHECK_EQ(e3.def().cells[8][8], 13);                                        // el bloque donde quedo se despeja
+        for (int c = 1; c <= 7; ++c) CHECK_EQ(e3.def().cells[8][c], 4);
+    }
+    // la base no se puede llevar sobre un jugador ni fuera del mapa
+    frame(4 * 16 + 8, 10 * 16 + 8, true, true);                                   // agarra al jugador 1 otra vez
+    frame(20 * 16 + 8, 9 * 16 + 8, false, true);                                  // sobre la base: no se mueve
+    frame(20 * 16 + 8, 9 * 16 + 8, false, false);
+    CHECK(ed.def().playerCol[0] == 4 && ed.def().playerRow[0] == 10);
+    // se guarda y se lee
+    app::LevelDef back;
+    CHECK(app::LevelDefFromText(app::LevelDefToText(ed.def()), back));
+    CHECK(back.baseCol == 20 && back.baseRow == 9 && back.playerCol[0] == 4 && back.playerRow[0] == 10 && back.playerCol[1] == 15);
+    // el motor: el aguila se dibuja en el lugar nuevo y los jugadores aparecen donde se pusieron
+    nes::Battle::StageSpec spec;
+    u8 blocks[14][27];
+    u8 strip[27];
+    app::LevelDefToStage(back, blocks, strip, spec);
+    nes::Battle b;
+    b.SetWide(true);
+    b.SetStageSpec(spec);
+    b.SetLevel(1);
+    b.NewGame(2, 1);
+    b.LoadWideStage(blocks, strip);
+    b.StartStage();
+    CHECK((b.TileAt(2 * 20, 2 * 9) & 0x7C) == 0x48);                              // el aguila
+    CHECK((b.TileAt(2 * 13, 2 * 14) & 0x7C) != 0x48);                             // y ya no esta en el lugar de siempre
+    int wall = 0;                                                                 // el muro de ladrillo alrededor (6 x 4 mosaicos)
+    for (int ty = 16; ty < 20; ++ty) for (int tx = 38; tx < 44; ++tx) wall += b.TileAt(tx, ty) != 0 ? 1 : 0;
+    CHECK(wall >= 12);
+    for (int f = 0; f < 140; ++f) b.RunFrame();
+    CHECK(b.TankX(0) == 4 * 16 + 8 && b.TankY(0) == 10 * 16 + 8);
+    CHECK(b.TankX(1) == 15 * 16 + 8 && b.TankY(1) == 14 * 16 + 8);
+    CHECK(!b.GameOver());
+    CHECK(b.GetStageSpec().baseCol == 20 && b.GetStageSpec().baseRow == 9);
+}
+
 void TestUpdater() {
     std::printf("[actualizaciones] comparar versiones, leer los releases (pc-vX / android-vX) y elegir el instalador o el APK\n");
     CHECK_EQ(app::CompareVersions("1.0.0", "1.0.0"), 0);
@@ -4176,6 +4405,8 @@ int main() {
     TestRoyale();
     TestNewItems();
     TestUpdater();
+    TestMovableBaseAndPlayers();
+    TestEditorSidebar();
     TestCannons();
     TestDifficultyRulesAndContinues();
     TestGhostWalls();

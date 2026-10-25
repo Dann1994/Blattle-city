@@ -266,7 +266,7 @@ struct Lan::Impl {
 // La version del programa para el juego en red: tiene que ser la misma en Windows y en Android (se compilan en momentos distintos),
 // asi que es una constante que se cambia a mano cada vez que cambia la simulacion o el protocolo.
 std::string Lan::BuildId() {
-    return "BCNES-2026.10.24-allyai";
+    return "BCNES-2026.10.26-v106";
 }
 
 Lan::Lan(uint16_t port) : impl_(new Impl) {

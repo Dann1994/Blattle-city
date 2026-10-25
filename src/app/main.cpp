@@ -28,6 +28,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <filesystem>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -46,6 +47,14 @@
 #include "lobby.h"
 #include "updater.h"
 #include "voice.h"
+
+// El chat de voz (voice.cpp, mic_win.cpp, mic_android.cpp y los mensajes de la sala) queda guardado pero apagado: sin opcion en la configuracion, sin
+// microfono ni indicador. Para volver a probarlo, ponerlo en true.
+constexpr bool kVoiceChatEnabled = false;
+
+#ifdef __ANDROID__
+namespace app { void AndroidEnterImmersive(); }      // (updater_android.cpp) esconde la barra de navegacion de Android
+#endif
 #include "version.h"
 #include "renderer.h"
 #include "samples.h"
@@ -718,10 +727,11 @@ public:
             hiScore_ = std::max(hiScore_, flow_->hiScore());
             if (g_cfg.hiScore != hiScore_) { g_cfg.hiScore = hiScore_; SaveConfig(); }
         }
+        const bool fromGame = scene_ == Scene::Game || scene_ == Scene::Pause || scene_ == Scene::LateJoin;
         scene_ = Scene::Title;
         menuIndex_ = 0;
         showHelp_ = false;
-        titleScroll_ = 240;
+        titleScroll_ = fromGame ? 240 : 0;          // el titulo sube desde abajo al volver de una partida; al volver de un menu aparece directo
     }
 
     // Royale: los lugares de la IA toman los colores que no usa ninguna persona.
@@ -808,7 +818,7 @@ public:
             case Scene::VsMenu: return 7;
             case Scene::DiffMenu: return 5;
             case Scene::CustomMenu: return 8;
-            case Scene::Settings: return 10;
+            case Scene::Settings: return kVoiceChatEnabled ? 10 : 9;
             case Scene::UpdateCheck: return 1;
             case Scene::UpdatePrompt: return 2;
             case Scene::UpdateDownload: return 1;
@@ -829,8 +839,8 @@ public:
             case Scene::Title: scene_ = Scene::ConfirmExit; menuIndex_ = 0; break;            // Atras en el titulo: preguntar si se sale
             case Scene::ConfirmExit: scene_ = Scene::Title; menuIndex_ = 3; break;
             case Scene::UpdateCheck: scene_ = Scene::Title; menuIndex_ = 0; break;
-            case Scene::UpdatePrompt: scene_ = updateReturn_; menuIndex_ = updateReturn_ == Scene::Settings ? 8 : 0; break;
-            case Scene::UpdateDownload: updater_.Cancel(); scene_ = updateReturn_; menuIndex_ = updateReturn_ == Scene::Settings ? 8 : 0; break;
+            case Scene::UpdatePrompt: scene_ = updateReturn_; menuIndex_ = updateReturn_ == Scene::Settings ? (kVoiceChatEnabled ? 8 : 7) : 0; break;
+            case Scene::UpdateDownload: updater_.Cancel(); scene_ = updateReturn_; menuIndex_ = updateReturn_ == Scene::Settings ? (kVoiceChatEnabled ? 8 : 7) : 0; break;
             case Scene::Settings: scene_ = settingsReturn_; menuIndex_ = settingsReturn_ == Scene::Pause ? 1 : 2; break;
             case Scene::KeysPlayer: scene_ = Scene::Settings; menuIndex_ = 0; break;
             case Scene::KeysList: scene_ = Scene::KeysPlayer; menuIndex_ = keysPlayer_; break;
@@ -1470,8 +1480,8 @@ public:
             case Scene::Settings:
                 if (index == 0) { scene_ = Scene::KeysPlayer; menuIndex_ = 0; }
                 else if (index == 1) { scene_ = Scene::PadSettings; menuIndex_ = 0; }
-                else if (index >= 2 && index <= 7) ChangeSetting(index);
-                else if (index == 8) { manualCheck_ = true; installLaunched_ = false; updater_.StartCheck(); }      // buscar ahora
+                else if (index >= 2 && index <= (kVoiceChatEnabled ? 7 : 6)) ChangeSetting(index);
+                else if (index == (kVoiceChatEnabled ? 8 : 7)) { manualCheck_ = true; installLaunched_ = false; updater_.StartCheck(); }      // buscar ahora
                 else GoBack();
                 break;
             case Scene::UpdateCheck:
@@ -1529,7 +1539,7 @@ public:
                 g_cfg.turbo = !g_cfg.turbo;
             } else if (index == 6) {
                 g_cfg.autoUpdate = !g_cfg.autoUpdate;
-            } else if (index == 7) {
+            } else if (index == 7 && kVoiceChatEnabled) {
                 g_cfg.voiceChat = !g_cfg.voiceChat;
             }
         } else if (scene_ == Scene::PadSettings && index == 3) {
@@ -1594,6 +1604,8 @@ public:
             for (int s = 1; s <= app::kOwnSlots; ++s) ev.slotState.push_back(OwnIsPlayable(s) ? 1 : (app::OwnSlotHasFile(s) ? 2 : 0));
             app::LevelDef d;
             if (app::LoadOwnLevelDef(ownSel_, d)) {
+                ev.hasPreview = true;
+                ev.preview = d;
                 ev.slotInfo = "CASILLERO " + std::to_string(ownSel_) + ": " + (d.versus ? "BATALLA VS (SE JUEGA EN SU MODO)" : (d.boss ? "ESPECIAL" : "NORMAL")) + ", DIF " + std::to_string(d.tier + 1);
             } else {
                 ev.slotInfo = "CASILLERO " + std::to_string(ownSel_) + ": VACÍO (SE ARMAN EN CONSTRUCCIÓN)";
@@ -1876,7 +1888,8 @@ public:
                            std::string("SONIDO: ") + (g_useSamples ? "REMASTERIZADO" : "ORIGINAL"),
                            std::string("PANTALLA COMPLETA: ") + yesNo[IsWindowState(FLAG_BORDERLESS_WINDOWED_MODE) ? 1 : 0],
                            std::string("TURBO: ") + yesNo[g_cfg.turbo ? 1 : 0], std::string("ACTUALIZACIÓN AUTOMÁTICA: ") + yesNo[g_cfg.autoUpdate ? 1 : 0],
-                           std::string("CHAT DE VOZ: ") + yesNo[g_cfg.voiceChat ? 1 : 0], "BUSCAR ACTUALIZACIONES", "VOLVER"};
+                           "BUSCAR ACTUALIZACIONES", "VOLVER"};
+                if (kVoiceChatEnabled) v.items.insert(v.items.begin() + 7, std::string("CHAT DE VOZ: ") + yesNo[g_cfg.voiceChat ? 1 : 0]);
                 v.note = UpdateStatusText();
                 v.footer = ChangeHint();
                 break;
@@ -1950,6 +1963,11 @@ public:
         if (battle_->IsBossLevel()) hud.introSubtitle = "DESTRUYE LA BASE ENEMIGA";
         if (vsMode_) hud.introSubtitle = royale_ ? (royaleOpt_ == 0 ? "QUEDA UNO SOLO: " + std::to_string(vsLives_) + " VIDAS CADA UNO" : "GANA QUIEN MÁS TANQUES DESTRUYE") : "DESTRUYE EL ÁGUILA RIVAL";
         hud.paused = battle_->R(nes::ram_pause_flag) != 0;
+        hud.hideHud = g_cfg.hideHud;
+        if (netGame_) {                                                               // en red, el nombre de cada jugador real sobre su tanque
+            for (size_t i = 0; i < lan_.Players().size() && i < 8; ++i)
+                if (!battle_->IsBot(static_cast<int>(i)) && i < lan_.Owners().size() && lan_.Owners()[i] >= 0) hud.playerNames[i] = lan_.Players()[i];
+        }
         hud.overlay = showHelp_;
         hud.leftLines = {
             "TECLAS - ESC",
@@ -1966,7 +1984,7 @@ public:
             "F1 CASCO",
             "F2 RELOJ",
             "F3 PALA",
-            "F4 ESTRELLA",
+            "F4 PANTALLA COMPLETA",
             "F5 GRANADA",
             "F6 TANQUE",
             "F7 PISTOLA",
@@ -2073,6 +2091,15 @@ public:
             else if (k == '4') { updater_.DebugForce(S::Failed, "1.1.0", 0, "LA DESCARGA QUEDÓ INCOMPLETA"); scene_ = Scene::UpdateDownload; }
             else if (k == '5') { updater_.DebugForce(S::UpToDate, ""); scene_ = Scene::UpdateCheck; }
             else if (k == '6') { updater_.DebugForce(S::Available, "1.1.0"); scene_ = Scene::Title; titleScroll_ = 0; }
+        } else if (name.size() > 1 && (name[0] == 'x' || name[0] == 'X') && std::isdigit(static_cast<unsigned char>(name[1]))) {     // prueba: x216_130 = clic en ese punto (X = clic derecho)
+            int px = 0, py = 0;
+            std::sscanf(name.c_str() + 1, "%d_%d", &px, &py);
+            std::vector<uint8_t> tmp;
+            Render(tmp);                                                                    // (para que esten al dia los lugares donde se puede tocar)
+            PointerHover(px, py);
+            PointerClick(px, py, name[0] == 'X');
+        } else if (name == "hud") {                              // prueba: ocultar / mostrar la informacion de la pantalla (no se guarda)
+            g_cfg.hideHud = !g_cfg.hideHud;
         } else if (name == "pad") {
             usingPad_ = true;                                  // simula que se esta usando el mando (textos de ayuda)
         } else if (name == "win") {                          // simula ganar el nivel con algunos enemigos destruidos
@@ -2146,11 +2173,51 @@ public:
     }
     bool WantsQuit() const { return quit_; }                 // se eligio SALIR y se confirmo
     bool InEditor() const { return scene_ == Scene::Editor && editor_; }
+    // ---- mouse y dedo: lo que se toca (en pixeles de la pantalla del juego) se compara con los lugares que dibujo la ultima pantalla ----
+    // Pasar el mouse por una opcion la marca y el clic la elige; el clic derecho vuelve atras.
+    bool PointerHover(int lx, int ly) {
+        if (TextEntry() || capture_ != Capture::None || !PointerScene()) return false;
+        if (scene_ == Scene::Lobby || scene_ == Scene::OwnLevels || scene_ == Scene::LanHost || scene_ == Scene::LanJoined || scene_ == Scene::Game) return false;
+        for (const app::HitRect& h : renderer_.Hits()) {
+            if (lx >= h.x0 && lx < h.x1 && ly >= h.y0 && ly < h.y1) { menuIndex_ = h.id; return true; }
+        }
+        return false;
+    }
+    bool PointerClick(int lx, int ly, bool right) {
+        if (TextEntry() || capture_ != Capture::None) return false;
+        if (scene_ == Scene::Game && flow_ && flow_->mode() == app::GameFlow::Mode::ContinuePrompt) { if (!right) pulseStart_ = true; return true; }
+        if (!PointerScene()) return false;
+        if (right) { MenuEvent(Ev::Back, 0); return true; }
+        for (const app::HitRect& h : renderer_.Hits()) {
+            if (lx < h.x0 || lx >= h.x1 || ly < h.y0 || ly >= h.y1) continue;
+            if (scene_ == Scene::Lobby || scene_ == Scene::LanHost || scene_ == Scene::LanJoined) {
+                if (h.id == 100) MenuEvent(Ev::Start, 0);
+                else if (h.id == 101) MenuEvent(Ev::Back, 0);
+                else MenuEvent(Ev::Fire, h.id);
+            } else if (scene_ == Scene::OwnLevels) {
+                ownSel_ = h.id;
+                MenuEvent(Ev::Accept, 0);
+            } else {
+                menuIndex_ = h.id;
+                MenuEvent(Ev::Accept, 0);
+            }
+            return true;
+        }
+        return false;
+    }
+    bool PointerScene() const {            // pantallas con opciones que se pueden tocar
+        switch (scene_) {
+            case Scene::Editor: case Scene::Construction: case Scene::NameEntry: case Scene::CodeEntry: case Scene::LateJoin: return false;
+            case Scene::Game: return flow_ && flow_->mode() == app::GameFlow::Mode::ContinuePrompt;
+            default: return true;
+        }
+    }
     void EditorStep(const app::EditorKeys& keys) {
         if (!editor_) return;
         editor_->Step(keys);
         if (editor_->WantsExit()) ReturnToTitle();
     }
+    bool EditorHidesCursor() const { return editor_ && scene_ == Scene::Editor && editor_->WantsHiddenMouse(); }      // el bloque elegido hace de puntero
     void SetWide(bool wide) { wide_ = wide; }
     void SetLevel(int level) { level_ = level < 0 ? 0 : (level > app::kLevelCount ? app::kLevelCount : level); }
     int level() const { return level_; }
@@ -2397,6 +2464,9 @@ int RunWindow(TestScreen& screen, double selfTestSeconds, const std::string& ass
 #ifndef __ANDROID__
     if (g_cfg.fullscreen) ToggleBorderlessWindowed();                          // se recuerda la pantalla completa
 #endif
+#ifdef __ANDROID__
+    app::AndroidEnterImmersive();
+#endif
     if (!g_touch.Enabled()) {
         Image icon = LoadImage((assetsDir + "icon.png").c_str());              // el tanque amarillo
         if (icon.data) {
@@ -2418,8 +2488,8 @@ int RunWindow(TestScreen& screen, double selfTestSeconds, const std::string& ass
     // ---- chat de voz ----
     app::VoiceChat voice;
     SetAudioStreamBufferSizeDefault(1024);
-    AudioStream voiceStream = LoadAudioStream(app::kVoiceRate, 16, 1);
-    PlayAudioStream(voiceStream);
+    AudioStream voiceStream{};
+    if (kVoiceChatEnabled) { voiceStream = LoadAudioStream(app::kVoiceRate, 16, 1); PlayAudioStream(voiceStream); }
     double voiceRetry = 0;
     SetWindowMinSize(432, 240);
     SetExitKey(KEY_NULL);
@@ -2437,6 +2507,12 @@ int RunWindow(TestScreen& screen, double selfTestSeconds, const std::string& ass
 
     while (!WindowShouldClose() && !screen.WantsQuit() && !(selfTestSeconds > 0 && GetTime() > selfTestSeconds)) {
         ServiceRumbleTimers();
+#ifdef __ANDROID__
+        {
+            static double nextImmersive = 0;                                   // el sistema puede devolver las barras (al volver a la app, por ejemplo)
+            if (GetTime() >= nextImmersive) { app::AndroidEnterImmersive(); nextImmersive = GetTime() + 1.5; }
+        }
+#endif
         // ---- dispositivo en uso: los textos de ayuda cambian entre teclado y mando ----
         const int keyNow = GetKeyPressed();
         const int padNow = GetGamepadButtonPressed();
@@ -2452,7 +2528,7 @@ int RunWindow(TestScreen& screen, double selfTestSeconds, const std::string& ass
         }
         {   // ---- chat de voz: se prende solo en una sala o partida en red ----
             app::Lan* vl = g_noUpdate ? nullptr : screen.VoiceLan();
-            if (vl && g_cfg.voiceChat) {
+            if (kVoiceChatEnabled && vl && g_cfg.voiceChat) {
                 if (!voice.Active() || (!voice.MicAvailable() && GetTime() > voiceRetry)) {
                     voice.Start();                                             // (en Android la primera vez pide el permiso; se reintenta cada 3 s)
                     voiceRetry = GetTime() + 3.0;
@@ -2468,16 +2544,38 @@ int RunWindow(TestScreen& screen, double selfTestSeconds, const std::string& ass
                 voice.Stop();
                 voice.ClearSpeakers();
             }
-            while (IsAudioStreamProcessed(voiceStream)) {
+            while (kVoiceChatEnabled && IsAudioStreamProcessed(voiceStream)) {
                 int16_t out[512];
                 voice.Mix(out, 512);
                 UpdateAudioStream(voiceStream, out, 512);
             }
         }
+        if (!screen.InEditor() && IsCursorHidden()) ShowCursor();                  // fuera del editor el puntero vuelve
         g_touch.SetExtras(screen.InEditor());
         g_touch.Update(GetScreenWidth(), GetScreenHeight(), screen.TextEntry());
         const bool touchBack = g_touch.Pressed(app::TouchControls::kB) || IsKeyPressed(KEY_BACK);       // B en pantalla o la tecla Atras de Android
         const bool padStartPressed = AnyPadPressed(g_cfg.padStart) || g_touch.Pressed(app::TouchControls::kStart);
+
+        // ---- mouse y dedo en los menus: elegir una opcion tocandola ----
+        {
+            const float sw = static_cast<float>(GetScreenWidth()), sh = static_cast<float>(GetScreenHeight());
+            const float scale = std::min(sw / app::kScreenW, sh / app::kScreenH);
+            const Vector2 m = GetMousePosition();
+            const int lx = static_cast<int>((m.x - (sw - app::kScreenW * scale) / 2) / scale), ly = static_cast<int>((m.y - (sh - app::kScreenH * scale) / 2) / scale);
+            const bool inside = scale > 0 && lx >= 0 && ly >= 0 && lx < app::kScreenW && ly < app::kScreenH;
+            if (inside && !screen.InEditor()) {
+                const Vector2 d = GetMouseDelta();
+                if (d.x != 0 || d.y != 0) screen.PointerHover(lx, ly);
+                if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) screen.PointerHover(lx, ly), screen.PointerClick(lx, ly, false);
+                else if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) screen.PointerClick(lx, ly, true);
+            }
+        }
+
+        // ---- Select (mando, pantalla tactil) o Tab: ocultar / mostrar la informacion de la pantalla al jugar ----
+        if (screen.InGame() && (AnyPadPressed(GAMEPAD_BUTTON_MIDDLE_LEFT) || g_touch.Pressed(app::TouchControls::kSelect) || IsKeyPressed(KEY_TAB))) {
+            g_cfg.hideHud = !g_cfg.hideHud;
+            SaveConfig();
+        }
 
         // ---- menus ----
         if (!screen.InGame()) {
@@ -2494,6 +2592,7 @@ int RunWindow(TestScreen& screen, double selfTestSeconds, const std::string& ass
                 extra.start = g_touch.Pressed(TC::kStart);
                 screen.EditorStep(app::GatherEditorKeys((sw - app::kScreenW * scale) / 2, (sh - app::kScreenH * scale) / 2, scale,
                                                         g_touch.Enabled() ? &extra : nullptr));
+                if (screen.EditorHidesCursor() != IsCursorHidden()) { if (screen.EditorHidesCursor()) HideCursor(); else ShowCursor(); }
             } else if (screen.TextEntry()) {                                          // escribiendo el nombre de red
                 for (int cp = GetCharPressed(); cp > 0; cp = GetCharPressed()) screen.TypeChar(cp);
                 for (int c : g_touch.Typed()) screen.TypeChar(c);                      // teclado en pantalla
@@ -2560,7 +2659,7 @@ int RunWindow(TestScreen& screen, double selfTestSeconds, const std::string& ass
                 muted = !muted;
                 SetMasterVolume(muted ? 0.0f : 1.0f);
             }
-            if (IsKeyPressed(KEY_F11) || ((IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT)) && IsKeyPressed(KEY_ENTER))) {
+            if (IsKeyPressed(KEY_F11) || IsKeyPressed(KEY_F4) || ((IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT)) && IsKeyPressed(KEY_ENTER))) {
                 ToggleFullscreen();
             }
             acc = 0.0;
@@ -2575,7 +2674,7 @@ int RunWindow(TestScreen& screen, double selfTestSeconds, const std::string& ass
         }
         for (int i = 0; i < 7 && dbg; ++i) {
             const bool ctrl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
-            if (IsKeyPressed(KEY_F1 + i) && (!ctrl || i < 5)) screen.Battle().DebugSpawnBonus(ctrl ? 8 + i : i);   // con CTRL: los items nuevos (8 a 12)
+            if (IsKeyPressed(KEY_F1 + i) && (!ctrl || i < 5) && i != 3) screen.Battle().DebugSpawnBonus(ctrl ? 8 + i : i);   // con CTRL: los items nuevos (8 a 12)
         }
         if (dbg && IsKeyPressed(KEY_F12)) screen.Battle().DebugSpawnBonus(7);
         for (int i = 0; i < 3 && dbg; ++i) {
@@ -2607,7 +2706,7 @@ int RunWindow(TestScreen& screen, double selfTestSeconds, const std::string& ass
         if (dbg && IsKeyPressed(KEY_T)) screen.Reset(screen.players() % 4 + 1);
         if (dbg && IsKeyPressed(KEY_V)) screen.ToggleAutoWave();
         if (dbg && IsKeyPressed(KEY_H)) screen.CycleFriendlyFire();
-        if (IsKeyPressed(KEY_F11) || ((IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT)) && IsKeyPressed(KEY_ENTER))) {
+        if (IsKeyPressed(KEY_F11) || IsKeyPressed(KEY_F4) || ((IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT)) && IsKeyPressed(KEY_ENTER))) {
             ToggleFullscreen();                                        // Alt+Enter: pantalla completa
         }
 
@@ -2664,7 +2763,7 @@ int RunWindow(TestScreen& screen, double selfTestSeconds, const std::string& ass
         DrawTexturePro(tex, Rectangle{0, 0, static_cast<float>(app::kScreenW), static_cast<float>(app::kScreenH)},
                        Rectangle{(sw - dw) / 2, (sh - dh) / 2, dw, dh}, Vector2{0, 0}, 0.0f, WHITE);
         g_touch.Draw();
-        if (voice.Active()) {                                                 // boton / indicador del chat de voz (arriba a la izquierda; tocarlo silencia)
+        if (kVoiceChatEnabled && voice.Active()) {                            // boton / indicador del chat de voz (arriba a la izquierda; tocarlo silencia)
             const bool touch = g_touch.Enabled();
             const int fs = touch ? std::max(22, GetScreenHeight() / 20) : std::max(14, GetScreenHeight() / 34);
             const char* st = !voice.MicAvailable() ? "MIC: SIN MICROFONO" : (voice.Muted() ? "MIC: SILENCIADO" : (voice.TransmittingNow() ? "MIC: HABLANDO" : "MIC: ACTIVO"));
@@ -2689,7 +2788,7 @@ int RunWindow(TestScreen& screen, double selfTestSeconds, const std::string& ass
         EndDrawing();
     }
     voice.Stop();
-    UnloadAudioStream(voiceStream);
+    if (kVoiceChatEnabled) UnloadAudioStream(voiceStream);
     if (selfTestSeconds > 0) {
         std::printf("audio: %d cortes (underruns), %d descartes\n", g_ring.Underruns(), g_ring.Dropped());
     }
@@ -2783,6 +2882,14 @@ int RunLanAuto(TestScreen& screen, bool host, const std::string& name, int frame
             for (size_t k = 0; k < screen.LocalPlayers().size() && k < 4; ++k) screen.SetPad(static_cast<int>(k), script(screen.LocalPlayers()[k], screen.NetFrame()));
             screen.Step();
             if (paceMs > 0) std::this_thread::sleep_for(std::chrono::milliseconds(paceMs));         // ritmo de pruebas: mas lento que el maximo
+            static bool gameShotTaken = false;
+            if (!shotFile.empty() && !gameShotTaken && screen.NetFrame() >= 230) {          // captura ya en juego (se ven, por ejemplo, los nombres sobre los tanques)
+                std::vector<uint8_t> rgba2;
+                screen.Render(rgba2);
+                Image img{rgba2.data(), app::kScreenW, app::kScreenH, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+                ExportImage(img, (shotFile + ".juego.png").c_str());
+                gameShotTaken = true;
+            }
             if (!screen.NetGame()) { result = "SE CORTO LA PARTIDA en el cuadro " + std::to_string(screen.NetFrame()) + " (" + screen.LanStatusText() + ")"; break; }
             if (screen.NetFrame() >= frames) {
                 char buf[128];
@@ -2935,6 +3042,32 @@ int main(int argc, char** argv) {
         app::SetLevelRoot((slash == std::string::npos ? std::string() : exe.substr(0, slash + 1)) + "niveles/");     // niveles hechos a mano
 #ifdef __ANDROID__
         app::SetLevelRoot(androidBase + "niveles/");
+        // Los niveles de la campania editados vienen dentro del APK: al abrir una version nueva se copian a la carpeta de niveles.
+        {
+            const std::string dir = androidBase + "niveles/principal/";
+            const std::string marker = dir + "version.txt";
+            std::string have;
+            if (FileExists(marker.c_str())) { char* t = LoadFileText(marker.c_str()); if (t) { have = t; UnloadFileText(t); } }
+            if (have != BCNES_VERSION) {
+                int n = 0;
+                unsigned char* idx = LoadFileData("niveles_campana/indice.txt", &n);
+                if (idx) {
+                    std::filesystem::create_directories(dir);
+                    for (const auto& e : std::filesystem::directory_iterator(dir)) if (e.path().extension() == ".bcl") std::filesystem::remove(e.path());
+                    std::istringstream is(std::string(reinterpret_cast<char*>(idx), static_cast<size_t>(n)));
+                    std::string name;
+                    while (std::getline(is, name)) {
+                        while (!name.empty() && (name.back() == '\r' || name.back() == ' ')) name.pop_back();
+                        if (name.empty()) continue;
+                        int sz = 0;
+                        unsigned char* d = LoadFileData(("niveles_campana/" + name).c_str(), &sz);
+                        if (d) { SaveFileData((dir + name).c_str(), d, sz); UnloadFileData(d); }
+                    }
+                    UnloadFileData(idx);
+                    SaveFileText(marker.c_str(), const_cast<char*>(BCNES_VERSION));
+                }
+            }
+        }
 #endif
     }
     if (updateCheck > 0) {

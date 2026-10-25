@@ -172,7 +172,8 @@ void Battle::Sub_D635_calculate_nametable_attribute(int tileX, int tileY, u8 att
 void Battle::Sub_D80B_write_block_tiles_and_attribute(u8 tileId, int px, int py) {
     const int tx = WX(px) >> 3;
     const int ty = (py & 0xFF) >> 3;
-    const int idx = tileId < 16 ? tileId : 0;                             // (las tablas de la ROM llegan al id 15)
+    const bool corner = wide_ && tileId >= kCornerBrickBase && tileId < kCornerBrickBase + 8;     // un solo mosaico de ladrillo o de hierro en una punta del bloque
+    const int idx = corner ? (tileId < kCornerSteelBase ? 4 : 9) : (tileId < 16 ? tileId : 0);   // (las tablas de la ROM llegan al id 15)
     Sub_D635_calculate_nametable_attribute(tx, ty, tbl_DABB_nametable_attribute[idx]);
 
     const uint16_t p = Sub_D5FB_calculate_pointer(tx & 0xFE, ty & 0xFE);
@@ -181,10 +182,17 @@ void Battle::Sub_D80B_write_block_tiles_and_attribute(u8 tileId, int px, int py)
     const bool lava = wide_ && tileId == kLavaBlockId;                    // lava: lo mismo
     const u8 own = lava ? kLavaTile : kSandTile;
     const bool special = sand || lava;
-    Sub_D784_write_tile(p, special ? own : tbl_DACB_block_data[x4 + 0]);
-    Sub_D784_write_tile(p + 1, special ? own : tbl_DACB_block_data[x4 + 1]);
-    Sub_D784_write_tile(p + Stride(), special ? own : tbl_DACB_block_data[x4 + 2]);
-    Sub_D784_write_tile(p + Stride() + 1, special ? own : tbl_DACB_block_data[x4 + 3]);
+    const int cornerTile = corner ? (tileId < kCornerSteelBase ? 0x0F : 0x10) : 0;
+    const int cornerQ = corner ? (tileId - kCornerBrickBase) & 3 : -1;                // 0 arriba izquierda, 1 arriba derecha, 2 abajo izquierda, 3 abajo derecha
+    auto tileOf = [&](int k) -> u8 {
+        if (special) return own;
+        if (corner) return static_cast<u8>(k == cornerQ ? cornerTile : 0);
+        return tbl_DACB_block_data[x4 + k];
+    };
+    Sub_D784_write_tile(p, tileOf(0));
+    Sub_D784_write_tile(p + 1, tileOf(1));
+    Sub_D784_write_tile(p + Stride(), tileOf(2));
+    Sub_D784_write_tile(p + Stride() + 1, tileOf(3));
 }
 
 // sub_D9E1_calculate_decimal_number (00:D9E1): A (BCD de 2 digitos) a ram_com_dec_number.
@@ -275,13 +283,13 @@ void Battle::Sub_E420_change_tank_status(int x, u8 status) {
 // Paleta de los cuadrantes 2x2 de la zona de la base en el campo ancho (en la
 // ROM son bytes de atributos sueltos: $07F3 y $07F4). col0 = primera columna de la base.
 void Battle::SetBaseQuadrantPalette(int quadX, int quadY, u8 pal) {
-    Sub_D635_calculate_nametable_attribute(12 + ShiftX() / 8 + quadX * 2, 24 + ShiftY() / 8 + quadY * 2, pal);
+    Sub_D635_calculate_nametable_attribute(12 + BaseShiftX() / 8 + quadX * 2, 24 + BaseShiftY() / 8 + quadY * 2, pal);
 }
 
 // sub_CAF5_draw_default_base (00:CAF5)
 void Battle::Sub_CAF5_draw_default_base() {
-    const int c = 12 + ShiftX() / 8;
-    const int rs = ShiftY() / 8;
+    const int c = 12 + BaseShiftX() / 8;
+    const int rs = BaseShiftY() / 8;
     Sub_D6B3_fill_buffer_with_tiles(c, 24 + rs, tbl_D36D_tiles___default_base___line1);
     Sub_D6B3_fill_buffer_with_tiles(c, 25 + rs, tbl_D374_tiles___default_base___line2);
     Sub_D6B3_fill_buffer_with_tiles(c, 26 + rs, tbl_D37B_tiles___default_base___line3);
@@ -300,8 +308,8 @@ void Battle::Sub_CAF5_draw_default_base() {
 
 // sub_CB5D_draw_default_eagle (00:CB5D)
 void Battle::Sub_CB5D_draw_default_eagle() {
-    const int c = 14 + ShiftX() / 8;
-    const int rs = ShiftY() / 8;
+    const int c = 14 + BaseShiftX() / 8;
+    const int rs = BaseShiftY() / 8;
     Sub_D6B3_fill_buffer_with_tiles(c, 26 + rs, tbl_D3A5_tiles___default_eagle___line1);
     Sub_D6B3_fill_buffer_with_tiles(c, 27 + rs, tbl_D3A8_tiles___default_eagle___line2);
     if (wide_) {
@@ -313,8 +321,8 @@ void Battle::Sub_CB5D_draw_default_eagle() {
 
 // sub_CB9E_draw_protected_base (00:CB9E): base con el muro de acero (pala).
 void Battle::Sub_CB9E_draw_protected_base() {
-    const int c = 12 + ShiftX() / 8;
-    const int rs = ShiftY() / 8;
+    const int c = 12 + BaseShiftX() / 8;
+    const int rs = BaseShiftY() / 8;
     Sub_D6B3_fill_buffer_with_tiles(c, 24 + rs, tbl_D389_tiles___protected_base___line1);
     Sub_D6B3_fill_buffer_with_tiles(c, 25 + rs, tbl_D390_tiles___protected_base___line2);
     Sub_D6B3_fill_buffer_with_tiles(c, 26 + rs, tbl_D397_tiles___protected_base___line3);
@@ -334,8 +342,8 @@ void Battle::Sub_CB9E_draw_protected_base() {
 
 // sub_CC08_draw_destroyed_eagle (00:CC08)
 void Battle::Sub_CC08_draw_destroyed_eagle() {
-    const int c = 14 + ShiftX() / 8;
-    const int rs = ShiftY() / 8;
+    const int c = 14 + BaseShiftX() / 8;
+    const int rs = BaseShiftY() / 8;
     Sub_D6B3_fill_buffer_with_tiles(c, 26 + rs, tbl_D3AB_tiles___destroyed_eagle___line1);
     Sub_D6B3_fill_buffer_with_tiles(c, 27 + rs, tbl_D3AE_tiles___destroyed_eagle___line2);
 }
@@ -1127,8 +1135,8 @@ void Battle::Status_FollowTarget(int x, u8 status) {
         DESTX = guardX_[x];                      // niveles del aguila enemiga: se queda cerca de ella
         R(ram_enemy_destination_Y) = static_cast<u8>(guardY_[x]);
     } else {
-        DESTX = 0x78 + ShiftX();                 // el aguila
-        R(ram_enemy_destination_Y) = static_cast<u8>(0xD8 + ShiftY());
+        DESTX = 0x78 + BaseShiftX();             // el aguila
+        R(ram_enemy_destination_Y) = static_cast<u8>(0xD8 + BaseShiftY());
     }
     TFLAGS(x) = Sub_DDA2_direction_to_target(x);
 }
@@ -1326,6 +1334,10 @@ void Battle::Sub_E363_tank_spawn_handler(int x) {
         static const int kWidePlayerX[4] = {0x78 + 96 - 0x20, 0x78 + 96 + 0x20, 0x78 + 96 - 0x30, 0x78 + 96 + 0x30};
         TPOSX(x) = wide_ ? kWidePlayerX[x & 3] : tbl_E47A_player_spawn_pos_X[x];
         TPOSY(x) = wide_ ? 0xD8 + ShiftY() : tbl_E47C_player_spawn_pos_Y[x];
+        if (wide_ && spec_.active && !spec_.versus && x < 4) {          // nivel hecho a mano: los lugares que puso el editor
+            TPOSX(x) = spec_.playerCol[x] * 16 + 8;
+            TPOSY(x) = spec_.playerRow[x] * 16 + 8;
+        }
         if (IsRoyale()) {                                // battle royale: cada uno en su punto de salida
             int col, row;
             RoyaleSpawnBlock(x, col, row);
@@ -1910,6 +1922,11 @@ void Battle::SetBlockTiles(int col, int row, u8 tile) {
     Sub_D784_write_tile(static_cast<uint16_t>(p + st + 1), tile);
 }
 
+int Battle::TileAt(int tx, int ty) const {
+    if (tx < 0 || ty < 0 || tx >= MapCols() || ty >= 34) return 0;
+    return M(Sub_D5FB_calculate_pointer(tx, ty)) & 0x7F;
+}
+
 bool Battle::RockAt(int tx, int ty) const {
     if (!wide_ || tx < 0 || ty < 0 || tx >= MapCols() || ty >= 34) return false;
     const int p = Sub_D5FB_calculate_pointer(tx, ty);
@@ -1957,7 +1974,7 @@ bool Battle::LavaForbidden(int col, int row) const {
         for (int t = 0; t < 2; ++t) if (std::abs(col - spec_.vsEagleCol[t]) <= 1 && std::abs(row - spec_.vsEagleRow[t]) <= 1) return true;
     } else if (IsBossLevel()) {
         if (std::abs(col - EagleCol()) <= 2 && std::abs(row - EagleRow()) <= 2) return true;
-    } else if (row >= 13 && col >= 10 && col <= 16) {
+    } else if (row >= BaseRow() - 1 && std::abs(col - BaseCol()) <= 3) {
         return true;                                                 // la base de los jugadores
     }
     return false;
@@ -2223,10 +2240,10 @@ void Battle::SpawnCannons() {
         R(ram_shovel_timer) = 0;
         Sub_CAF5_draw_default_base();                    // los ladrillos de siempre, enteros
     }
-    static const int kCol[kMaxCannons] = {12, 14};
+    const int kCol[kMaxCannons] = {BaseCol() - 1, BaseCol() + 1};
     for (int i = 0; i < kMaxCannons; ++i) {
         Cannon& cn = cannons_[i];
-        cn = Cannon{true, kCol[i], 14, i == 0 ? -1 : 1, kCannonHp, 0, 0};
+        cn = Cannon{true, kCol[i], BaseRow(), i == 0 ? -1 : 1, kCannonHp, 0, 0};
         const int x0 = cn.col * 16, y0 = cn.row * 16;
         for (int a = 0; a < 2; ++a)
             for (int b = 0; b < 2; ++b) Sub_D784_write_tile(PointerPx(x0 + a * 8, y0 + b * 8), con_block_type + 0x10);
@@ -2307,7 +2324,7 @@ void Battle::CannonsStep() {
             sh.x += sh.dx;
             sh.y += sh.dy;
             if (sh.x < 0 || sh.x >= MapCols() * 8 || sh.y < 8 || sh.y >= 240) { sh.on = false; break; }
-            if (sh.x >= 192 && sh.x < 240 && sh.y >= 208) continue;         // pasa sobre los ladrillos de la base sin romperlos (el tiro hacia arriba sale por encima del muro)
+            if (sh.x >= 192 + BaseDX() && sh.x < 240 + BaseDX() && sh.y >= 208 + BaseDY() && sh.y < 240 + BaseDY()) continue;         // pasa sobre los ladrillos de la base sin romperlos (el tiro hacia arriba sale por encima del muro)
             const uint16_t p = PointerPx(sh.x, sh.y);
             const u8 t = M(p) & 0x7F;
             if ((t & 0xFC) == 0xC8) { sh.on = false; break; }            // el aguila: nunca la toca
@@ -3637,8 +3654,8 @@ void Battle::SpawnExtraEnemies(int x) {
 
 // El aguila de los jugadores sin ningun muro alrededor (pala enemiga).
 void Battle::DrawBareBase() {
-    const int c = 12 + ShiftX() / 8;
-    const int r = 24 + ShiftY() / 8;
+    const int c = 12 + BaseShiftX() / 8;
+    const int r = 24 + BaseShiftY() / 8;
     for (int row = r; row < r + 4; ++row) {
         for (int col = c; col < c + 6; ++col) {
             M(Sub_D5FB_calculate_pointer(col, row)) = 0x00;
@@ -3834,16 +3851,16 @@ void Battle::Sub_E2A9_HQ_handler() {
     a -= 5;
     if (a < 0) a = -a;
     switch (a) {
-        case 1: Sub_E328_hq_sprite(0xF1, 0x78 + ShiftX(), 0xD8 + ShiftY()); break;
-        case 2: Sub_E328_hq_sprite(0xF5, 0x78 + ShiftX(), 0xD8 + ShiftY()); break;
-        case 3: Sub_E328_hq_sprite(0xF9, 0x78 + ShiftX(), 0xD8 + ShiftY()); break;
+        case 1: Sub_E328_hq_sprite(0xF1, 0x78 + BaseShiftX(), 0xD8 + BaseShiftY()); break;
+        case 2: Sub_E328_hq_sprite(0xF5, 0x78 + BaseShiftX(), 0xD8 + BaseShiftY()); break;
+        case 3: Sub_E328_hq_sprite(0xF9, 0x78 + BaseShiftX(), 0xD8 + BaseShiftY()); break;
         case 4:
         case 5: {
             R(ram_0069_00_or_10) = (a == 4) ? 0x00 : 0x10;
-            Sub_E328_hq_sprite(0xD1, 0x70 + ShiftX(), 0xD0 + ShiftY());        // sub_E33E: 4 piezas
-            Sub_E328_hq_sprite(0xD5, 0x80 + ShiftX(), 0xD0 + ShiftY());
-            Sub_E328_hq_sprite(0xD9, 0x70 + ShiftX(), 0xE0 + ShiftY());
-            Sub_E328_hq_sprite(0xDD, 0x80 + ShiftX(), 0xE0 + ShiftY());
+            Sub_E328_hq_sprite(0xD1, 0x70 + BaseShiftX(), 0xD0 + BaseShiftY());        // sub_E33E: 4 piezas
+            Sub_E328_hq_sprite(0xD5, 0x80 + BaseShiftX(), 0xD0 + BaseShiftY());
+            Sub_E328_hq_sprite(0xD9, 0x70 + BaseShiftX(), 0xE0 + BaseShiftY());
+            Sub_E328_hq_sprite(0xDD, 0x80 + BaseShiftX(), 0xE0 + BaseShiftY());
             break;
         }
         default:
@@ -4209,7 +4226,7 @@ u8 Battle::AllyAiButtons(int p) {
             int threat = -1, td = 1 << 20;
             for (int e = nPlayers_; e <= lastEnemy_; ++e) {
                 if (!hostile(e)) continue;
-                const int d = std::abs(TankX(e) - 216) + std::abs(TankY(e) - 232);
+                const int d = std::abs(TankX(e) - (216 + BaseDX())) + std::abs(TankY(e) - (232 + BaseDY()));
                 if (d < td) { td = d; threat = e; }
             }
             if (threat >= 0 && td < 150) { aiGoalC_[p] = TankX(threat) >> 4; aiGoalR_[p] = TankY(threat) >> 4; aiGoalT_[p] = 20; picked = true; }
@@ -4293,7 +4310,7 @@ u8 Battle::AllyAiButtons(int p) {
         if (!fire && ox >= 0 && LineOfFirePoint(p, ox, oy, 100)) fire = (rnd() % 3) == 0;
         if (!fire && (rnd() % 160) == 0) fire = true;
     }
-    if (!IsBossLevel() && AimsAtEagleAt(p, 13, 14, 1)) fire = false;
+    if (!IsBossLevel() && AimsAtEagleAt(p, BaseCol(), BaseRow(), 1)) fire = false;
     if (fire && ownerAlive && LineOfFirePoint(p, TankX(owner), TankY(owner), 140)) fire = breakWall;       // no le tira a su dueno
     static const u8 kDirBtn[4] = {con_btn_Up, con_btn_Left, con_btn_Down, con_btn_Right};
     u8 out = hold ? 0 : kDirBtn[dir & 3];                       // (quieto: sin botones de rumbo)
@@ -4309,7 +4326,7 @@ void Battle::Sub_AllyFire() {
     for (int x = allyBegin_; x <= lastTank_; ++x) {
         const u8 f = TFLAGS(x);
         if (!(f & 0x80) || f >= 0xE0) continue;
-        if (!IsBossLevel() && !IsVersus() && AimsAtEagleAt(x, 13, 14, 1)) continue;      // no le tiran a su propia aguila (ni a sus muros)
+        if (!IsBossLevel() && !IsVersus() && AimsAtEagleAt(x, BaseCol(), BaseRow(), 1)) continue;      // no le tiran a su propia aguila (ni a sus muros)
         const u8 roll = Sub_D44D_generate_random_number();
         bool inLine = false;
         const int e = NearestEnemy(x);
@@ -4346,7 +4363,7 @@ void Battle::SpawnAllies(int owner) {
             y = (cy + oy + 4) & ~7;
             x = x < 8 ? 8 : (x > 424 ? 424 : x);
             y = y < 24 ? 24 : (y > 0xE8 ? 0xE8 : y);
-            const bool onBase = !IsBossLevel() && !IsVersus() && std::abs(x - 216) < 24 && y > 200;
+            const bool onBase = !IsBossLevel() && !IsVersus() && std::abs(x - (216 + BaseDX())) < 24 && y > 200 + BaseDY();
             found = !onBase;
         }
         if (!found) break;

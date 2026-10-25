@@ -49,6 +49,7 @@ Source: "..\dist\BattleCityNES\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversio
 Source: "..\dist\BattleCityNES\level_editor.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\dist\BattleCityNES\LEEME.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\dist\BattleCityNES\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\BattleCityNES\niveles\principal\*"; DestDir: "{app}\niveles\principal"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
 ; todos los accesos llevan el icono del juego (el tanque amarillo, assets\icon.ico)

@@ -28,6 +28,30 @@ def sh(cmd, **kw):
     subprocess.check_call([BASH, "-lc", "export PATH=/mingw64/bin:/usr/bin:$PATH; cd '%s' && %s" % (ROOT.replace("\\", "/"), cmd)], env=env, **kw)
 
 
+def sync_campaign_levels():
+    """Los niveles de la campania que se editaron (build/bin/niveles/principal) pasan a niveles_campana/ (va al repositorio), a la carpeta del juego
+    (instalador y zip) y, con un indice, al APK. Asi todos los jugadores reciben los mismos niveles con cada entrega."""
+    import glob, shutil
+    src = os.path.join(ROOT, "build", "bin", "niveles", "principal")
+    dst = os.path.join(ROOT, "niveles_campana")
+    os.makedirs(dst, exist_ok=True)
+    if os.path.isdir(src):
+        for f in glob.glob(os.path.join(dst, "*.bcl")):
+            os.remove(f)
+        for f in sorted(glob.glob(os.path.join(src, "*.bcl"))):
+            shutil.copy(f, dst)
+    names = sorted(os.path.basename(f) for f in glob.glob(os.path.join(dst, "*.bcl")))
+    with open(os.path.join(dst, "indice.txt"), "w", newline="\n") as f:
+        f.write("\n".join(names) + "\n")
+    game = os.path.join(ROOT, "dist", "BattleCityNES", "niveles", "principal")
+    if os.path.isdir(game):
+        shutil.rmtree(game)
+    os.makedirs(game)
+    for n in names:
+        shutil.copy(os.path.join(dst, n), game)
+    print("niveles de la campania:", len(names))
+
+
 def read_version():
     t = open(os.path.join(ROOT, "src", "app", "version.h"), encoding="utf-8").read()
     return re.search(r'BCNES_VERSION "([0-9.]+)"', t).group(1)
@@ -100,6 +124,7 @@ def main():
         sh("./build/bin/nes_tests.exe | tail -2 && (cd build/bin && ./rom_oracle_tests.exe | tail -1)")
     # carpeta del juego (portable) + instalador + zip + APK
     sh("mkdir -p dist/BattleCityNES && cp build/bin/battlecitynes.exe build/bin/level_editor.exe dist/BattleCityNES/")
+    sync_campaign_levels()
     sh("bash installer/build_installer.sh")
     sh("rm -f dist/BattleCityNES-PC.zip && powershell -NoProfile -Command \"Compress-Archive -Path 'dist/BattleCityNES' -DestinationPath 'dist/BattleCityNES-PC.zip' -Force\"")
     sh("bash android/build_apk.sh")

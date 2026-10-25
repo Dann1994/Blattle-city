@@ -220,7 +220,7 @@ int DifficultyTier(int level) {
 }
 
 bool LevelCellPassable(uint8_t id) {
-    return !(id == kWater || (id >= kSteelRight && id <= kSteel));
+    return !(id == kWater || (id >= kSteelRight && id <= kSteel) || (id >= 20 && id <= 23));          // (20..23: hierro de un solo mosaico, solo en los niveles del editor)
 }
 
 void GenerateWideLevel(int level, uint8_t out[kLevelRows][kLevelCols]) {
@@ -417,11 +417,19 @@ LevelDef BuiltinLevelDef(int level) {
     return d;
 }
 
+// Los ids de bloque de los niveles (editor) y los del motor: la lava es el 15 en los niveles y el 16 en el motor (el 15 es "borrar" en la ROM);
+// las puntas de ladrillo y hierro (16..23 en los niveles) son 17..24 en el motor.
+uint8_t EngineBlockId(uint8_t id) {
+    if (id == 15) return 16;
+    if (id >= 16 && id <= 23) return static_cast<uint8_t>(id + 1);
+    return id;
+}
+
 void LevelDefToStage(const LevelDef& d, uint8_t blocks[kLevelRows][kLevelCols], uint8_t strip[kLevelCols], nes::Battle::StageSpec& spec) {
     // (en los niveles la lava es el id 15; el motor la conoce como 16 porque el 15 es "borrar" en la ROM)
-    for (int c = 0; c < kLevelCols; ++c) strip[c] = d.cells[0][c] == 15 ? 16 : d.cells[0][c];
+    for (int c = 0; c < kLevelCols; ++c) strip[c] = EngineBlockId(d.cells[0][c]);
     for (int r = 0; r < kLevelRows; ++r)
-        for (int c = 0; c < kLevelCols; ++c) blocks[r][c] = d.cells[r + 1][c] == 15 ? 16 : d.cells[r + 1][c];
+        for (int c = 0; c < kLevelCols; ++c) blocks[r][c] = EngineBlockId(d.cells[r + 1][c]);
     spec = nes::Battle::StageSpec{};
     spec.active = true;
     if (d.versus) {
@@ -462,6 +470,9 @@ void LevelDefToStage(const LevelDef& d, uint8_t blocks[kLevelRows][kLevelCols], 
     spec.rank = std::max(1, std::min(4, d.rank));
     spec.eagleCol = std::max(0, std::min(kLevelCols - 1, d.eagleCol));
     spec.eagleRow = std::max(0, std::min(kGridRows - 1, d.eagleRow));
+    for (int i = 0; i < 4; ++i) { spec.playerCol[i] = d.playerCol[i]; spec.playerRow[i] = d.playerRow[i]; }
+    spec.baseCol = d.baseCol;
+    spec.baseRow = d.baseRow;
     spec.nSpawns = std::max(0, std::min(kMaxSpawns, d.nSpawns));
     for (int i = 0; i < spec.nSpawns; ++i) {
         spec.spawnCol[i] = std::min<int>(d.spawnCol[i], kLevelCols - 1);
@@ -480,12 +491,18 @@ void WriteLevel(std::ostream& f, const LevelDef& d) {
     f << "dificultad=" << d.tier << "\n";
     f << "aguila=" << d.rank << "\n";
     f << "posicion_aguila=" << d.eagleCol << "," << d.eagleRow << "\n";
+    if (!d.versus) {
+        f << "base=" << d.baseCol << "," << d.baseRow << "\n";
+        f << "jugadores=";
+        for (int i = 0; i < 4; ++i) f << (i ? ";" : "") << static_cast<int>(d.playerCol[i]) << "," << static_cast<int>(d.playerRow[i]);
+        f << "\n";
+    }
     f << "apariciones=";
     for (int i = 0; i < d.nSpawns; ++i) f << (i ? ";" : "") << static_cast<int>(d.spawnCol[i]) << "," << static_cast<int>(d.spawnRow[i]);
     f << "\nmapa\n";
-    static const char kHex[] = "0123456789ABCDEF";
+    static const char kHex[] = "0123456789ABCDEFGHIJKLMN";                 // G..N: ladrillo y hierro de un solo mosaico (puntas)
     for (int r = 0; r < kGridRows; ++r) {
-        for (int c = 0; c < kLevelCols; ++c) f << kHex[d.cells[r][c] % 16];
+        for (int c = 0; c < kLevelCols; ++c) f << kHex[d.cells[r][c] % 24];
         f << "\n";
     }
 }
@@ -504,7 +521,7 @@ bool ReadLevel(std::istream& f, LevelDef& out) {
             if (static_cast<int>(line.size()) < kLevelCols) return false;
             for (int c = 0; c < kLevelCols; ++c) {
                 const char ch = line[static_cast<size_t>(c)];
-                const int v = ch >= '0' && ch <= '9' ? ch - '0' : (ch >= 'A' && ch <= 'F' ? ch - 'A' + 10 : (ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : -1));
+                const int v = ch >= '0' && ch <= '9' ? ch - '0' : (ch >= 'A' && ch <= 'N' ? ch - 'A' + 10 : (ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : -1));
                 if (v < 0) return false;
                 d.cells[rows][c] = static_cast<uint8_t>(v);
             }
@@ -537,6 +554,22 @@ bool ReadLevel(std::istream& f, LevelDef& out) {
             if (std::sscanf(val.c_str(), "%d,%d", &c, &r) == 2) {
                 d.eagleCol = std::max(0, std::min(kLevelCols - 1, c));
                 d.eagleRow = std::max(0, std::min(kGridRows - 1, r));
+            }
+        } else if (key == "base") {
+            int c = 13, r = 14;
+            if (std::sscanf(val.c_str(), "%d,%d", &c, &r) == 2) {
+                d.baseCol = std::max(1, std::min(kLevelCols - 2, c));
+                d.baseRow = std::max(2, std::min(kGridRows - 1, r));
+            }
+        } else if (key == "jugadores") {
+            std::stringstream ss(val);
+            std::string item;
+            for (int i = 0; i < 4 && std::getline(ss, item, ';'); ++i) {
+                int c = 0, r = 0;
+                if (std::sscanf(item.c_str(), "%d,%d", &c, &r) == 2 && c >= 0 && c < kLevelCols && r >= 1 && r < kGridRows) {
+                    d.playerCol[i] = static_cast<uint8_t>(c);
+                    d.playerRow[i] = static_cast<uint8_t>(r);
+                }
             }
         } else if (key == "apariciones") {
             std::stringstream ss(val);
@@ -597,7 +630,7 @@ std::vector<std::string> CheckLevelDef(const LevelDef& d) {
     // alcanzables desde la base (sin cruzar agua ni hierro)
     bool reach[kGridRows][kLevelCols] = {};
     std::queue<std::pair<int, int>> q;
-    int startR = kGridRows - 1, startC = 13;
+    int startR = d.versus ? kGridRows - 1 : d.baseRow, startC = d.versus ? 13 : d.baseCol;
     if (d.versus) nes::Battle::VsSideBlock(d.vsEagleCol[0], d.vsEagleRow[0], 0, startC, startR);
     q.push({startR, startC});
     reach[startR][startC] = true;
@@ -617,6 +650,16 @@ std::vector<std::string> CheckLevelDef(const LevelDef& d) {
         int c1, r1;
         nes::Battle::VsSideBlock(d.vsEagleCol[1], d.vsEagleRow[1], 0, c1, r1);
         if (!reach[r1][c1]) warn.push_back("NO HAY CAMINO ENTRE LAS DOS ÁGUILAS");
+    }
+    if (!d.versus) {
+        for (int i = 0; i < d.nSpawns; ++i)
+            if (std::abs(d.spawnCol[i] - d.baseCol) <= 1 && d.spawnRow[i] >= d.baseRow - 1 && d.spawnRow[i] <= d.baseRow) warn.push_back("APARICIÓN " + std::to_string(i + 1) + " DENTRO DE LA BASE");
+        for (int p = 0; p < 4; ++p) {
+            const int c = d.playerCol[p], r = d.playerRow[p];
+            if (!reach[r][c]) warn.push_back("JUGADOR " + std::to_string(p + 1) + " ENCERRADO");
+            for (int i = 0; i < d.nSpawns; ++i)
+                if (d.spawnCol[i] == c && d.spawnRow[i] == r) warn.push_back("JUGADOR " + std::to_string(p + 1) + " SOBRE UNA APARICIÓN");
+        }
     }
     const int zone = EagleReachBlocks(d.rank);
     for (int i = 0; i < d.nSpawns; ++i) {

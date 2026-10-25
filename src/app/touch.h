@@ -22,7 +22,7 @@ namespace app {
 
 class TouchControls {
 public:
-    enum Btn { kA, kB, kX, kY, kL, kR, kStart, kCount };
+    enum Btn { kA, kB, kX, kY, kL, kR, kStart, kSelect, kCount };
 
     void SetEnabled(bool on) { enabled_ = on; }
     bool Enabled() const { return enabled_; }
@@ -132,12 +132,12 @@ public:
         arrow(-1, 0, dirX_ < 0);
         arrow(1, 0, dirX_ > 0);
         // botones
-        static const char* const kLabels[kCount] = {"A", "B", "X", "Y", "L", "R", "START"};
+        static const char* const kLabels[kCount] = {"A", "B", "X", "Y", "L", "R", "START", "SELECT"};
         for (int b = 0; b < kCount; ++b) {
             if (!Visible(b)) continue;
             const Vector2 bc = BtnCenter(b);
             const float br = BtnRadius(b);
-            if (b == kStart) {
+            if (b == kStart || b == kSelect) {
                 const Rectangle rc{bc.x - br * 1.9f, bc.y - br * 0.75f, br * 3.8f, br * 1.5f};
                 DrawRectangleRounded(rc, 0.5f, 8, down_[b] ? active : base);
                 DrawRectangleRoundedLines(rc, 0.5f, 8, line);
@@ -145,7 +145,7 @@ public:
                 DrawCircleV(bc, br, down_[b] ? active : base);
                 DrawCircleLinesV(bc, br, line);
             }
-            const int fs = static_cast<int>(br * (b == kStart ? 0.62f : 1.0f));
+            const int fs = static_cast<int>(br * ((b == kStart || b == kSelect) ? 0.62f : 1.0f));
             const int tw = MeasureText(kLabels[b], fs);
             DrawText(kLabels[b], static_cast<int>(bc.x) - tw / 2, static_cast<int>(bc.y) - fs / 2, fs, Color{255, 255, 255, 190});
         }
@@ -162,12 +162,13 @@ private:
     Vector2 BtnCenter(int b) const {
         const float u = U(), w = static_cast<float>(sw_);
         switch (b) {
-            case kA: return {w - u * 0.17f, u * 0.72f};
-            case kB: return {w - u * 0.37f, u * 0.86f};
+            case kA: return {w - u * 0.37f, u * 0.86f};          // (A y B intercambiados: A a la izquierda, B a la derecha)
+            case kB: return {w - u * 0.17f, u * 0.72f};
             case kX: return {w - u * 0.37f, u * 0.60f};
             case kY: return {w - u * 0.17f, u * 0.48f};
             case kL: return {u * 0.09f, u * 0.10f};
             case kR: return {w - u * 0.09f, u * 0.22f};
+            case kSelect: return {w - u * 0.17f - u * 0.20f, u * 0.055f};     // a la izquierda de START
             default: return {w - u * 0.17f, u * 0.055f};
         }
     }
