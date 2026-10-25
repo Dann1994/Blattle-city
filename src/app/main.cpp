@@ -884,6 +884,9 @@ public:
     std::string PlayerName() const { return g_cfg.playerName; }
     bool TextEntry() const { return scene_ == Scene::NameEntry || scene_ == Scene::CodeEntry; }
     bool InHostRoom() const { return scene_ == Scene::LanHost; }
+    // Pantallas donde cada jugador maneja lo suyo (colores y salas); en el resto de los menus manda solo el jugador 1.
+    bool PerPlayerMenuScene() const { return scene_ == Scene::Lobby || scene_ == Scene::LanHost || scene_ == Scene::LanJoined || scene_ == Scene::LateJoin; }
+    bool InLocalLobby() const { return scene_ == Scene::Lobby; }
     bool NetGame() const { return netGame_; }
     // Chat de voz: la sala en uso (nullptr si no se esta en una sala ni en una partida en red) y el nombre de quien habla.
     app::Lan* VoiceLan() {
@@ -1795,7 +1798,10 @@ public:
                     v.footer = BackHint();
                 } else {
                     const float pr = updater_.progress();
-                    v.note = pr >= 0 ? "DESCARGANDO LA VERSIÓN " + updater_.release().version + ": " + std::to_string(static_cast<int>(pr * 100)) + " POR CIENTO" : "DESCARGANDO...";
+                    v.note = "DESCARGANDO LA VERSIÓN " + updater_.release().version;
+                    v.progress = pr >= 0 ? pr : -2.0f;                                   // barra de progreso con el porcentaje
+                    v.progressText = pr >= 0 ? std::to_string(static_cast<int>(pr * 100)) + "%" : std::string("...");
+                    v.tick = menuTick_;
                     v.footer = BackHint() + " CANCELAR";
                 }
                 break;
@@ -2618,18 +2624,50 @@ int RunWindow(TestScreen& screen, double selfTestSeconds, const std::string& ass
                 }
             } else {
                 static u8 prevPad[4] = {0, 0, 0, 0};
-                for (int sl = 0; sl < 4; ++sl) {
-                    const u8 pad = PadFromKeys(sl);
-                    const u8 pressed = static_cast<u8>(pad & ~prevPad[sl]);
-                    prevPad[sl] = pad;
-                    if (pressed & nes::con_btn_Up) screen.MenuEvent(TestScreen::Ev::Up, sl);
-                    if (pressed & nes::con_btn_Down) screen.MenuEvent(TestScreen::Ev::Down, sl);
-                    if (pressed & nes::con_btn_Left) screen.MenuEvent(TestScreen::Ev::Left, sl);
-                    if (pressed & nes::con_btn_Right) screen.MenuEvent(TestScreen::Ev::Right, sl);
-                    if (pressed & nes::con_btn_A) screen.MenuEvent(TestScreen::Ev::Fire, sl);
+                if (screen.PerPlayerMenuScene()) {
+                    // seleccion de color y salas: cada jugador mueve lo suyo con sus teclas o su mando
+                    for (int sl = 0; sl < 4; ++sl) {
+                        const u8 pad = PadFromKeys(sl);
+                        const u8 pressed = static_cast<u8>(pad & ~prevPad[sl]);
+                        prevPad[sl] = pad;
+                        if (pressed & nes::con_btn_Up) screen.MenuEvent(TestScreen::Ev::Up, sl);
+                        if (pressed & nes::con_btn_Down) screen.MenuEvent(TestScreen::Ev::Down, sl);
+                        if (pressed & nes::con_btn_Left) screen.MenuEvent(TestScreen::Ev::Left, sl);
+                        if (pressed & nes::con_btn_Right) screen.MenuEvent(TestScreen::Ev::Right, sl);
+                        if (pressed & nes::con_btn_A) screen.MenuEvent(TestScreen::Ev::Fire, sl);
+                    }
+                    const bool enterStarts = !screen.InLocalLobby();       // en la seleccion local, Enter es el disparo del jugador 2 (no empieza la partida)
+                    if (IsKeyPressed(KEY_P) || (enterStarts && (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER))) || padStartPressed) screen.MenuEvent(TestScreen::Ev::Start, 0);
+                    if (IsKeyPressed(KEY_SPACE) && !screen.InLocalLobby()) screen.MenuEvent(TestScreen::Ev::Accept, 0);
+                } else {
+                    // menus y pausa: los maneja solo el jugador 1, con teclas fijas (flechas o WASD, Enter o Espacio, Esc) o con su mando
+                    const u8 pad0 = [&] {
+                        u8 v = 0;
+                        const int id = g_padOfSlot[0];
+                        if (id >= 0 && IsGamepadAvailable(id)) {
+                            if (IsGamepadButtonDown(id, GAMEPAD_BUTTON_LEFT_FACE_UP) || GetGamepadAxisMovement(id, GAMEPAD_AXIS_LEFT_Y) < -0.5f) v |= nes::con_btn_Up;
+                            if (IsGamepadButtonDown(id, GAMEPAD_BUTTON_LEFT_FACE_DOWN) || GetGamepadAxisMovement(id, GAMEPAD_AXIS_LEFT_Y) > 0.5f) v |= nes::con_btn_Down;
+                            if (IsGamepadButtonDown(id, GAMEPAD_BUTTON_LEFT_FACE_LEFT) || GetGamepadAxisMovement(id, GAMEPAD_AXIS_LEFT_X) < -0.5f) v |= nes::con_btn_Left;
+                            if (IsGamepadButtonDown(id, GAMEPAD_BUTTON_LEFT_FACE_RIGHT) || GetGamepadAxisMovement(id, GAMEPAD_AXIS_LEFT_X) > 0.5f) v |= nes::con_btn_Right;
+                            if (IsGamepadButtonDown(id, g_cfg.padFire)) v |= nes::con_btn_A;
+                        }
+                        v |= static_cast<u8>(g_touch.Bits() & (nes::con_btn_Up | nes::con_btn_Down | nes::con_btn_Left | nes::con_btn_Right | nes::con_btn_A));
+                        if (IsKeyDown(KEY_UP) || IsKeyDown(KEY_W)) v |= nes::con_btn_Up;
+                        if (IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S)) v |= nes::con_btn_Down;
+                        if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A)) v |= nes::con_btn_Left;
+                        if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D)) v |= nes::con_btn_Right;
+                        if (IsKeyDown(KEY_ENTER) || IsKeyDown(KEY_KP_ENTER) || IsKeyDown(KEY_SPACE)) v |= nes::con_btn_A;       // confirmar
+                        return v;
+                    }();
+                    const u8 pressed = static_cast<u8>(pad0 & ~prevPad[0]);
+                    prevPad[0] = pad0;
+                    if (pressed & nes::con_btn_Up) screen.MenuEvent(TestScreen::Ev::Up, 0);
+                    if (pressed & nes::con_btn_Down) screen.MenuEvent(TestScreen::Ev::Down, 0);
+                    if (pressed & nes::con_btn_Left) screen.MenuEvent(TestScreen::Ev::Left, 0);
+                    if (pressed & nes::con_btn_Right) screen.MenuEvent(TestScreen::Ev::Right, 0);
+                    if (pressed & nes::con_btn_A) screen.MenuEvent(TestScreen::Ev::Accept, 0);               // una sola confirmacion (antes Enter contaba dos veces)
+                    if (IsKeyPressed(KEY_P) || padStartPressed) screen.MenuEvent(TestScreen::Ev::Start, 0);   // (en la pausa, Start vuelve al juego)
                 }
-                if (IsKeyPressed(KEY_P) || IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || padStartPressed) screen.MenuEvent(TestScreen::Ev::Start, 0);
-                if (IsKeyPressed(KEY_SPACE)) screen.MenuEvent(TestScreen::Ev::Accept, 0);
                 if (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_BACKSPACE) || AnyPadPressed(g_cfg.padCancel) || touchBack) {
                     screen.MenuEvent(TestScreen::Ev::Back, 0);
                 }

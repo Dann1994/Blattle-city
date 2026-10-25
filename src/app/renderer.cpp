@@ -510,6 +510,7 @@ const CustomGlyph kCustomGlyphs[] = {
     {'?', {"..####..", "..#..##.", "....##..", "...##...", "...##...", "........", "...##...", "........"}},
     {'/', {"......##", ".....##.", "....##..", "...##...", "..##....", ".##.....", "##......", "........"}},
     {',', {"........", "........", "........", "........", "........", "...##...", "...##...", "..##...."}},
+    {'%', {"##....#.", "##...#..", "....#...", "...#....", "..#..##.", ".#...##.", "........", "........"}},
     {'+', {"........", "...##...", "...##...", ".######.", "...##...", "...##...", "........", "........"}},
     {'(', {"....##..", "...##...", "..##....", "..##....", "..##....", "...##...", "....##..", "........"}},
     {')', {"..##....", "...##...", "....##..", "....##..", "....##..", "...##...", "..##....", "........"}},
@@ -1452,6 +1453,21 @@ void Renderer::RenderMenu(const MenuView& m, std::vector<uint8_t>& rgba) const {
             DrawText(canvas, kScreenW, (kScreenW - TextWidth(ln)) / 2, ny, ln, 0xF83800);
             ny += 10;
         }
+    }
+    if (m.progress >= 0 || m.progress == -2) {                            // barra de progreso (descarga de la actualizacion)
+        const int bw = 260, bh = 14, bx = (kScreenW - bw) / 2;
+        int by = 140;
+        FillRect(canvas, kScreenW, bx - 2, by - 2, bx + bw + 2, by + bh + 2, 0xFCFCFC);
+        FillRect(canvas, kScreenW, bx, by, bx + bw, by + bh, 0x101018);
+        if (m.progress >= 0) {
+            const int fw = static_cast<int>(bw * std::min(1.0f, m.progress));
+            FillRect(canvas, kScreenW, bx, by, bx + fw, by + bh, 0x58D854);
+            FillRect(canvas, kScreenW, bx, by, bx + fw, by + 3, 0xA8F8A0);                      // un brillo arriba
+        } else {
+            const int seg = 70, pos = (m.tick * 3) % (bw + seg) - seg;
+            FillRect(canvas, kScreenW, bx + std::max(0, pos), by, bx + std::min(bw, pos + seg), by + bh, 0x58D854);
+        }
+        if (!m.progressText.empty()) DrawText(canvas, kScreenW, (kScreenW - TextWidth(m.progressText)) / 2, by + bh + 10, m.progressText, 0xFCFCFC);
     }
     if (!m.footer.empty()) {
         const std::string footer = Fit(m.footer, kScreenW - 16);

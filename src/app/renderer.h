@@ -52,6 +52,9 @@ struct MenuView {
     std::string note;
                                            // linea de aviso (por ejemplo "PROXIMAMENTE")
     std::string footer;
+    float progress = -1;                   // barra de progreso bajo el aviso (0..1); -2 = sin total conocido (barra que se mueve); -1 = sin barra
+    std::string progressText;              // texto bajo la barra (por ejemplo "50%")
+    int tick = 0;                          // cuadro del menu (anima la barra sin total)
     std::string version;                   // titulo: la version del juego, abajo a la derecha
     std::string cornerNote;                // titulo: aviso abajo a la izquierda (por ejemplo "ACTUALIZACION DISPONIBLE")
 };

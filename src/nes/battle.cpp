@@ -3325,6 +3325,17 @@ void Battle::SpawnBonusCore() {
         static const u8 kVsBonus[16] = {0, 1, 3, 4, 5, 6, 3, 0, 8, 9, 10, 11, 12, 6, 3, 8};     // batalla vs: sin pala ni aliados
         const u8 roll = Sub_D44D_generate_random_number() & (wide_ ? 0x0F : 0x07);
         R(ram_bonus_id) = IsVersus() ? kVsBonus[roll] : (wide_ ? kWideBonus[roll] : tbl_E8FA_bonus[roll]);
+        if (wide_ && !IsVersus()) {
+            // campania: la estrella y la pistola aparecen 10 puntos mas (28,8% y 10%); el resto se reparte lo que queda, como antes entre si
+            static const struct { int id, weight; } kItems[14] = {{3, 2877}, {6, 1000}, {0, 942}, {1, 471}, {2, 471}, {4, 471}, {5, 471}, {7, 471},
+                                                                  {8, 471}, {9, 471}, {10, 471}, {11, 471}, {12, 471}, {13, 471}};
+            const int r = ((Sub_D44D_generate_random_number() << 8) | Sub_D44D_generate_random_number()) % 10000;
+            int acc = 0;
+            for (const auto& it : kItems) {
+                acc += it.weight;
+                if (r < acc) { R(ram_bonus_id) = static_cast<u8>(it.id); break; }
+            }
+        }
     }
     R(ram_0062_bonus_timer) = 0;
 }

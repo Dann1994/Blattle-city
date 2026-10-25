@@ -4200,6 +4200,31 @@ void TestSuperCannon() {
     CHECK(!g->GameOver());
 }
 
+void TestBonusOdds() {
+    std::printf("[items] en la campania la estrella y la pistola aparecen 10 puntos mas (28,8 por ciento y 10 por ciento)\n");
+    auto b = std::make_unique<nes::Battle>();
+    b->SetWide(true);
+    b->SetLevel(1);
+    b->NewGame(1, 1);
+    u8 blocks[14][27];
+    std::memset(blocks, 13, sizeof(blocks));
+    b->LoadWideStage(blocks);
+    b->StartStage();
+    int count[16] = {};
+    const int n = 6000;
+    for (int i = 0; i < n; ++i) {
+        b->DebugSpawnRandomBonus();
+        ++count[b->R(nes::ram_bonus_id) & 15];
+        b->R(nes::ram_bonus_pos_X) = 0;                                          // se saca el item para que el siguiente salga de nuevo
+        b->DebugClearBonus();
+        for (int f = 0; f < 1 + i % 5; ++f) b->RunFrame();                         // (el azar del juego avanza con los cuadros: se espacian las muestras)
+    }
+    const double star = 100.0 * count[3] / n, gun = 100.0 * count[6] / n;
+    CHECK(star > 25.0 && star < 33.0);
+    CHECK(gun > 7.0 && gun < 13.5);
+    CHECK(count[0] > 0 && count[1] > 0 && count[2] > 0 && count[4] > 0 && count[5] > 0 && count[7] > 0);           // los demas siguen apareciendo
+}
+
 void TestUpdater() {
     std::printf("[actualizaciones] comparar versiones, leer los releases (pc-vX / android-vX) y elegir el instalador o el APK\n");
     CHECK_EQ(app::CompareVersions("1.0.0", "1.0.0"), 0);
@@ -4508,6 +4533,7 @@ int main() {
     TestRoyale();
     TestNewItems();
     TestUpdater();
+    TestBonusOdds();
     TestSuperCannon();
     TestMovableBaseAndPlayers();
     TestEditorSidebar();
