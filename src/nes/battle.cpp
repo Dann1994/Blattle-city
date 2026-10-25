@@ -593,6 +593,8 @@ void Battle::Sub_C331_prepare_tanks_and_spawn_players() {
     std::memset(teamClock_, 0, sizeof(teamClock_));
     for (auto& h : heli_) h = Heli{};
     for (Cannon& cn : cannons_) cn = Cannon{};
+    for (SuperShot& sh : sshots_) sh = SuperShot{};
+    std::memset(superLock_, 0, sizeof(superLock_));
     for (CannonShot& sh : cshots_) sh = CannonShot{};
     for (auto& m : mines_) m = Mine{};
     portal_ = Portal{};
@@ -603,6 +605,7 @@ void Battle::Sub_C331_prepare_tanks_and_spawn_players() {
     enemyGhostT_ = 0;
     mineSeq_ = 0;
     std::memset(royaleKills_, 0, sizeof(royaleKills_));
+    std::memset(royaleDeaths_, 0, sizeof(royaleDeaths_));
     royaleFrames_ = spec_.royaleMinutes * 3600;
     royaleBonusT_ = 1200;
     for (auto& it : rItems_) it = RoyaleItem{};
@@ -1271,6 +1274,7 @@ void Battle::Status_Explosion(int x) {
         }
         return;
     }
+    if (IsRoyale() && x < 8) ++royaleDeaths_[x];          // cada muerte le resta un punto (por tiempo)
     if (!RoyaleTimed()) LIVES(x)--;                       // (battle royale por tiempo: reaparece siempre)
     if (LIVES(x) != 0) {
         Sub_E363_tank_spawn_handler(x);
@@ -1862,14 +1866,15 @@ void Battle::VersusCollisions() {
 void Battle::VersusCheckEnd() {
     if (vsWinner_ >= 0) return;
     if (IsRoyale()) {
-        if (spec_.royaleTimed) {                                // por tiempo: gana el que mas destruyo
+        if (spec_.royaleTimed) {                                // por tiempo: gana el de mas puntos (una baja suma 1 y una muerte resta 1)
             if (royaleFrames_ > 0) --royaleFrames_;
             if (royaleFrames_ == 0) {
-                int best = -1, bestKills = -1;
+                int best = -1, bestScore = -1000000;
                 bool tie = false;
                 for (int id = 0; id < 8; ++id) {
-                    if (royaleKills_[id] > bestKills) { bestKills = royaleKills_[id]; best = id; tie = false; }
-                    else if (royaleKills_[id] == bestKills) tie = true;
+                    const int sc = RoyaleScore(id);
+                    if (sc > bestScore) { bestScore = sc; best = id; tie = false; }
+                    else if (sc == bestScore) tie = true;
                 }
                 vsWinner_ = tie ? 2 : 10 + best;
                 return;
@@ -2229,6 +2234,94 @@ int Battle::ExtraIcons(ExtraIcon* out, int max) const {
 }
 
 // ---------------------------------------------------------------------------
+// Super canonazo
+// ---------------------------------------------------------------------------
+
+void Battle::FireSuper(int p) {
+    static const int kDx[4] = {0, -1, 0, 1}, kDy[4] = {-1, 0, 1, 0};
+    const int dir = TFLAGS(p) & 3;
+    for (SuperShot& sh : sshots_) {
+        if (sh.on) continue;
+        sh = SuperShot{true, p, TankX(p) + kDx[dir] * 14, TankY(p) + kDy[dir] * 14, kDx[dir], kDy[dir]};
+        superCharge_[p] = 0;
+        superLock_[p] = kSuperLockFrames;                     // 5 segundos sin poder disparar
+        R(ram_sfx_shot) = 1;
+        R(ram_sfx_explosion_hq) = 1;
+        return;
+    }
+}
+
+// El obus avanza 6 px por cuadro y explota contra el primer muro, aguila o enemigo (o el borde del campo).
+void Battle::SuperStep() {
+    for (SuperShot& sh : sshots_) {
+        if (!sh.on) continue;
+        for (int k = 0; k < 6 && sh.on; ++k) {
+            const int nx = sh.x + sh.dx, ny = sh.y + sh.dy;
+            bool hit = nx < 0 || nx >= MapCols() * 8 || ny < 8 || ny >= 240;
+            if (!hit) {
+                const u8 t = M(PointerPx(nx, ny)) & 0x7F;
+                hit = (t >= 1 && t <= 0x10) || (t & 0x7C) == 0x48;
+                for (int e = nPlayers_; e <= lastEnemy_ && !hit; ++e) {
+                    const u8 f = TFLAGS(e);
+                    if (!(f & 0x80) || f >= 0xE0 || IsAlly(e)) continue;
+                    hit = std::abs(TankX(e) - nx) < 10 && std::abs(TankY(e) - ny) < 10;
+                }
+            }
+            if (hit) { SuperExplode(sh.owner, sh.x, sh.y); sh.on = false; break; }
+            sh.x = nx;
+            sh.y = ny;
+        }
+    }
+}
+
+void Battle::SuperExplode(int owner, int cx, int cy) {
+    const int R2 = kSuperRadius * kSuperRadius;
+    const int baseX0 = (BaseCol() - 1) * 16, baseX1 = (BaseCol() + 2) * 16, baseY0 = (BaseRow() - 1) * 16, baseY1 = (BaseRow() + 1) * 16;
+    // muros: ladrillo, hierro y piedra dentro del radio (no la base de los jugadores, el aguila ni los canones)
+    for (int ty = (cy - kSuperRadius) / 8; ty <= (cy + kSuperRadius) / 8; ++ty) {
+        for (int tx = (cx - kSuperRadius) / 8; tx <= (cx + kSuperRadius) / 8; ++tx) {
+            const int px = tx * 8 + 4, py = ty * 8 + 4;
+            if (px < 0 || px >= MapCols() * 8 || py < 8 || py >= 240) continue;
+            if ((px - cx) * (px - cx) + (py - cy) * (py - cy) > R2) continue;
+            if (px >= baseX0 && px < baseX1 && py >= baseY0 && py < baseY1) continue;
+            bool onCannon = false;
+            for (const Cannon& cn : cannons_) onCannon = onCannon || (cn.on && px >= cn.col * 16 && px < cn.col * 16 + 16 && py >= cn.row * 16 && py < cn.row * 16 + 16);
+            if (onCannon) continue;
+            const uint16_t p = PointerPx(px, py);
+            const u8 t = M(p) & 0x7F;
+            if (t >= 1 && t <= 0x10) Sub_D784_write_tile(p, static_cast<u8>(M(p) & 0x80));
+        }
+    }
+    // enemigos: reciben 4 de dano (matan a casi todos; el que aguanta mas queda herido); las balas enemigas de la zona desaparecen
+    for (int e = nPlayers_; e <= lastEnemy_; ++e) {
+        const u8 f = TFLAGS(e);
+        if (!(f & 0x80) || f >= 0xE0 || IsAlly(e)) continue;
+        const int dx = TankX(e) - cx, dy = TankY(e) - cy;
+        if (dx * dx + dy * dy > (kSuperRadius + 8) * (kSuperRadius + 8)) continue;
+        if (TTYPE(e) & 0x04) { Sub_E8BE_spawn_bonus(); TTYPE(e) = static_cast<u8>(TTYPE(e) & 0xFB); }
+        if (wd_.hp[e] > 4) {
+            wd_.hp[e] = static_cast<u8>(wd_.hp[e] - 4);
+            if (((TTYPE(e) >> 5) & 3) == 3) TTYPE(e) = static_cast<u8>((TTYPE(e) & 0xFC) | (wd_.hp[e] - 1 < 3 ? wd_.hp[e] - 1 : 3));
+            R(ram_sfx_bullet_hit_tank) = 1;
+        } else {
+            ExtraKill(e, owner);
+        }
+    }
+    for (int b = 0; b < nBullets_; ++b) {
+        if ((BSTATUS(b) & 0xF0) != 0x40 || BulletOwner(b) >= 0) continue;
+        const int bx = wd_.bposX[b] | (bulletXHi_[b] << 8), by = wd_.bposY[b];
+        if ((bx - cx) * (bx - cx) + (by - cy) * (by - cy) <= R2) BSTATUS(b) = 0;
+    }
+    // efectos: explosion grande, temblor de pantalla y los enemigos se congelan unos segundos (el reloj)
+    AddBoom(cx, cy);
+    for (int k = 0; k < 4; ++k) AddBoom(cx + ((k & 1) ? 18 : -18), cy + ((k & 2) ? 18 : -18));
+    shake_ = std::max(shake_, 60);
+    if (R(ram_clock_timer) < 2) R(ram_clock_timer) = 2;
+    R(ram_sfx_explosion_hq) = 1;
+    R(ram_sfx_explosion_enemy) = 1;
+}
+
+// ---------------------------------------------------------------------------
 // Canones
 // ---------------------------------------------------------------------------
 
@@ -2371,6 +2464,15 @@ void Battle::Sub_Extras() {
     }
     if (enemyGhostT_ > 0) --enemyGhostT_;
     if (!IsVersus()) CannonsStep();
+    if (!IsVersus()) {
+        for (int p = 0; p < nPlayers_ && p < 4; ++p) {
+            if (TUPGRADE(p) != 0x60) superCharge_[p] = 0;                  // sin el arma al maximo no hay carga
+            if (superLock_[p] > 0) --superLock_[p];
+            const u8 f = TFLAGS(p);
+            if (superCharge_[p] > 0 && superLock_[p] == 0 && (f & 0x80) && f < 0xE0 && playerFreeze_[p] == 0 && (BTNPRESS(p) & con_btn_B)) FireSuper(p);
+        }
+        SuperStep();
+    }
     for (Boom& b : booms_) if (b.t > 0) --b.t;
     // helicopteros: vuelan sobre todo, van tras el enemigo mas cercano (despacio, para que se pueda escapar), se posan y sueltan una bomba
     const int worldW = MapCols() * 8;
@@ -2740,7 +2842,7 @@ void Battle::Sub_E122_players_fire() {
         if (!(f & 0x80) || f >= 0xE0) {
             continue;
         }
-        if ((BTNPRESS(x) & con_btns_AB) == 0 || (wide_ && playerFreeze_[x] != 0)) {
+        if ((BTNPRESS(x) & con_btn_A) == 0 || (wide_ && (playerFreeze_[x] != 0 || (x < 4 && superLock_[x] > 0)))) {      // (B es el super canonazo; tras el no se dispara 5 s)
             continue;                                    // sin disparo mientras el reloj enemigo los paraliza
         }
         if ((TTYPE(x) & 0xC0) == 0x40 && BSTATUS(x) != 0) {
@@ -3756,6 +3858,8 @@ void Battle::BonusHandler(int id, int x) {
             if (TUPGRADE(x) != 0x60) {
                 TUPGRADE(x) = U8(TUPGRADE(x) + 0x20);
                 TTYPE(x) = TUPGRADE(x);
+            } else if (wide_ && !IsVersus() && x < 4) {
+                superCharge_[x] = 1;                     // con el arma en el maximo, la estrella carga el super canonazo
             }
             break;
         case 4:                                          // granada
@@ -3790,6 +3894,7 @@ void Battle::BonusHandler(int id, int x) {
             // en tbl_E9E2 apuntando a un RTS) pero nunca aparece ni hace nada.
             // Extension nuestra, como en la version anterior: sube el tanque
             // directo al nivel maximo (3 estrellas, $60).
+            if (TUPGRADE(x) == 0x60 && wide_ && !IsVersus() && x < 4) superCharge_[x] = 1;       // (ya en el maximo: carga el super canonazo)
             TUPGRADE(x) = 0x60;
             TTYPE(x) = 0x60;
             break;
@@ -4525,7 +4630,7 @@ uint32_t Battle::StateHash() const {
         mixInt((vsEagleAlive_[0] ? 1 : 0) + (vsEagleAlive_[1] ? 2 : 0));
         for (int i = 0; i < kMaxPlayers; ++i) mixInt(playerTeam_[i]);
         for (int t = 0; t < 8; ++t) mixInt(teamClock_[t]);
-        for (int t = 0; t < 8; ++t) mixInt(royaleKills_[t]);
+        for (int t = 0; t < 8; ++t) { mixInt(royaleKills_[t]); mixInt(royaleDeaths_[t]); }
         mixInt(royaleFrames_);
         mixInt(royaleBonusT_);
         for (const RoyaleItem& it : rItems_) { mixInt(it.on ? 1 : 0); mixInt(it.x); mixInt(it.y); mixInt(it.id); mixInt(it.life); }
@@ -4559,6 +4664,8 @@ uint32_t Battle::StateHash() const {
     mixInt(mineSeq_);
     for (const Heli& h : heli_) { mixInt(h.on ? 1 : 0); mixInt(h.owner); mixInt(h.x); mixInt(h.y); mixInt(h.state); mixInt(h.timer); mixInt(h.life); mixInt(h.target); mixInt(h.dir); mixInt(h.acc); }
     for (const Mine& m : mines_) { mixInt(m.on ? 1 : 0); mixInt(m.owner); mixInt(m.col); mixInt(m.row); mixInt(m.age); mixInt(m.seq); }
+    for (int p = 0; p < 4; ++p) { mixInt(superCharge_[p]); mixInt(superLock_[p]); }
+    for (const SuperShot& sh : sshots_) { mixInt(sh.on ? 1 : 0); mixInt(sh.x); mixInt(sh.y); mixInt(sh.owner); }
     for (const Cannon& cn : cannons_) { mixInt(cn.on ? 1 : 0); mixInt(cn.col); mixInt(cn.row); mixInt(cn.hp); mixInt(cn.cd); }
     for (const CannonShot& sh : cshots_) { mixInt(sh.on ? 1 : 0); mixInt(sh.x); mixInt(sh.y); mixInt(sh.dx); mixInt(sh.dy); }
     mixInt(portal_.on ? 1 : 0); mixInt(portal_.uses);

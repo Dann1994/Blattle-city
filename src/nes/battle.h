@@ -195,6 +195,16 @@ public:
     static constexpr int kItemFrames = 0x0A * 64;             // lo mismo que dura el casco (unos 10 segundos)
     static constexpr int kMaxHelis = 6, kMaxMines = 9, kMaxBooms = 12;
     struct Heli { bool on = false; int owner = -1; int x = 0, y = 0, state = 0, timer = 0, life = 0, target = -1, frame = 0, dir = 0, acc = 0; };   // owner -1: de los enemigos; dir 0..7 = hacia donde mira (0 arriba, de a 45 grados en el sentido del reloj)
+    // SUPER CANONAZO (campania): con el arma en el maximo, una estrella mas lo carga (1 disparo; se pierde al perder nivel de arma). Se dispara con B:
+    // un obus veloz que explota contra lo primero que toca, rompe ladrillo, hierro y piedra en un radio (menos la base y los canones), destruye a los
+    // enemigos de alrededor, sacude la pantalla y los congela unos segundos. Despues, 5 segundos sin poder disparar (el tanque parpadea en rojo).
+    static constexpr int kSuperLockFrames = 300, kMaxSuperShots = 4, kSuperRadius = 40;
+    struct SuperShot { bool on = false; int owner = 0, x = 0, y = 0, dx = 0, dy = 0; };
+    bool SuperReady(int p) const { return wide_ && p >= 0 && p < 4 && superCharge_[p] > 0 && superLock_[p] == 0 && Upgrade(p) == 0x60; }   // brilla
+    int SuperLock(int p) const { return p >= 0 && p < 4 ? superLock_[p] : 0; }                                                               // parpadea en rojo
+    int SuperCharge(int p) const { return p >= 0 && p < 4 ? superCharge_[p] : 0; }
+    const SuperShot& SuperShotState(int i) const { return sshots_[i]; }
+    void DebugGiveSuper(int p) { if (p >= 0 && p < 4) superCharge_[p] = 1; }
     // Canones: el item cubre el aguila de ladrillos y pone dos bloques de canon a sus costados. Disparan hacia arriba o hacia afuera (nunca hacia
     // el aguila) cada 5 segundos, cuando hay un enemigo cerca en esa linea. Aguantan 3 disparos enemigos.
     static constexpr int kMaxCannons = 2, kMaxCannonShots = 8, kCannonHp = 3, kCannonReload = 240;
@@ -230,6 +240,8 @@ public:
     bool RoyaleTimed() const { return IsRoyale() && spec_.royaleTimed; }
     int RoyaleFramesLeft() const { return royaleFrames_; }       // por tiempo: cuadros que quedan
     int RoyaleKills(int id) const { return royaleKills_[id & 7]; }
+    int RoyaleDeaths(int id) const { return royaleDeaths_[id & 7]; }
+    int RoyaleScore(int id) const { return royaleKills_[id & 7] - royaleDeaths_[id & 7]; }      // por tiempo: cada baja suma 1 y cada muerte resta 1
     bool ExtraItemAt(int& x, int& y, int& id) const { if (!rItems_[0].on) return false; x = rItems_[0].x; y = rItems_[0].y; id = rItems_[0].id; return true; }
     int ExtraItemCount() const { return RoyaleItemCount(); }       // (campania: el segundo item de los 3 o 4 jugadores)
     int RoyaleItemCount() const { int n = 0; for (const auto& it : rItems_) n += it.on ? 1 : 0; return n; }     // items en el campo
@@ -560,6 +572,12 @@ private:
     bool ExtraHostile(int owner, int tank);                       // el tanque es enemigo de lo que puso `owner` (jugador, o -1 = los enemigos)
     void ExtraKill(int tank, int owner);                          // lo destruye un helicoptero o una mina (el casco aguanta una vez)
     void AddBoom(int x, int y);
+    int superCharge_[4] = {};
+    int superLock_[4] = {};
+    SuperShot sshots_[kMaxSuperShots];
+    void FireSuper(int p);
+    void SuperStep();
+    void SuperExplode(int owner, int cx, int cy);
     Cannon cannons_[kMaxCannons];
     CannonShot cshots_[kMaxCannonShots];
     void SpawnCannons();
@@ -660,6 +678,7 @@ private:
     int playerTeam_[kMaxPlayers] = {0, 1, 0, 1, 0, 1, 0, 1};
     int vsSize_ = 2;
     int royaleKills_[8] = {};
+    int royaleDeaths_[8] = {};
     int royaleFrames_ = 0;
     int royaleBonusT_ = 0;
     bool aiPlayer_[kMaxPlayers] = {};                     // jugador manejado por la IA

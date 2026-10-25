@@ -595,8 +595,8 @@ public:
             u8 buttons = pad_[slotOf_[i]];                         // el jugador i del motor usa la ranura que eligio
             // Turbo: con el disparo mantenido se simulan apretadas seguidas (3 cuadros si, 3 no, unas 10 por segundo); la
             // primera es inmediata. El motor sigue limitando las balas en el aire segun el nivel de arma.
-            if (g_cfg.turbo && (buttons & nes::con_btns_AB)) {
-                if ((fireHeld_[i]++ % 6) >= 3) buttons = static_cast<u8>(buttons & ~nes::con_btns_AB);
+            if (g_cfg.turbo && (buttons & nes::con_btn_A)) {
+                if ((fireHeld_[i]++ % 6) >= 3) buttons = static_cast<u8>(buttons & ~nes::con_btn_A);
             } else {
                 fireHeld_[i] = 0;
             }
@@ -1164,8 +1164,8 @@ public:
         const int nLocal = std::min(4, lan_.LocalCount());
         for (int k = 0; k < nLocal; ++k) {
             u8 b = pad_[k];
-            if (g_cfg.turbo && (b & nes::con_btns_AB)) {
-                if ((fireHeld_[k]++ % 6) >= 3) b = static_cast<u8>(b & ~nes::con_btns_AB);
+            if (g_cfg.turbo && (b & nes::con_btn_A)) {
+                if ((fireHeld_[k]++ % 6) >= 3) b = static_cast<u8>(b & ~nes::con_btn_A);
             } else {
                 fireHeld_[k] = 0;
             }
@@ -1749,7 +1749,7 @@ public:
                            "VIDAS: " + std::to_string(vsLives_),
                            netMode_ ? "CREAR SALA" : "EMPEZAR", "VOLVER"};
                 v.note = !lanNote_.empty() ? lanNote_
-                       : (royale_ ? std::string(royaleOpt_ == 0 ? "QUEDA UNO SOLO" : "GANA QUIEN MÁS DESTRUYE") + ", LA IA COMPLETA HASTA 8"
+                       : (royale_ ? std::string(royaleOpt_ == 0 ? "QUEDA UNO SOLO" : "GANA EL DE MÁS PUNTOS: BAJA +1, MUERTE -1") + ", LA IA COMPLETA HASTA 8"
                        : netMode_ ? "EN RED: HASTA " + std::to_string(royale_ ? 8 : 2 * vsSize_) + " JUGADORES, LA IA COMPLETA LOS CUPOS"
                                    : "EN ESTA PC: HASTA 4 JUGADORES, LA IA COMPLETA LOS CUPOS");
                 v.footer = touch_ ? "CRUCETA: ELEGIR Y CAMBIAR   TOQUE A PARA ACEPTAR"
@@ -1899,7 +1899,7 @@ public:
                 v.footer = BackHint();
                 break;
             case Scene::KeysList: {
-                static const char* const kNames[app::Config::kActions] = {"ARRIBA", "ABAJO", "IZQUIERDA", "DERECHA", "DISPARO", "DISPARO 2"};
+                static const char* const kNames[app::Config::kActions] = {"ARRIBA", "ABAJO", "IZQUIERDA", "DERECHA", "DISPARO", "SUPER CAÑONAZO"};
                 v.title = "CONTROLES JUGADOR " + std::to_string(keysPlayer_ + 1);
                 for (int a = 0; a < app::Config::kActions; ++a) {
                     const bool waiting = capture_ == Capture::Key && captureTarget_ == a;
@@ -1961,7 +1961,7 @@ public:
         if (netGame_ && lan_.Desynced()) hud.banner = "DESINCRONIZADO";
         else if (netGame_ && netStall_ > 20) hud.banner = "ESPERANDO A LOS DEMÁS...";
         if (battle_->IsBossLevel()) hud.introSubtitle = "DESTRUYE LA BASE ENEMIGA";
-        if (vsMode_) hud.introSubtitle = royale_ ? (royaleOpt_ == 0 ? "QUEDA UNO SOLO: " + std::to_string(vsLives_) + " VIDAS CADA UNO" : "GANA QUIEN MÁS TANQUES DESTRUYE") : "DESTRUYE EL ÁGUILA RIVAL";
+        if (vsMode_) hud.introSubtitle = royale_ ? (royaleOpt_ == 0 ? "QUEDA UNO SOLO: " + std::to_string(vsLives_) + " VIDAS CADA UNO" : "GANA QUIEN MÁS BAJAS Y MENOS MUERTES HAGA") : "DESTRUYE EL ÁGUILA RIVAL";
         hud.paused = battle_->R(nes::ram_pause_flag) != 0;
         hud.hideHud = g_cfg.hideHud;
         if (netGame_) {                                                               // en red, el nombre de cada jugador real sobre su tanque
@@ -2143,6 +2143,7 @@ public:
             else if (key == "left") bit = nes::con_btn_Left;
             else if (key == "right") bit = nes::con_btn_Right;
             else if (key == "fire") bit = nes::con_btn_A;
+            else if (key == "special") bit = nes::con_btn_B;
             if (name[0] == '+') pad_[player] |= bit; else pad_[player] &= static_cast<u8>(~bit);
         }
     }
@@ -2426,7 +2427,7 @@ u8 PadFromKeys(int player) {
         if (IsGamepadButtonDown(pad_id, GAMEPAD_BUTTON_LEFT_FACE_LEFT)) pad |= nes::con_btn_Left;
         if (IsGamepadButtonDown(pad_id, GAMEPAD_BUTTON_LEFT_FACE_RIGHT)) pad |= nes::con_btn_Right;
         if (IsGamepadButtonDown(pad_id, g_cfg.padFire)) pad |= nes::con_btn_A;
-        if (IsGamepadButtonDown(pad_id, g_cfg.padFire2)) pad |= nes::con_btn_B;
+        if (IsGamepadButtonDown(pad_id, g_cfg.padFire2) || IsGamepadButtonDown(pad_id, g_cfg.padCancel)) pad |= nes::con_btn_B;        // super canonazo (B)
         const float ax = GetGamepadAxisMovement(pad_id, GAMEPAD_AXIS_LEFT_X);
         const float ay = GetGamepadAxisMovement(pad_id, GAMEPAD_AXIS_LEFT_Y);
         if (ay < -0.5f) pad |= nes::con_btn_Up;

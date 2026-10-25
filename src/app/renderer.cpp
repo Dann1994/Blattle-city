@@ -337,6 +337,15 @@ void DrawExtraGround(const nes::Battle& b, std::vector<uint32_t>& rgb, int w) {
 
 // Lo que va por encima: helicopteros (hoja de sprites propia), explosiones, iconos de los items nuevos y la marca de velocidad.
 void DrawExtraAir(const nes::Battle& b, std::vector<uint32_t>& rgb, int w) {
+    for (int i = 0; i < nes::Battle::kMaxSuperShots; ++i) {                               // super canonazo: un obus grande con estela
+        const auto& sh = b.SuperShotState(i);
+        if (!sh.on) continue;
+        for (int k = 1; k <= 4; ++k)
+            for (int dy = -2; dy <= 2; ++dy)
+                for (int dx = -2; dx <= 2; ++dx) BlendPx(rgb, w, sh.x - sh.dx * k * 3 + dx, sh.y - sh.dy * k * 3 + dy, (0x70 - k * 14) << 24 | 0xFC9838);
+        for (int dy = -4; dy <= 3; ++dy)
+            for (int dx = -4; dx <= 3; ++dx) BlendPx(rgb, w, sh.x + dx, sh.y + dy, 0xFF000000 | (std::abs(dx + 0.5) + std::abs(dy + 0.5) < 5 ? 0xFCFCFC : 0xFC9838));
+    }
     for (int i = 0; i < nes::Battle::kMaxCannonShots; ++i) {                              // disparos de los canones
         const auto& sh = b.CannonShotState(i);
         if (!sh.on) continue;
@@ -422,11 +431,26 @@ void Renderer::RenderNesScreen(const nes::Battle& battle, std::vector<uint32_t>&
         bool behind = false;
     };
     std::vector<SpritePixel> layer(static_cast<size_t>(kNesW) * kNesH);
+    // super canonazo: el tanque que lo tiene listo brilla (pulso blanco) y el que acaba de disparar parpadea en rojo (5 segundos sin disparar)
+    static const int kPulse[4] = {0, 1, 2, 1};
+    const int pulse = kPulse[(battle.R(nes::ram_frm_cnt_lo) >> 3) & 3];
+    auto tankFxOf = [&](const nes::Sprite& s) {                       // 0 nada, 1 brillo, 2 rojo; el nivel va en el pulso
+        for (int p = 0; p < 4 && p < battle.Players(); ++p) {
+            const int f = battle.TankFlags(p);
+            if (!(f & 0x80) || f >= 0xE0) continue;
+            const int cx = s.x + 4, cy = s.y + 9;
+            if (cx < battle.TankX(p) - 9 || cx > battle.TankX(p) + 9 || cy < battle.TankY(p) - 9 || cy > battle.TankY(p) + 9) continue;
+            if (battle.SuperLock(p) > 0) return 2;
+            if (battle.SuperReady(p)) return 1;
+        }
+        return 0;
+    };
     for (int i = 63; i >= 0; --i) {
         const nes::Sprite s = battle.OamSprite(i);
         if (s.y >= 0xEF) {
             continue;
         }
+        const int fx = pulse > 0 ? tankFxOf(s) : 0;
         const int palette = (s.attr & 7) | ((s.attr & 0x10) >> 1);   // el bit 4 del atributo suma el banco 8 (marron)
         const bool behind = (s.attr & 0x20) != 0;
         const bool flipH = (s.attr & 0x40) != 0;
@@ -446,7 +470,16 @@ void Renderer::RenderNesScreen(const nes::Battle& battle, std::vector<uint32_t>&
                 const int x = s.x + px;
                 if (x < 0 || x >= kNesW) continue;
                 SpritePixel& p = layer[static_cast<size_t>(y) * kNesW + x];
-                p.color = NesColor(SpritePaletteColor(palette, idx));
+                uint32_t col = NesColor(SpritePaletteColor(palette, idx));
+                if (fx == 1) {                                                    // brillo: se suma blanco, mas fuerte en el pico del pulso
+                    const uint32_t add = pulse == 1 ? 70 : 150;
+                    const uint32_t r = std::min<uint32_t>(255, ((col >> 16) & 0xFF) + add), g = std::min<uint32_t>(255, ((col >> 8) & 0xFF) + add), b = std::min<uint32_t>(255, (col & 0xFF) + add);
+                    col = (r << 16) | (g << 8) | b;
+                } else if (fx == 2) {                                             // rojo: de a pasos (rojo suave, rojo pleno)
+                    const uint32_t mr = pulse == 1 ? 255 : 230, mg = pulse == 1 ? 150 : 41, mb = pulse == 1 ? 150 : 55;
+                    col = ((((col >> 16) & 0xFF) * mr / 255) << 16) | ((((col >> 8) & 0xFF) * mg / 255) << 8) | ((col & 0xFF) * mb / 255);
+                }
+                p.color = col;
                 p.opaque = true;
                 p.behind = behind;
             }
@@ -728,8 +761,8 @@ void Renderer::DrawWideHudOverlay(std::vector<uint32_t>& world, int w, const nes
             const std::string label = battle.RoyaleIsBot(id) ? std::string("IA") : std::to_string(id + 1);
             DrawText(layer, w, px, py, label, out ? 0x7C7C7C : color);
             DrawColoredTile(layer, w, px + 19, py, nes::tbl_D341_tile___player_icon[0], out ? std::array<uint32_t, 4>{0, 0x4C4C4C, 0x7C7C7C, 0x4C4C4C}.data() : colors);
-            const int n = battle.RoyaleTimed() ? battle.RoyaleKills(id) : battle.RoyaleLives(id);
-            DrawText(layer, w, px + 30, py, std::to_string(n % 100), out ? 0x7C7C7C : color);
+            const int n = battle.RoyaleTimed() ? battle.RoyaleScore(id) : battle.RoyaleLives(id);      // por tiempo: bajas menos muertes
+            DrawText(layer, w, px + 30, py, std::to_string(std::max(-99, std::min(99, n))), out ? 0x7C7C7C : color);
         }
         if (battle.RoyaleTimed()) {                              // el reloj de la partida, bajo el del bombardeo
             const int secs = (battle.RoyaleFramesLeft() + 59) / 60;
@@ -770,6 +803,7 @@ void Renderer::DrawWideHudOverlay(std::vector<uint32_t>& world, int w, const nes
                                     NesColor(SpritePaletteColor(battle.PlayerPaletteIndex(p), 3))};
         DrawColoredTile(layer, w, xr - 18, y + 9, nes::tbl_D341_tile___player_icon[0], colors);
         DrawHudTileT(layer, w, xr - 8, y + 9, 0x6E + (battle.Lives(p) % 10), battle, 0);
+        if (battle.SuperReady(p) && ((battle.R(nes::ram_frm_cnt_lo) >> 4) & 1)) DrawText(layer, w, xr - 30, y + 9, "B", 0xF8D878);        // super canonazo listo
         const int steal = battle.StealTarget(p);                  // sin vidas: a quien le va a robar
         if (steal >= 0) {
             const int pi = battle.PlayerPaletteIndex(steal);

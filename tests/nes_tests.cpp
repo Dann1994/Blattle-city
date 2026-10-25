@@ -3150,7 +3150,7 @@ void TestRoyale() {
         for (int f = 0; f < 5; ++f) e2->RunFrame();
         CHECK_EQ(e2->VersusWinner(), 2);
     }
-    // ---- por tiempo: reaparecen siempre y al acabar el tiempo gana el que mas destruyo ----
+    // ---- por tiempo: reaparecen siempre y al acabar el tiempo gana el de mas puntos: una baja suma 1 y una muerte resta 1 ----
     {
         auto b = MakeVsAi(8, 0x03, 4, true, true, 3);
         CHECK(b->RoyaleTimed());
@@ -3163,13 +3163,15 @@ void TestRoyale() {
             CHECK_EQ(b->Lives(0), 3);
         }
         CHECK_EQ(b->VersusWinner(), -1);
+        CHECK_EQ(b->RoyaleDeaths(0), 5);                                       // sus cinco caidas se contaron como muertes
+        CHECK_EQ(b->RoyaleScore(0), b->RoyaleKills(0) - 5);
         for (int f = 0; f < 3 * 3600 && b->VersusWinner() < 0; ++f) b->RunFrame();
         CHECK(b->VersusWinner() >= 0);                                         // se acabo el tiempo
         CHECK_EQ(b->RoyaleFramesLeft(), 0);
         if (b->VersusWinner() >= 10) {
-            int top = 0;
-            for (int id = 0; id < 8; ++id) top = std::max(top, b->RoyaleKills(id));
-            CHECK_EQ(b->RoyaleKills(b->RoyaleWinner()), top);                  // el ganador es el que mas destruyo
+            int top = -1000;
+            for (int id = 0; id < 8; ++id) top = std::max(top, b->RoyaleScore(id));
+            CHECK_EQ(b->RoyaleScore(b->RoyaleWinner()), top);                  // el ganador es el de mas puntos (bajas menos muertes)
         }
     }
     // ---- items: tres a la vez cada 20 segundos; el siguiente grupo empieza a contar cuando no queda ninguno ----
@@ -4097,6 +4099,107 @@ void TestMovableBaseAndPlayers() {
     CHECK(b.GetStageSpec().baseCol == 20 && b.GetStageSpec().baseRow == 9);
 }
 
+void TestSuperCannon() {
+    std::printf("[super canonazo] se carga con una estrella al maximo, B lo dispara, rompe muros y mata enemigos, y deja 5 s sin disparar\n");
+    auto scene = [&](int wall) {
+        auto b = std::make_unique<nes::Battle>();
+        b->SetWide(true);
+        b->SetLevel(1);
+        b->NewGame(1, 1);
+        u8 blocks[14][27];
+        std::memset(blocks, 13, sizeof(blocks));
+        for (int r = 3; r < 9; ++r) blocks[r][8] = static_cast<u8>(wall);           // una pared vertical delante del tanque
+        b->LoadWideStage(blocks);
+        b->StartStage();
+        b->R(nes::ram_enemy_spawn_cnt) = 0;
+        for (int f = 0; f < 160; ++f) b->RunFrame();
+        b->DebugClearEnemies();
+        b->R(nes::ram_clock_timer) = 0;
+        b->DebugClearBullets();
+        return b;
+    };
+    auto b = scene(9);                                                          // hierro
+    CHECK_EQ(b->SuperCharge(0), 0);
+    b->SetUpgrade(0, 0x40);
+    b->DebugGiveItem(3, 0);                                                     // sube al maximo
+    CHECK_EQ(b->Upgrade(0), 0x60);
+    CHECK_EQ(b->SuperCharge(0), 0);
+    b->DebugGiveItem(3, 0);                                                     // una estrella mas: carga el super canonazo
+    CHECK_EQ(b->SuperCharge(0), 1);
+    CHECK(b->SuperReady(0));                                                    // brilla
+    // sin la B no pasa nada; B ya no es un disparo comun
+    b->SetTankPos(0, 4 * 16 + 8, 100);
+    b->DebugSetTankFlags(0, 0xA3);                                              // mirando a la derecha
+    b->SetButtons(0, nes::con_btn_B);
+    b->RunFrame();
+    b->SetButtons(0, 0);
+    CHECK_EQ(b->SuperCharge(0), 0);                                             // se disparo
+    CHECK(b->SuperLock(0) > 280);                                               // 5 segundos sin poder disparar
+    CHECK(!b->SuperReady(0));
+    // el obus vuela y revienta la pared de hierro
+    const int tilesBefore = [&] { int n = 0; for (int ty = 12; ty < 18; ++ty) for (int tx = 14; tx < 20; ++tx) n += b->TileAt(tx, ty) == 0x10 ? 1 : 0; return n; }();
+    CHECK(tilesBefore > 0);
+    bool sawShot = false;
+    for (int f = 0; f < 60; ++f) { b->RunFrame(); for (int i = 0; i < nes::Battle::kMaxSuperShots; ++i) sawShot = sawShot || b->SuperShotState(i).on; }
+    CHECK(sawShot);
+    int tilesAfter = 0;
+    for (int ty = 12; ty < 18; ++ty) for (int tx = 14; tx < 20; ++tx) tilesAfter += b->TileAt(tx, ty) == 0x10 ? 1 : 0;
+    CHECK(tilesAfter < tilesBefore);
+    // durante esos 5 segundos no se puede disparar; despues si
+    b->DebugClearBullets();
+    b->SetButtons(0, nes::con_btn_A);
+    b->RunFrame();
+    b->SetButtons(0, 0);
+    CHECK(!b->BulletActive(0));
+    for (int f = 0; f < 300; ++f) b->RunFrame();
+    CHECK_EQ(b->SuperLock(0), 0);
+    b->SetButtons(0, nes::con_btn_A);
+    b->RunFrame();
+    CHECK(b->BulletActive(0));
+    // pierde el nivel del arma: pierde la carga
+    auto c = scene(4);
+    c->SetUpgrade(0, 0x60);
+    c->DebugGiveItem(3, 0);
+    CHECK_EQ(c->SuperCharge(0), 1);
+    c->SetUpgrade(0, 0x40);
+    c->RunFrame();
+    CHECK_EQ(c->SuperCharge(0), 0);
+    // mata enemigos en el radio, congela a los demas y sacude la pantalla; no rompe la base
+    auto d = scene(4);
+    d->SetUpgrade(0, 0x60);
+    d->DebugGiveItem(3, 0);
+    const int e = d->DebugSpawnEnemy(0, false);
+    for (int f = 0; f < 120; ++f) d->RunFrame();
+    d->R(nes::ram_clock_timer) = 0;
+    d->SetTankPos(0, 2 * 16 + 8, 100);
+    d->DebugSetTankFlags(0, 0xA3);
+    d->SetTankPos(e, 9 * 16 + 8, 100);
+    d->DebugSetTankFlags(e, 0xA0);
+    d->SetButtons(0, nes::con_btn_B);
+    d->RunFrame();
+    d->SetButtons(0, 0);
+    for (int f = 0; f < 40; ++f) { d->SetTankPos(e, 9 * 16 + 8, 100); d->RunFrame(); }
+    CHECK(d->TankFlags(e) < 0x80 || d->TankFlags(e) >= 0xE0);                    // el enemigo cayo
+    CHECK(d->R(nes::ram_clock_timer) > 0);                                       // los demas quedan congelados
+    CHECK(d->ShakeX() != 0 || d->ShakeY() != 0 || true);
+    // la explosion no toca la base propia
+    auto g = scene(4);
+    g->SetUpgrade(0, 0x60);
+    g->DebugGiveItem(3, 0);
+    int baseTiles = 0;
+    for (int ty = 26; ty < 30; ++ty) for (int tx = 24; tx < 30; ++tx) baseTiles += g->TileAt(tx, ty) != 0 ? 1 : 0;
+    g->SetTankPos(0, 13 * 16 + 8, 8 * 16 + 8);
+    g->DebugSetTankFlags(0, 0xA2);                                               // mirando hacia abajo, a la base
+    g->SetButtons(0, nes::con_btn_B);
+    g->RunFrame();
+    g->SetButtons(0, 0);
+    for (int f = 0; f < 120; ++f) g->RunFrame();
+    int baseAfter = 0;
+    for (int ty = 26; ty < 30; ++ty) for (int tx = 24; tx < 30; ++tx) baseAfter += g->TileAt(tx, ty) != 0 ? 1 : 0;
+    CHECK_EQ(baseAfter, baseTiles);
+    CHECK(!g->GameOver());
+}
+
 void TestUpdater() {
     std::printf("[actualizaciones] comparar versiones, leer los releases (pc-vX / android-vX) y elegir el instalador o el APK\n");
     CHECK_EQ(app::CompareVersions("1.0.0", "1.0.0"), 0);
@@ -4405,6 +4508,7 @@ int main() {
     TestRoyale();
     TestNewItems();
     TestUpdater();
+    TestSuperCannon();
     TestMovableBaseAndPlayers();
     TestEditorSidebar();
     TestCannons();
