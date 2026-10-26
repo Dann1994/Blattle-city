@@ -3774,6 +3774,9 @@ void TestDifficultyRulesAndContinues() {
         CHECK_EQ(c.StartLives(), 10);
         c.SetStartLives(0);
         CHECK_EQ(c.StartLives(), 1);
+        c.SetStartLives(11);                                            // 11 = infinitas, pero solo cuenta en la batalla vs
+        CHECK_EQ(c.StartLives(), 10);
+        CHECK(!c.InfiniteLives());
     }
 }
 

@@ -269,7 +269,7 @@ static std::string g_levelsTag;
 void Lan::SetLevelsTag(const std::string& tag) { g_levelsTag = tag; }
 
 std::string Lan::BuildId() {
-    return "BCNES-2026.10.29-v109" + (g_levelsTag.empty() ? std::string() : "-" + g_levelsTag);
+    return "BCNES-2026.10.30-v110" + (g_levelsTag.empty() ? std::string() : "-" + g_levelsTag);
 }
 
 Lan::Lan(uint16_t port) : impl_(new Impl) {

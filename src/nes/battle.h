@@ -113,7 +113,9 @@ public:
     struct Rules { int ai = 2; bool itemsShared = false; int lives = 3; int items = 0; };      // items: a la vez en el campo (1 a 3); 0 = automatico (2 con 3 o 4 jugadores)
     void SetRules(const Rules& r) { rules_ = r; rules_.lives = r.lives < 1 ? 1 : (r.lives > 10 ? 10 : r.lives); startLives_ = rules_.lives; }
     const Rules& GetRules() const { return rules_; }
-    void SetStartLives(int n) { startLives_ = n < 1 ? 1 : (n > 10 ? 10 : n); }     // batalla vs / royale: vidas de cada jugador (hasta 10)
+    // batalla vs / royale: vidas de cada jugador (hasta 10); 11 = infinitas (solo en la batalla vs: la partida dura hasta destruir un aguila)
+    void SetStartLives(int n) { infiniteLives_ = n >= 11; startLives_ = n < 1 ? 1 : (n > 10 ? 10 : n); }
+    bool InfiniteLives() const { return infiniteLives_ && IsVersus() && !IsRoyale(); }
     int StartLives() const { return startLives_; }
     void ReviveForContinue();                       // "continuar": todos los jugadores vuelven con sus vidas (despues se recarga el nivel)
     int Players() const { return nPlayers_; }
@@ -730,6 +732,7 @@ private:
     uint16_t oamX_[64] = {};
     Rules rules_;
     int startLives_ = 3;
+    bool infiniteLives_ = false;
     bool sharing_ = false;
     int EnemyHp(int kind) const;
     int markPtr_[kMaxTanks] = {};

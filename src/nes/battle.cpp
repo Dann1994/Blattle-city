@@ -1275,7 +1275,7 @@ void Battle::Status_Explosion(int x) {
         return;
     }
     if (IsRoyale() && x < 8) ++royaleDeaths_[x];          // cada muerte le resta un punto (por tiempo)
-    if (!RoyaleTimed()) LIVES(x)--;                       // (battle royale por tiempo: reaparece siempre)
+    if (!RoyaleTimed() && !InfiniteLives()) LIVES(x)--;   // (battle royale por tiempo y vs con vidas infinitas: reaparece siempre)
     if (LIVES(x) != 0) {
         Sub_E363_tank_spawn_handler(x);
         return;
@@ -1397,7 +1397,8 @@ int Battle::VsEagleAt(int px, int py) const {
 
 bool Battle::NearVsEagle(int col, int row) const {
     for (int t = 0; t < 2; ++t) {
-        if (std::abs(col - spec_.vsEagleCol[t]) <= 1 && std::abs(row - (spec_.vsEagleRow[t] - 1)) <= 1) return true;
+        // zona amplia: la fortaleza de dos capas y lo que la rodea (la explosion es de 3x3 bloques)
+        if (std::abs(col - spec_.vsEagleCol[t]) <= 3 && row >= spec_.vsEagleRow[t] - 4 && row <= spec_.vsEagleRow[t] + 3) return true;
     }
     return false;
 }
@@ -2631,7 +2632,11 @@ void Battle::CampaignItemsStep() {
 
 // Cantidad de puntos de aparicion de enemigos y su posicion (centro del bloque, en pixeles).
 int Battle::SpawnPointCount() const {
-    if (spec_.active && spec_.nSpawns > 0) return spec_.nSpawns;
+    if (spec_.active && spec_.nSpawns > 0) {
+        // los puntos de los costados (del 4 en adelante; en los niveles del aguila, del 6) solo se usan con 4 jugadores o mas, como en los de fabrica
+        if (!IsVersus() && diffPlayers_ < 4) return std::min<int>(spec_.nSpawns, IsBossLevel() ? 5 : 3);
+        return spec_.nSpawns;
+    }
     return IsBossLevel() ? (diffPlayers_ >= 4 ? 7 : 5) : ((wide_ && diffPlayers_ >= 4) ? 5 : 3);      // los dos puntos de los costados, solo con 4 jugadores
 }
 
@@ -3555,7 +3560,7 @@ void Battle::StartRaid() {
                 const int row = horizontal ? lane : pos[k];
                 if (IsVersus()) {
                     if (!IsRoyale() && NearVsEagle(col, row)) bad = true;                       // ninguna bomba cerca de las dos aguilas
-                } else if (col >= EagleCol() - 1 && col <= EagleCol() + 1 && row >= EagleRow() - 2 && row <= EagleRow()) {
+                } else if (col >= EagleCol() - 3 && col <= EagleCol() + 3 && row >= EagleRow() - 4 && row <= EagleRow() + 3) {
                     bad = true;
                 }
             } while (bad);

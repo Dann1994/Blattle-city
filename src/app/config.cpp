@@ -41,7 +41,7 @@ bool Config::Load(const std::string& path) {
         else if (name == "cuai") cuAi = value < 0 ? 0 : (value > 2 ? 2 : value);
         else if (name == "cuitems") cuItems = value < 1 ? 1 : (value > 3 ? 3 : value);
         else if (name == "culives") cuLives = value < 1 ? 1 : (value > 10 ? 10 : value);
-        else if (name == "vslives") vsLives = value < 1 ? 1 : (value > 10 ? 10 : value);
+        else if (name == "vslives") vsLives = value < 1 ? 1 : (value > 11 ? 11 : value);
     }
     return true;
 }

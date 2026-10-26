@@ -34,7 +34,7 @@ struct Config {
     int cuAi = 1;                            // personalizada: dificultad de la IA (0 facil, 1 normal, 2 dificil)
     int cuItems = 2;                         // personalizada: items a la vez en el campo (1 a 3)
     int cuLives = 3;                         // personalizada: vidas
-    int vsLives = 3;                         // batalla vs y battle royale a muerte: vidas (1..10)
+    int vsLives = 3;                         // batalla vs y battle royale a muerte: vidas (1..10, 11 = infinitas en la batalla vs)
     bool voiceChat = true;                   // chat de voz en las partidas en red
     bool hideHud = false;                    // ocultar la informacion de la pantalla al jugar (vidas, tanques enemigos, etapa...); Select / Tab
     bool autoUpdate = true;                  // al abrir el juego, buscar actualizaciones

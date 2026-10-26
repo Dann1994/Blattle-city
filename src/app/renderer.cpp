@@ -784,7 +784,8 @@ void Renderer::DrawWideHudOverlay(std::vector<uint32_t>& world, int w, const nes
             const std::string label = battle.IsBot(p) ? std::string("IA") : std::to_string(p + 1);
             DrawText(layer, w, px, py, label, color);
             DrawColoredTile(layer, w, px + 9 + (label.size() > 1 ? 8 : 0), py, nes::tbl_D341_tile___player_icon[0], colors);
-            DrawHudTileT(layer, w, px + 19 + (label.size() > 1 ? 8 : 0), py, 0x6E + (battle.Lives(p) % 10), battle, 0);
+            if (battle.InfiniteLives()) DrawText(layer, w, px + 19 + (label.size() > 1 ? 8 : 0), py, "OO", color);        // vidas infinitas: el simbolo del infinito
+            else DrawHudTileT(layer, w, px + 19 + (label.size() > 1 ? 8 : 0), py, 0x6E + (battle.Lives(p) % 10), battle, 0);
         }
     } else {
     // enemigos que faltan por aparecer: dos columnas de hasta 10, arriba a la derecha

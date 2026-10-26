@@ -372,7 +372,7 @@ public:
         if (!custom) battle_->SetStageSpec(nes::Battle::StageSpec{});
         battle_->SetLevel(wide_ ? level_ : 0);
         if (vsMode_) {
-            battle_->SetStartLives(vsLives_);                                // batalla vs / royale: vidas configurables (hasta 10)
+            battle_->SetStartLives(EffVsLives());                                // batalla vs / royale: vidas configurables (hasta 10)
         } else {
             const CampaignRules cr = netGame_ ? netRules_ : ResolveRules();
             nes::Battle::Rules br;
@@ -1002,7 +1002,7 @@ public:
     // Opciones de la sala en un entero (viaja en el mensaje de la sala): bits 0-1 fuego amigo, 4 batalla vs, 5-7 dificultad de la IA,
     // 8-9 bombardeo, 10-11 tamano de los equipos (menos 2; 3 = battle royale), 12-13 modo del royale, 14+ semilla del mapa (todos generan el mismo).
     int VersusNetOptions(int ff, int seed) const {
-        return (ff & 3) | 16 | (vsTier_ << 5) | ((vsRank_ - 1) << 8) | ((royale_ ? 3 : vsSize_ - 2) << 10) | (royaleOpt_ << 12) | (vsLives_ << 14) | (seed << 18);
+        return (ff & 3) | 16 | (vsTier_ << 5) | ((vsRank_ - 1) << 8) | ((royale_ ? 3 : vsSize_ - 2) << 10) | (royaleOpt_ << 12) | (EffVsLives() << 14) | (seed << 18);
     }
     void TryStartLan() {
         if (lan_.NumPlayers() < 2) { lanNote_ = "SE NECESITAN 2 JUGADORES O MÁS"; return; }
@@ -1055,7 +1055,7 @@ public:
             royale_ = ((raw >> 10) & 3) == 3;
             if (!royale_) vsSize_ = std::min(4, ((raw >> 10) & 3) + 2);
             royaleOpt_ = (raw >> 12) & 3;
-            vsLives_ = std::max(1, std::min(10, (raw >> 14) & 15));
+            vsLives_ = std::max(1, std::min(11, (raw >> 14) & 15));
             vsSeed_ = static_cast<uint32_t>(raw >> 18);
             for (int i = 0; i < nes::kMaxPlayers; ++i) vsTeams_[i] = i & 1;
             humanMask_ = lan_.StartMask();
@@ -1308,7 +1308,8 @@ public:
                 if (royale_) royaleOpt_ = (royaleOpt_ + 4 + d) % 4;
                 else vsSize_ = (vsSize_ - 2 + 3 + d) % 3 + 2;
             } else if (menuIndex_ == 4) {
-                vsLives_ = (vsLives_ - 1 + 10 + d) % 10 + 1;
+                const int top = royale_ ? 10 : 11;                              // vidas infinitas solo en la batalla vs
+                vsLives_ = (std::min(vsLives_, top) - 1 + top + d) % top + 1;
                 g_cfg.vsLives = vsLives_;
                 SaveConfig();
             }
@@ -1392,7 +1393,8 @@ public:
                     if (royale_) royaleOpt_ = (royaleOpt_ + 1) % 4;            // a muerte -> 3 min -> 5 min -> 10 min
                     else vsSize_ = vsSize_ % 3 + 2;                            // 2 VS 2 -> 3 VS 3 -> 4 VS 4
                 } else if (index == 4) {
-                    vsLives_ = vsLives_ % 10 + 1;
+                    const int top = royale_ ? 10 : 11;
+                    vsLives_ = std::min(vsLives_, top) % top + 1;
                     g_cfg.vsLives = vsLives_;
                     SaveConfig();
                 } else if (index == 5) {                                       // empezar: en esta PC se eligen los equipos; en red se crea la sala
@@ -1749,7 +1751,7 @@ public:
                            "BOMBARDEO CADA: " + std::to_string(5 - vsRank_) + (vsRank_ == 4 ? " MINUTO" : " MINUTOS"),
                            royale_ ? "MODO: " + std::string(royaleOpt_ == 0 ? "A MUERTE" : "POR TIEMPO " + std::to_string(royaleOpt_ == 1 ? 3 : (royaleOpt_ == 3 ? 10 : 5)) + " MIN")
                                    : "EQUIPOS: " + std::to_string(vsSize_) + " VS " + std::to_string(vsSize_),
-                           "VIDAS: " + std::to_string(vsLives_),
+                           "VIDAS: " + (EffVsLives() >= 11 ? std::string("INFINITAS") : std::to_string(EffVsLives())),
                            netMode_ ? "CREAR SALA" : "EMPEZAR", "VOLVER"};
                 v.note = !lanNote_.empty() ? lanNote_
                        : (royale_ ? std::string(royaleOpt_ == 0 ? "QUEDA UNO SOLO" : "GANA EL DE MÁS PUNTOS: BAJA +1, MUERTE -1") + ", LA IA COMPLETA HASTA 8"
@@ -1967,7 +1969,7 @@ public:
         if (netGame_ && lan_.Desynced()) hud.banner = "DESINCRONIZADO";
         else if (netGame_ && netStall_ > 20) hud.banner = "ESPERANDO A LOS DEMÁS...";
         if (battle_->IsBossLevel()) hud.introSubtitle = "DESTRUYE LA BASE ENEMIGA";
-        if (vsMode_) hud.introSubtitle = royale_ ? (royaleOpt_ == 0 ? "QUEDA UNO SOLO: " + std::to_string(vsLives_) + " VIDAS CADA UNO" : "GANA QUIEN MÁS BAJAS Y MENOS MUERTES HAGA") : "DESTRUYE EL ÁGUILA RIVAL";
+        if (vsMode_) hud.introSubtitle = royale_ ? (royaleOpt_ == 0 ? "QUEDA UNO SOLO: " + std::to_string(EffVsLives()) + " VIDAS CADA UNO" : "GANA QUIEN MÁS BAJAS Y MENOS MUERTES HAGA") : "DESTRUYE EL ÁGUILA RIVAL";
         hud.paused = battle_->R(nes::ram_pause_flag) != 0;
         hud.hideHud = g_cfg.hideHud;
         if (netGame_) {                                                               // en red, el nombre de cada jugador real sobre su tanque
@@ -2289,6 +2291,7 @@ private:
     Scene updateReturn_ = Scene::Title;
     int checkFrames_ = 0;
     CampaignRules netRules_;                                 // reglas de la campania en red (las fija el anfitrion)
+    int EffVsLives() const { return royale_ ? std::min(vsLives_, 10) : vsLives_; }          // 11 = infinitas (no en el battle royale)
     int vsLives_ = 3;                                        // vidas de la batalla vs / royale a muerte (1..10)
     bool royale_ = false;                                    // battle royale (sobre el modo batalla vs): todos contra todos
     int humanMask_ = 3;                                      // batalla vs / royale: bit p = el jugador p es una persona (los demas, IA)
