@@ -1021,9 +1021,12 @@ void TestBossLevelEnemyEagle() {
                 for (int k = 1; k <= n; ++k) {                           // cada capa: un mosaico a cada lado y debajo
                     CHECK(fb.Tile(26 - k, 3) != 0 && fb.Tile(27 + k, 3) != 0 && fb.Tile(26, 3 + k) != 0 && fb.Tile(27, 3 + k) != 0);
                 }
-                CHECK_EQ(fb.Tile(26 - n - 1, 3), 0);                     // ni una capa de mas
-                CHECK_EQ(fb.Tile(27 + n + 1, 3), 0);
-                CHECK_EQ(fb.Tile(26, 3 + n + 1), 0);
+                CHECK_EQ(fb.FieldAt(26 - n - 1, 3), 1);                  // despues de las capas viene el anillo del campo de fuerza...
+                CHECK_EQ(fb.FieldAt(27 + n + 1, 3), 1);
+                CHECK_EQ(fb.FieldAt(26, 3 + n + 1), 1);
+                CHECK_EQ(fb.Tile(26 - n - 2, 3), 0);                     // ...y nada mas
+                CHECK_EQ(fb.Tile(27 + n + 2, 3), 0);
+                CHECK_EQ(fb.Tile(26, 3 + n + 2), 0);
                 // las apariciones quedan libres, justo afuera de la fortaleza
                 const int gap = fb.EagleSpawnGap();
                 CHECK(gap >= 16 + 8 * n);
@@ -1074,6 +1077,9 @@ void TestBossLevelEnemyEagle() {
     // un jugador debajo del aguila le dispara: cae y el nivel queda ganado
     CHECK(b.EnemyEagleAlive());
     CHECK_EQ(b.EnemyEagleHealth(), 10);                   // nivel 10: salud 10
+    CHECK(b.FieldUp() && b.CrystalsLeft() == 2);          // el campo de fuerza protege al aguila hasta que caen los cristales (nivel 10: 2)
+    b.DebugDropField();
+    CHECK(!b.FieldUp());
     b.SetUpgrade(0, 0x40);                                // balas de nivel 2: rompen el hierro en varios disparos
     const int scoreBefore = b.Score(0);
     b.SetTankPos(0, 216, 0x48);
@@ -1289,6 +1295,74 @@ void TestBombing() {
         }
     }
     CHECK(sawHoriz && sawVert);
+}
+
+void TestForceField() {
+    using Mode = app::GameFlow::Mode;
+    std::printf("[campo de fuerza] el anillo y las placas frenan las balas, los cristales se rompen con balas de jugadores y al caer el tercero cae el campo\n");
+    auto fx = MakeFlow(10, 1);
+    auto& b = *fx->battle;
+    for (int f = 0; f < 200 && fx->flow->mode() != Mode::Playing; ++f) fx->flow->Step();
+    CHECK(b.FieldUp() && b.CrystalsLeft() == 2);                  // nivel 10: 2 cristales (el 20: 3, el 30: 4 y el 40: 5)
+    for (int lv = 20; lv <= 40; lv += 10) {
+        auto fl = MakeFlow(lv, 1);
+        CHECK_EQ(fl->battle->CrystalsLeft(), lv / 10 + 1);
+    }
+    for (int i = 0; i < 2; ++i) {
+        CHECK_EQ(b.FieldAt(b.CrystalTx(i), b.CrystalTy(i)), 2 + i);               // el cristal ocupa 2x2 mosaicos
+        CHECK_EQ(b.FieldAt(b.CrystalTx(i) + 1, b.CrystalTy(i) + 1), 2 + i);
+        CHECK_EQ(b.FieldAt(b.CrystalTx(i) - 1, b.CrystalTy(i) + 2), 7 + i);       // y la placa abajo (4 mosaicos de ancho)
+        CHECK_EQ(b.FieldAt(b.CrystalTx(i) + 2, b.CrystalTy(i) + 2), 7 + i);
+        CHECK_EQ(b.FieldAt(b.CrystalTx(i), b.CrystalTy(i) - 1), 0);               // por arriba y por los costados no hay nada
+        CHECK_EQ(b.FieldAt(b.CrystalTx(i) - 1, b.CrystalTy(i)), 0);
+        CHECK_EQ(b.FieldAt(b.CrystalTx(i) + 2, b.CrystalTy(i)), 0);
+    }
+    b.DebugClearEnemies();
+    b.SetUpgrade(0, 0xC0);                                      // balas de nivel 3: rompen hierro de un tiro
+    // desde abajo, directo al aguila: el anillo (o una placa) lo frena y el aguila queda entera
+    const int hp0 = b.EnemyEagleHealth();
+    for (int f = 0; f < 240; ++f) {
+        b.SetTankPos(0, 216, 0x98);
+        b.SetButtons(0, static_cast<u8>(nes::con_btn_Up | ((f % 16) < 8 ? nes::con_btn_A : 0)));
+        fx->flow->Step();
+        b.R(nes::ram_game_over_flag) = nes::con_not_game_over;
+        b.DebugClearEnemies();
+    }
+    CHECK(b.FieldUp());
+    CHECK_EQ(b.EnemyEagleHealth(), hp0);
+    CHECK(b.EnemyEagleAlive());
+    // a un cristal desde el costado: se rompe (y con los tres, cae el campo)
+    for (int i = 0; i < 2; ++i) {
+        const int tx = b.CrystalTx(i), ty = b.CrystalTy(i);
+        const int x = (tx + 1) * 8, y = ty * 8 + 8;                 // centro del cristal
+        for (int f = 0; f < 400 && b.CrystalHp(i) > 0; ++f) {
+            b.SetTankPos(0, x - 40, y);
+            b.SetButtons(0, static_cast<u8>(nes::con_btn_Right | ((f % 16) < 8 ? nes::con_btn_A : 0)));
+            fx->flow->Step();
+            b.R(nes::ram_game_over_flag) = nes::con_not_game_over;
+            b.DebugClearEnemies();
+        }
+        CHECK_EQ(b.CrystalHp(i), 0);
+        CHECK_EQ(b.FieldAt(tx, ty), 0);
+        CHECK_EQ(b.CrystalsLeft(), 1 - i);
+        CHECK_EQ(b.FieldUp() ? 1 : 0, i < 1 ? 1 : 0);
+    }
+    CHECK_EQ(b.FieldAt(26 - 3, 3), 0);                           // anillo caido
+    // las apariciones de enemigos no abren huecos en el anillo ni en las placas (en ningun nivel del aguila)
+    for (int lv : {10, 20, 30, 40}) {
+        auto f2 = MakeFlow(lv, 1);
+        auto& b2 = *f2->battle;
+        for (int f = 0; f < 200 && f2->flow->mode() != Mode::Playing; ++f) f2->flow->Step();
+        auto count = [&]() { int n = 0; for (int ty = 0; ty < 30; ++ty) for (int tx = 0; tx < 54; ++tx) n += b2.FieldAt(tx, ty) != 0 ? 1 : 0; return n; };
+        const int before = count();
+        CHECK(before > 0);
+        for (int f = 0; f < 3000; ++f) {
+            f2->flow->Step();
+            b2.R(nes::ram_game_over_flag) = nes::con_not_game_over;
+            if (f % 600 == 599) b2.DebugClearEnemies();                    // (que sigan apareciendo)
+        }
+        CHECK_EQ(count(), before);
+    }
 }
 
 void TestBossEnemiesGuard() {
@@ -2730,6 +2804,18 @@ void TestLavaBlock() {
         for (int f = 0; f < 2500; ++f) { b->R(nes::ram_enemy_spawn_cnt) = 0; b->RunFrame(); maxFlow = std::max(maxFlow, b->LavaFlowCells()); }
         CHECK_EQ(maxFlow, 0);
         CHECK(b->LavaAtBlock(10, 7));                                        // y la fuente sigue ahi
+    }
+    // ---- 1b) un muro roto a medias (queda un solo mosaico de hierro del bloque vecino) tambien deja salir a la lava ----
+    {
+        auto b = make([](u8 (*bl)[27]) {
+            bl[6][10] = Battle::kLavaBlockId;
+            bl[5][10] = bl[7][10] = bl[6][9] = 4;
+            bl[6][11] = Battle::kCornerSteelBase;                            // del bloque de la derecha solo queda el mosaico de arriba a la izquierda
+        });
+        int maxFlow = 0;
+        for (int f = 0; f < 1500; ++f) { b->R(nes::ram_enemy_spawn_cnt) = 0; b->DebugSetTankFlags(0, 0); b->RunFrame(); maxFlow = std::max(maxFlow, b->LavaFlowCells()); }
+        CHECK(maxFlow > 0);
+        CHECK_EQ(b->TileAt(22, 12), 0x10);                                   // y el mosaico de hierro que quedaba no se toco
     }
     // ---- 2) con una salida esparce de a poco hasta 6 bloques; cada uno se enfria a los 15 segundos y despues vuelve a empezar ----
     {
@@ -4538,6 +4624,7 @@ int main() {
     TestUpdater();
     TestBonusOdds();
     TestSuperCannon();
+    TestForceField();
     TestMovableBaseAndPlayers();
     TestEditorSidebar();
     TestCannons();

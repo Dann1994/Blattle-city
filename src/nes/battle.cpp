@@ -135,6 +135,7 @@ void Battle::Sub_D784_write_tile(uint16_t addr, u8 value) {
     if (wide_ && addr < sizeof(steelHp_)) {
         steelHp_[addr] = 0;
         rock_[addr] = 0;
+        fld_[addr] = 0;
     }
 }
 
@@ -146,6 +147,7 @@ void Battle::Sub_D6B3_fill_buffer_with_tiles(int col, int row, const u8* tiles) 
         if (wide_ && p + i < static_cast<int>(sizeof(steelHp_))) {
             steelHp_[p + i] = 0;
             rock_[p + i] = 0;
+            fld_[p + i] = 0;
         }
     }
 }
@@ -353,6 +355,8 @@ void Battle::Sub_CC08_draw_destroyed_eagle() {
 void Battle::Sub_D7CC_create_default_stage_field() {
     std::memset(steelHp_, 0, sizeof(steelHp_));
     std::memset(rock_, 0, sizeof(rock_));
+    std::memset(fld_, 0, sizeof(fld_));
+    fieldUp_ = false;
     const int total = wide_ ? kWideMapSize : 0x400;
     for (int i = 0; i < total; ++i) {
         M(i) = 0x11;
@@ -456,6 +460,7 @@ void Battle::LoadWideStage(const u8 blocks[kWideBlocksY][kWideBlocksX], const u8
     if (enemyEagleAlive_) {
         DrawEnemyEagle(false);
         DrawEagleFortress();
+        PlaceForceField();
     }
 }
 
@@ -476,6 +481,150 @@ void Battle::DrawFortressAt(int ec, int er, int n) {                          //
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Campo de fuerza y cristales (niveles del aguila)
+// ---------------------------------------------------------------------------
+
+void Battle::SetFieldTile(int tx, int ty, u8 kind) {
+    if (tx < 0 || ty < 0 || tx >= MapCols() || ty >= 30) return;
+    const uint16_t p = Sub_D5FB_calculate_pointer(tx, ty);
+    Sub_D784_write_tile(p, con_block_type + 0x10);          // para el motor es hierro...
+    Sub_D635_calculate_nametable_attribute(tx, ty, tbl_DABB_nametable_attribute[9]);
+    fld_[p] = kind;                                         // ...pero marcado: las balas no lo rompen
+}
+
+int Battle::FieldAt(int tx, int ty) const {
+    if (!wide_ || tx < 0 || ty < 0 || tx >= MapCols() || ty >= 30) return 0;
+    const int p = Sub_D5FB_calculate_pointer(tx, ty);
+    return p < static_cast<int>(sizeof(fld_)) && M(p) == con_block_type + 0x10 ? fld_[p] : 0;
+}
+
+int Battle::CrystalsLeft() const {
+    int n = 0;
+    for (int i = 0; i < kCrystals; ++i) n += crystalHp_[i] > 0 ? 1 : 0;
+    return n;
+}
+
+// Pone el anillo (por fuera de las capas de hierro) y los 3 cristales: uno a cada lado del aguila y uno al frente, cada uno con su placa
+// debajo (4 mosaicos de ancho). Alrededor de cada cristal se despeja lo que hubiera, para que se pueda llegar por los costados y por arriba.
+void Battle::PlaceForceField() {
+    fieldUp_ = false;
+    fieldFallT_ = 0;
+    for (int i = 0; i < kCrystals; ++i) crystalHp_[i] = crystalFx_[i] = 0;
+    if (!wide_ || !IsBossLevel()) return;
+    const int ec = 2 * EagleCol(), er = 2 * EagleRow();
+    const int k = EagleLayers() + 1;
+    const int topRow = kOpenTopStrip ? er - k : er;
+    for (int row = topRow < 0 ? 0 : topRow; row <= er + 1 + k && row < 30; ++row) {
+        for (int col = ec - k < 0 ? 0 : ec - k; col <= ec + 1 + k && col < kWideMapCols; ++col) {
+            if (row != er + 1 + k && row != topRow && col != ec - k && col != ec + 1 + k) continue;
+            SetFieldTile(col, row, 1);
+        }
+    }
+    // izquierda, derecha, frente, y mas lejos: izquierda y derecha abajo (el nivel 10 usa los 2 primeros, el 20 los 3 primeros, etc.)
+    const int cc[kCrystals] = {EagleCol() - 7, EagleCol() + 7, EagleCol(), EagleCol() - 10, EagleCol() + 10};
+    const int cr[kCrystals] = {EagleRow() + 2, EagleRow() + 2, EagleRow() + 5, EagleRow() + 6, EagleRow() + 6};
+    for (int i = 0; i < std::min(kCrystals, CrystalCount()); ++i) {
+        const int col = std::max(1, std::min(kWideBlocksX - 2, cc[i])), row = std::max(2, std::min(12, cr[i]));
+        for (int r = row - 1; r <= row; ++r)
+            for (int c2 = col - 1; c2 <= col + 1; ++c2) SetBlockTiles(c2, r, 0);
+        crystalTx_[i] = 2 * col;
+        crystalTy_[i] = 2 * row;
+        for (int dy = 0; dy < 2; ++dy)
+            for (int dx = 0; dx < 2; ++dx) SetFieldTile(2 * col + dx, 2 * row + dy, static_cast<u8>(2 + i));
+        for (int dx = -1; dx <= 2; ++dx) SetFieldTile(2 * col + dx, 2 * row + 2, static_cast<u8>(7 + i));
+        crystalHp_[i] = CrystalMaxHp();
+    }
+    // los puntos de aparicion de los niveles hechos a mano que cayeran sobre el anillo, una placa o un cristal se corren hacia afuera
+    // (alejandose del aguila, sin repetir el lugar de otro punto), porque al aparecer un tanque se borra lo que haya en su bloque
+    if (spec_.active) {
+        auto blocked = [&](int c, int r) {
+            for (int dy = 0; dy < 2; ++dy)
+                for (int dx = 0; dx < 2; ++dx) if (FieldAt(2 * c + dx, 2 * r + dy) != 0) return true;
+            return false;
+        };
+        for (int i = 0; i < spec_.nSpawns; ++i) {
+            int c = spec_.spawnCol[i], r = spec_.spawnRow[i];
+            if (!blocked(c, r)) continue;
+            const bool horizontal = std::abs(c - EagleCol()) > std::abs(r - EagleRow());
+            const int sx = horizontal ? (c < EagleCol() ? -1 : 1) : 0, sy = horizontal ? 0 : (r < EagleRow() ? -1 : 1);
+            for (int step = 0; step < 8; ++step) {
+                const int nc = c + sx, nr = r + sy;
+                if (nc < 0 || nc >= kWideBlocksX || nr < 0 || nr >= kWideBlocksY + 1) break;
+                c = nc;
+                r = nr;
+                bool dup = false;
+                for (int j = 0; j < spec_.nSpawns; ++j) dup = dup || (j != i && spec_.spawnCol[j] == c && spec_.spawnRow[j] == r);
+                if (!blocked(c, r) && !dup) break;
+            }
+            spec_.spawnCol[i] = static_cast<uint8_t>(c);
+            spec_.spawnRow[i] = static_cast<uint8_t>(r);
+        }
+    }
+    fieldUp_ = true;
+}
+
+// Una bala toca el campo de fuerza o un cristal: se apaga. Los cristales solo reciben dano de las balas de los jugadores y sus aliados.
+void Battle::FieldBulletHit(int p, int bi) {
+    BSTATUS(bi) = 0x33;
+    const int kind = fld_[p];
+    const int owner = BulletOwner(bi);
+    if (kind >= 2 && kind <= 6 && owner >= 0) {
+        const int i = kind - 2;
+        if (crystalHp_[i] > 0) {
+            const int lvl = bulletLevel_[bi];
+            crystalHp_[i] -= (lvl + 1) * (lvl >= 3 ? 2 : 1);        // como al aguila: el nivel 3 hace doble dano
+            crystalFx_[i] = 8;
+            if (crystalHp_[i] <= 0) DestroyCrystal(i, owner);
+            else R(ram_sfx_bullet_hit_wall) = 1;
+        }
+        return;
+    }
+    if (owner >= 0) {
+        R(ram_sfx_bullet_hit_wall) = 1;
+        fieldHitT_ = 6;
+    }
+}
+
+void Battle::DestroyCrystal(int i, int owner) {
+    crystalHp_[i] = 0;
+    const int tx = crystalTx_[i], ty = crystalTy_[i];
+    for (int dy = 0; dy < 2; ++dy)
+        for (int dx = 0; dx < 2; ++dx) Sub_D784_write_tile(Sub_D5FB_calculate_pointer(tx + dx, ty + dy), 0);
+    for (int dx = -1; dx <= 2; ++dx) Sub_D784_write_tile(Sub_D5FB_calculate_pointer(tx + dx, ty + 2), 0);      // y su placa
+    AddBoom(tx * 8 + 8, ty * 8 + 8);
+    shake_ = std::max(shake_, 20);
+    R(ram_sfx_explosion_hq) = 1;
+    if (owner >= 0 && owner < nPlayers_) {
+        for (int k = 0; k < 2; ++k) {
+            Sub_D9E1_calculate_decimal_number(0);
+            Sub_D9BE_add_score(owner);                           // 2000 puntos por cristal
+        }
+        R(ram_sfx_bonus_1000) = 1;
+    }
+    if (CrystalsLeft() == 0) DropField();
+}
+
+// Con los 3 cristales rotos el campo se apaga: el anillo desaparece con un destello.
+void Battle::DropField() {
+    fieldUp_ = false;
+    fieldFallT_ = 40;
+    const int total = wide_ ? kWideMapSize : 0x400;
+    for (int p = 0; p < total && p < static_cast<int>(sizeof(fld_)); ++p)
+        if (fld_[p] != 0 && M(p) == con_block_type + 0x10) Sub_D784_write_tile(static_cast<uint16_t>(p), 0);
+    const int cx = EagleCol() * 16 + 8, cy = EagleRow() * 16 + 8, d = 16 * (EagleLayers() + 2);
+    for (int k = 0; k < 4; ++k) AddBoom(cx + ((k & 1) ? d : -d), cy + ((k & 2) ? d : -d));
+    shake_ = std::max(shake_, 40);
+    R(ram_sfx_explosion_hq) = 1;
+    R(ram_sfx_explosion_player) = 1;
+}
+
+void Battle::FieldStep() {
+    if (fieldHitT_ > 0) --fieldHitT_;
+    if (fieldFallT_ > 0) --fieldFallT_;
+    for (int i = 0; i < kCrystals; ++i) if (crystalFx_[i] > 0) --crystalFx_[i];
 }
 
 // Aguila enemiga de los niveles 10/20/30/40: arriba y al centro (bloque fila 0, columna 13), con la paleta roja.
@@ -524,6 +673,8 @@ void Battle::NewGame(int players, int stage) {
     std::memset(bulletPierced_, 0, sizeof(bulletPierced_));
     std::memset(steelHp_, 0, sizeof(steelHp_));
     std::memset(rock_, 0, sizeof(rock_));
+    std::memset(fld_, 0, sizeof(fld_));
+    fieldUp_ = false;
     bonusXHi_ = msgXHi_ = destXHi_ = 0;
     R(ram_random) = 0x5A;
     R(ram_offset_oam_index) = 4;
@@ -766,6 +917,7 @@ void Battle::Sub_C2E6_main_battle_script() {
     Sub_AllyFire();
     Sub_StealLives();
     Sub_Bombing();
+    FieldStep();
     Sub_DB48_enemy_spawn_handler();
     Sub_E604_bullets_movement();
     Sub_E910_check_bullets_collision_with_bullets();
@@ -1957,6 +2109,7 @@ bool Battle::BlockOccupied(int col, int row) {
 }
 
 void Battle::SetRockBlock(int col, int row) {
+    if (BlockHasField(col, row)) return;                    // la piedra tampoco pisa el campo de fuerza
     SetBlockTiles(col, row, con_block_type + 0x10);        // para el motor es hierro: cuatro mosaicos...
     const int p = Sub_D5FB_calculate_pointer(2 * col, 2 * row);
     const int st = Stride();
@@ -2016,6 +2169,35 @@ void Battle::LavaHit(int x) {
     }
 }
 
+// La lava pasa del bloque (col, row) al vecino (c2, r2) si por el borde que comparten hay un lugar libre: un mosaico de la lava de un lado
+// frente a un mosaico vacio del otro. Asi sale por donde se rompio una pared (aunque el bloque vecino siga con partes de muro).
+bool Battle::LavaCanEnter(int col, int row, int c2, int r2) const {
+    if (c2 < 0 || c2 >= kWideBlocksX || r2 < 0 || r2 > kWideBlocksY) return false;
+    if (BlockTilesAre(c2, r2, kLavaTile, false) || BlockHasField(c2, r2)) return false;        // ya tiene lava, o es del campo de fuerza (la lava no lo pisa)
+    const int dx = c2 - col, dy = r2 - row;
+    for (int k = 0; k < 2; ++k) {
+        int sx, sy, nx, ny;                                                    // mosaico propio y su vecino de enfrente
+        if (dy != 0) { sx = 2 * col + k; sy = dy < 0 ? 2 * row : 2 * row + 1; nx = 2 * c2 + k; ny = dy < 0 ? 2 * r2 + 1 : 2 * r2; }
+        else { sy = 2 * row + k; sx = dx < 0 ? 2 * col : 2 * col + 1; ny = 2 * r2 + k; nx = dx < 0 ? 2 * c2 + 1 : 2 * c2; }
+        if ((M(Sub_D5FB_calculate_pointer(sx, sy)) & 0x7F) == kLavaTile && (M(Sub_D5FB_calculate_pointer(nx, ny)) & 0x7F) == 0) return true;
+    }
+    return false;
+}
+
+bool Battle::BlockHasField(int col, int row) const {
+    for (int dy = 0; dy < 2; ++dy)
+        for (int dx = 0; dx < 2; ++dx) if (FieldAt(2 * col + dx, 2 * row + dy) != 0) return true;
+    return false;
+}
+
+// Llena de lava los mosaicos vacios del bloque (los que sigan siendo muro se quedan).
+void Battle::LavaFillBlock(int col, int row) {
+    const int p = Sub_D5FB_calculate_pointer(2 * col, 2 * row);
+    const int st = Stride();
+    const int idx[4] = {p, p + 1, p + st, p + st + 1};
+    for (int i : idx) if ((M(i) & 0x7F) == 0) Sub_D784_write_tile(static_cast<uint16_t>(i), kLavaTile);
+}
+
 void Battle::Sub_Lava() {
     if (!wide_) return;
     static const int kDir[4][2] = {{0, -1}, {0, 1}, {-1, 0}, {1, 0}};
@@ -2033,6 +2215,7 @@ void Battle::Sub_Lava() {
     };
     for (int i = 0; i < nLava_; ++i) {
         LavaSource& s = lava_[i];
+        if (BlockHasField(s.col, s.row)) { s.n = 0; s.phase = -1; continue; }        // una fuente tapada por el campo de fuerza se apaga
         if (!BlockTilesAre(s.col, s.row, kLavaTile, false)) {          // la fuente ya no esta (una bomba la borro)
             for (int k = 0; k < s.n; ++k) if (BlockTilesAre(s.flow[k].col, s.flow[k].row, kLavaTile, false)) SetBlockTiles(s.flow[k].col, s.flow[k].row, 0);
             s.n = 0;
@@ -2063,7 +2246,7 @@ void Battle::Sub_Lava() {
                 auto consider = [&](int col, int row) {
                     for (const auto& d : kDir) {
                         const int c2 = col + d[0], r2 = row + d[1];
-                        if (LavaForbidden(c2, r2) || !BlockEmptyAt(c2, r2)) continue;
+                        if (LavaForbidden(c2, r2) || !LavaCanEnter(col, row, c2, r2)) continue;
                         bool dup = false;
                         for (int q = 0; q < nc; ++q) dup = dup || (cand[q][0] == c2 && cand[q][1] == r2);
                         if (!dup && nc < 4 * (kLavaMaxFlow + 1)) { cand[nc][0] = c2; cand[nc][1] = r2; ++nc; }
@@ -2075,7 +2258,7 @@ void Battle::Sub_Lava() {
                     s.timer = 60;
                 } else {
                     const int pick = Sub_D44D_generate_random_number() % nc;
-                    SetBlockTiles(cand[pick][0], cand[pick][1], kLavaTile);
+                    LavaFillBlock(cand[pick][0], cand[pick][1]);
                     s.flow[s.n].col = cand[pick][0];
                     s.flow[s.n].row = cand[pick][1];
                     s.flow[s.n].timer = kLavaFlowLife;
@@ -2290,7 +2473,7 @@ void Battle::SuperExplode(int owner, int cx, int cy) {
             if (onCannon) continue;
             const uint16_t p = PointerPx(px, py);
             const u8 t = M(p) & 0x7F;
-            if (t >= 1 && t <= 0x10) Sub_D784_write_tile(p, static_cast<u8>(M(p) & 0x80));
+            if (t >= 1 && t <= 0x10 && fld_[p] == 0) Sub_D784_write_tile(p, static_cast<u8>(M(p) & 0x80));        // (el campo de fuerza resiste)
         }
     }
     // enemigos: reciben 4 de dano (matan a casi todos; el que aguanta mas queda herido); las balas enemigas de la zona desaparecen
@@ -2973,6 +3156,10 @@ int Battle::Sub_E693_bullet_probe(int px, int py, int bi) {
         BSTATUS(bi) = 0x33;                              // las balas enemigas no rompen la fortaleza de su aguila
         return 0;
     }
+    if (wide_ && p < static_cast<int>(sizeof(fld_)) && fld_[p] != 0 && tile == con_block_type + 0x10) {
+        FieldBulletHit(p, bi);                           // campo de fuerza: absorbe la bala; los cristales reciben el dano de las de los jugadores
+        return 0;
+    }
     if ((tile & 0xFC) == 0xC8 && IsBossLevel() && px >= EagleCol() * 16 && px < (EagleCol() + 1) * 16 &&
         py >= EagleRow() * 16 && py < (EagleRow() + 1) * 16) {   // el aguila enemiga
         if (enemyEagleAlive_ && BulletOwner(bi) >= 0) {  // solo la danan las balas de los jugadores y sus aliados
@@ -3601,6 +3788,7 @@ void Battle::DetonateBomb(int cx, int cy) {
                 if (row >= 8) eagleHit = true;                  // el aguila de los jugadores (el enemigo no entra nunca en la zona)
                 continue;
             }
+            if (fld_[p] != 0) continue;                         // el campo de fuerza y los cristales aguantan las bombas
             M(p) = 0x00;
             steelHp_[p] = 0;
             rock_[p] = 0;
@@ -4634,6 +4822,9 @@ uint32_t Battle::StateHash() const {
     mix(bulletXHi_, sizeof bulletXHi_);
     mix(steelHp_, sizeof steelHp_);
     mix(rock_, sizeof rock_);
+    mix(fld_, sizeof fld_);
+    mixInt(fieldUp_ ? 1 : 0);
+    for (int i = 0; i < kCrystals; ++i) mixInt(crystalHp_[i]);
     mix(bulletLevel_, sizeof bulletLevel_);
     mix(shieldHp_, sizeof shieldHp_);
     mixInt(enemyTotal_);

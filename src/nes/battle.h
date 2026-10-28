@@ -53,7 +53,7 @@ public:
     static constexpr u8 kLavaTile = 0x24;
     static constexpr int kLavaBlockId = 16;
     static constexpr int kCornerBrickBase = 17, kCornerSteelBase = 21;       // ids 17..20 (ladrillo) y 21..24 (hierro): un solo mosaico en la punta arriba izq., arriba der., abajo izq. o abajo der.
-    static constexpr int kMaxLavaSources = 24;
+    static constexpr int kMaxLavaSources = 160;         // todos los bloques de lava del mapa son fuentes (los niveles tienen lagos grandes)
     static constexpr int kLavaMaxFlow = 8;
     static constexpr int kLavaSpreadFrames = 90;        // una celda nueva cada 1,5 segundos
     static constexpr int kLavaFlowLife = 900;           // 15 segundos
@@ -63,6 +63,22 @@ public:
     int LavaSourceCount() const { return nLava_; }
     bool LavaAtBlock(int col, int row) const;           // el bloque es lava (fuente o esparcida)
     static constexpr int kRockHealth = 3;               // piedra de lava: 3 de salud por mosaico
+    // Campo de fuerza (niveles del aguila): un anillo de energia indestructible por fuera de las capas de hierro del aguila enemiga, y
+    // 3 cristales con una placa de energia debajo (los protege solo por abajo). Solo las balas de los jugadores rompen los cristales;
+    // con los 3 rotos el campo cae. Para el motor los mosaicos son de hierro marcados en fld_.
+    static constexpr int kCrystals = 5;                 // maximo; en el nivel 10 hay 2, en el 20 hay 3, en el 30 hay 4 y en el 40 hay 5
+    int CrystalCount() const { return Rank() + 1; }
+    bool FieldUp() const { return fieldUp_; }
+    int CrystalsLeft() const;
+    int FieldAt(int tx, int ty) const;                  // 0 nada, 1 anillo, 2..6 cristal 0..4, 7..11 placa del cristal 0..4
+    int CrystalTx(int i) const { return crystalTx_[i]; }       // mosaico de arriba a la izquierda del cristal
+    int CrystalTy(int i) const { return crystalTy_[i]; }
+    int CrystalHp(int i) const { return crystalHp_[i]; }
+    int CrystalMaxHp() const { return 4 + 2 * Rank(); }
+    int CrystalFx(int i) const { return crystalFx_[i]; }       // cuadros que le quedan al destello de impacto
+    int FieldHitT() const { return fieldHitT_; }                // destello del campo al recibir un disparo
+    int FieldFallT() const { return fieldFallT_; }              // cuadros desde que cayo el campo (para el destello)
+    void DebugDropField() { if (fieldUp_) DropField(); }
     int TileAt(int tx, int ty) const;                   // el valor del mosaico (tx, ty) del campo (sin la marca de tanque)
     bool RockAt(int tx, int ty) const;                  // el mosaico (tx, ty) es piedra de lava (se dibuja morado; para el motor es hierro)
     bool RockBlockAt(int col, int row) const;           // el bloque (col, row) es de piedra
@@ -295,7 +311,7 @@ public:
     int EagleGuardRadius() const { return 160 + 16 * tier_; }
     bool EnemyHunting(int x) const { return hunting_[x]; }   // el enemigo x esta en modo ataque (niveles del aguila)
     int EagleLayers() const { return Rank(); }   // 10: 1 capa, 20: 2, 30: 3, 40: 4   // capas de hierro de la fortaleza (cada una de 1 mosaico = 8 px)
-    int EagleSpawnGap() const { return 16 * (1 + (EagleLayers() + 1) / 2); }   // distancia de las apariciones a la fortaleza (px)
+    int EagleSpawnGap() const { return 16 * (1 + (EagleLayers() + 2) / 2); }   // distancia de las apariciones a la fortaleza y al campo de fuerza (px)
     bool EnemyEagleAlive() const { return enemyEagleAlive_; }
     // Robo de vidas: a quien quedo sin vidas, la vida de que jugador va a robar (-1: no puede robar ahora).
     // Bombardeo (niveles del aguila enemiga): cada 2 minutos pasan tres aviones y bombardean el campo.
@@ -498,6 +514,15 @@ private:
     void Sub_CC08_draw_destroyed_eagle();
     void DrawEnemyEagle(bool destroyed);
     void DrawEagleFortress();
+    bool LavaCanEnter(int col, int row, int c2, int r2) const;
+    bool BlockHasField(int col, int row) const;         // alguno de los 4 mosaicos del bloque es del campo de fuerza (o un cristal o una placa)
+    void LavaFillBlock(int col, int row);
+    void PlaceForceField();
+    void SetFieldTile(int tx, int ty, u8 kind);
+    void FieldBulletHit(int p, int bi);
+    void DestroyCrystal(int i, int owner);
+    void DropField();
+    void FieldStep();
     void DestroyEnemyEagle(int owner);
     void SetBaseQuadrantPalette(int quadX, int quadY, u8 pal);
     void Sub_D7CC_create_default_stage_field();
@@ -719,6 +744,10 @@ private:
     u8 bulletPierced_[kMaxBullets] = {};
     u8 steelHp_[64 * 34] = {};
     u8 rock_[64 * 34] = {};                              // 1 = el mosaico de hierro es piedra de lava
+    u8 fld_[64 * 34] = {};                               // campo de fuerza: 1 anillo, 2..6 cristal, 7..11 placa (ver FieldAt)
+    bool fieldUp_ = false;
+    int crystalHp_[kCrystals] = {}, crystalFx_[kCrystals] = {}, crystalTx_[kCrystals] = {}, crystalTy_[kCrystals] = {};
+    int fieldHitT_ = 0, fieldFallT_ = 0;
     static constexpr int kSteelHealth = 20;
     static constexpr int kWideEnemySlots = 12;
 

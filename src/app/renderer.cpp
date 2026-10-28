@@ -129,6 +129,52 @@ uint32_t RockPixel(int px, int py, int step) {
     const uint8_t v = kPat[(py >> 1) & 3][(px >> 1) & 3];
     return v == 1 ? 0x000000 : (v == 2 ? kEmber[step & 1] : 0x331940);
 }
+// Campo de fuerza y cristales de los niveles del aguila: dibujos de 8x8 (campo, dos cuadros que centellean) y de 16x16 (cristal).
+const char* const kFieldA[8] = {"bbbbbbbb", "bCcbbcCb", "bcwCbbcb", "bbcCcbbb", "bbbcCcbb", "bcbbcwCb", "bCcbbcCb", "bbbbbbbb"};
+const char* const kFieldB[8] = {"bbbbbbbb", "bbcCbbbb", "bcCwcbbb", "bbbcCcbb", "bbcbbcCb", "bCcbbcwb", "bbcCbbCb", "bbbbbbbb"};
+const char* const kCrystalArt[16] = {"................", ".......ww.......", "......wppw......", ".....wpPPpw.....", "....wpPPPPpw....", "...wpPPwwPPpw...",
+                                     "..wpPPwPPPPPpw..", "..wpPPwPPPPmpw..", "..wpPPPPPPmmpw..", "...wpPPPPmmpw...", "....wpPPmmpw....", ".....wpPmpw.....",
+                                     "......wpmw......", ".......wm.......", "................", "................"};
+// Grietas del cristal: 0 sano, 1 agrietado, 2 casi roto (se pintan en negro).
+const int kCrack1[7][2] = {{8, 4}, {8, 5}, {7, 6}, {7, 7}, {8, 8}, {9, 9}, {9, 10}};
+const int kCrack2[10][2] = {{5, 6}, {4, 7}, {4, 8}, {5, 9}, {11, 5}, {12, 6}, {12, 7}, {11, 8}, {10, 10}, {11, 11}};
+
+uint32_t FieldColor(char ch, bool flash) {
+    switch (ch) {
+        case 'b': return flash ? 0x2878F0 : 0x002878;
+        case 'c': return flash ? 0x78E6FC : 0x2878F0;
+        case 'C': return flash ? 0xFCFCFC : 0x78E6FC;
+        case 'w': return 0xFCFCFC;
+        default: return 0;
+    }
+}
+
+// Un pixel del campo de fuerza (kind 1) o de la placa de energia (5..7): `edge` marca el borde brillante de la placa.
+uint32_t FieldPixel(int tx, int ty, int px, int py, int phase, bool flash, bool plateTop, bool plateBottom, bool plateLeft, bool plateRight) {
+    if ((plateTop && py == 0) || (plateBottom && py == 7) || (plateLeft && px == 0) || (plateRight && px == 7)) return FieldColor('C', flash);
+    const char* const* art = ((tx + ty + phase) & 1) ? kFieldB : kFieldA;
+    return FieldColor(art[py][px], flash);
+}
+
+// Un pixel del cristal: lx, ly en 0..15 dentro de su cuadro; damage 0..2 segun la vida; hit = destello al recibir un disparo.
+uint32_t CrystalPixel(int lx, int ly, int damage, bool hit) {
+    uint32_t color = 0;
+    const char ch = kCrystalArt[ly][lx];
+    switch (ch) {
+        case 'w': color = 0xFCFCFC; break;
+        case 'p': color = 0xFC78C8; break;
+        case 'P': color = 0xFCA0DC; break;
+        case 'm': color = 0xC82896; break;
+        default: color = 0x000000; break;
+    }
+    if (ch != '.') {
+        if (damage >= 1) for (const auto& k : kCrack1) if (k[0] == lx && k[1] == ly) color = 0x000000;
+        if (damage >= 2) for (const auto& k : kCrack2) if (k[0] == lx && k[1] == ly) color = 0x000000;
+        if (hit) color = 0xFCFCFC;
+    }
+    return color;
+}
+
 constexpr int kWaterTile = 0x12;
 // La lava es el mosaico del agua con una paleta roja que va cambiando (como el agua).
 uint32_t LavaColor(int idx, int phase) {
@@ -408,6 +454,7 @@ void Renderer::RenderNesScreen(const nes::Battle& battle, std::vector<uint32_t>&
             const bool sand = tile == nes::Battle::kSandTile;
             const bool lava = tile == nes::Battle::kLavaTile;
             const bool rock = tile == 0x10 && battle.RockAt(tx, ty);
+            const int field = tile == 0x10 ? battle.FieldAt(tx, ty) : 0;              // campo de fuerza (1), cristal (2..6) o placa (7..11)
             const int rockStep = (battle.R(nes::ram_frm_cnt_lo) >> 5) & 1;
             const int lavaPhase = (battle.R(nes::ram_frm_cnt_lo) >> 5) & 1;
             for (int py = 0; py < 8; ++py) {
@@ -417,6 +464,24 @@ void Renderer::RenderNesScreen(const nes::Battle& battle, std::vector<uint32_t>&
                     bgIndex[o] = static_cast<uint8_t>(idx);
                     rgb[o] = eagleTeam >= 0 ? NesColor(SpritePaletteColor(battle.TeamPaletteIndex(eagleTeam), idx))
                                             : (sand ? SandColor(idx) : (lava ? LavaColor(idx, lavaPhase) : (rock ? RockPixel(px, py, rockStep) : bgColor(palette, idx))));
+                    if (field != 0) {
+                        const int phase = (battle.R(nes::ram_frm_cnt_lo) >> 4) & 1;
+                        const bool flash = battle.FieldHitT() > 0;
+                        if (field == 1) {
+                            rgb[o] = FieldPixel(tx, ty, px, py, phase, flash, false, false, false, false);
+                        } else if (field <= 6) {
+                            const int i = field - 2;
+                            const int lx = (tx - battle.CrystalTx(i)) * 8 + px, ly = (ty - battle.CrystalTy(i)) * 8 + py;
+                            const int hp = battle.CrystalHp(i), mx = battle.CrystalMaxHp();
+                            const int damage = hp * 3 <= mx ? 2 : (hp * 3 <= mx * 2 ? 1 : 0);
+                            const bool hit = battle.CrystalFx(i) > 0 && ((battle.R(nes::ram_frm_cnt_lo) >> 1) & 1);
+                            rgb[o] = CrystalPixel(lx, ly, damage, hit);
+                        } else {
+                            const int i = field - 7;
+                            const int rel = tx - (battle.CrystalTx(i) - 1);          // 0..3 a lo ancho de la placa
+                            rgb[o] = FieldPixel(tx, ty, px, py, phase, flash, true, true, rel == 0, rel == 3);
+                        }
+                    }
                 }
             }
         }
@@ -1070,6 +1135,12 @@ void Renderer::RenderWide(const nes::Battle& battle, const HudInfo& hud, std::ve
             canvas[static_cast<size_t>(y) * kScreenW + x] =
                 (sx >= 0 && sx < w && sy >= 0 && sy < kNesH) ? world[static_cast<size_t>(sy) * w + sx] : 0u;
         }
+    }
+    // niveles del aguila: cuantos cristales quedan para que caiga el campo de fuerza (abajo del reloj del bombardeo)
+    if (!hud.hideHud && battle.IsBossLevel() && battle.FieldUp()) {
+        const std::string label = "CRISTALES " + std::to_string(battle.CrystalsLeft());
+        DrawText(canvas, kScreenW, (kScreenW - TextWidth(label)) / 2 + 1, 15, label, 0x300020);
+        DrawText(canvas, kScreenW, (kScreenW - TextWidth(label)) / 2, 14, label, 0xFC78C8);
     }
     // partida en red: el nombre de cada jugador real sobre su tanque (se oculta con la demas informacion)
     if (!hud.hideHud) {
