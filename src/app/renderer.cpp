@@ -1079,11 +1079,30 @@ void Renderer::RenderWide(const nes::Battle& battle, const HudInfo& hud, std::ve
             if (!(f & 0x80) || f >= 0xE0) continue;                             // solo con el tanque en el campo
             const std::string name = Fit(hud.playerNames[p], 100);
             const int tw = TextWidth(name);
-            const int x = std::max(1, std::min(kScreenW - tw - 1, battle.TankX(p) - cropX - tw / 2));
-            const int y = std::max(1, battle.TankY(p) - 8 - 10);                // justo encima del tanque (cada tanque mide 16 px)
+            // el nombre va chico y casi transparente (sutil): se dibuja a tamano normal en un cuadro aparte, se reduce a 5/8 y se mezcla con el fondo
+            std::vector<uint32_t> src(static_cast<size_t>(tw) * 8, 0u);
+            DrawText(src, tw, 0, 0, name, 0xFFFFFF);
+            const int dw = std::max(1, tw * 5 / 8), dh = 5;
+            const int x0 = std::max(1, std::min(kScreenW - dw - 1, battle.TankX(p) - cropX - dw / 2));
+            const int y0 = std::max(1, battle.TankY(p) - 8 - 6);                // justo encima del tanque (cada tanque mide 16 px)
             const uint32_t color = NesColor(SpritePaletteColor(battle.PlayerPaletteIndex(p), 2));
-            DrawText(canvas, kScreenW, x + 1, y + 1, name, 0x000000);          // sombra para que se lea sobre cualquier fondo
-            DrawText(canvas, kScreenW, x, y, name, color);
+            for (int dy = 0; dy < dh; ++dy) {
+                for (int dx = 0; dx < dw; ++dx) {
+                    const int sx0 = dx * tw / dw, sx1 = std::max(sx0 + 1, (dx + 1) * tw / dw);
+                    const int sy0 = dy * 8 / dh, sy1 = std::max(sy0 + 1, (dy + 1) * 8 / dh);
+                    int on = 0, all = 0;
+                    for (int yy = sy0; yy < sy1 && yy < 8; ++yy)
+                        for (int xx = sx0; xx < sx1 && xx < tw; ++xx) { on += src[static_cast<size_t>(yy) * tw + xx] != 0; ++all; }
+                    if (on == 0 || all == 0) continue;
+                    const int alpha = 140 * on / all;                           // 0..140 de 255: transparente
+                    uint32_t& dst = canvas[static_cast<size_t>(y0 + dy) * kScreenW + (x0 + dx)];
+                    auto mix = [&](int sh) {
+                        const int d = (dst >> sh) & 0xFF, c = (color >> sh) & 0xFF;
+                        return static_cast<uint32_t>((d * (255 - alpha) + c * alpha) / 255) << sh;
+                    };
+                    dst = (dst & 0xFF000000u) | mix(16) | mix(8) | mix(0);
+                }
+            }
         }
     }
 }
