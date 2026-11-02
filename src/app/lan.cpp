@@ -272,6 +272,16 @@ std::string Lan::BuildId() {
     return "BCNES-2026.10.31-v112" + (g_levelsTag.empty() ? std::string() : "-" + g_levelsTag);
 }
 
+std::string Lan::BaseOf(const std::string& id) {
+    // "BCNES-2026.10.31-v112-380970c2": lo ultimo es la huella (8 cifras hexa) de los niveles
+    if (id.size() > 9 && id[id.size() - 9] == '-') {
+        bool hex = true;
+        for (size_t i = id.size() - 8; i < id.size(); ++i) hex = hex && std::isxdigit(static_cast<unsigned char>(id[i])) != 0;
+        if (hex) return id.substr(0, id.size() - 9);
+    }
+    return id;
+}
+
 Lan::Lan(uint16_t port) : impl_(new Impl) {
     impl_->port = port != 0 ? port : kDefaultPort;
 }
@@ -981,6 +991,7 @@ void Lan::Update() {
                 g.players = ToInt(f[2], 1);
                 g.maxPlayers = ToInt(f[3], kMaxPlayers);
                 g.compatible = f.size() >= 5 && f[4] == BuildId();
+                g.sameBase = !g.compatible && f.size() >= 5 && BaseOf(f[4]) == BaseOf(BuildId());
                 g.lastSeen = now;
                 bool found = false;
                 for (auto& old : games_) {

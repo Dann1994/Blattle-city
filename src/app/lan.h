@@ -42,6 +42,7 @@ struct LanGame {
     int maxPlayers = 4;
     double lastSeen = 0;       // segundos (reloj interno)
     bool compatible = true;    // misma version del juego (si no, la simulacion no coincidiria)
+    bool sameBase = false;     // no es compatible pero es la misma version: lo que cambia son los archivos de niveles
 };
 
 class Lan {
@@ -65,6 +66,7 @@ public:
     static std::string BuildId();
     // Huella de los niveles del modo principal que usa esta PC: se suma a la version, asi nadie juega con niveles distintos.
     static void SetLevelsTag(const std::string& tag);
+    static std::string BaseOf(const std::string& id);   // la version sin la huella de los niveles
 
     // Deja el nombre limpio: sin '|' ni caracteres de control, en mayusculas y de hasta kMaxName letras.
     static std::string CleanName(const std::string& name);

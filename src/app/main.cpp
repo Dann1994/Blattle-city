@@ -29,6 +29,7 @@
 #include <memory>
 #include <mutex>
 #include <filesystem>
+#include <fstream>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -994,7 +995,7 @@ public:
         if (lan_.Games().empty()) return;
         const size_t i = std::min(static_cast<size_t>(std::max(0, menuIndex_)), lan_.Games().size() - 1);
         const app::LanGame g = lan_.Games()[i];
-        if (!g.compatible) { lanNote_ = "ESA PARTIDA TIENE OTRA VERSIÓN DEL JUEGO"; return; }
+        if (!g.compatible) { lanNote_ = g.sameBase ? "ESA PARTIDA USA OTROS NIVELES (REVISÁ LOS ARCHIVOS DE NIVELES)" : "ESA PARTIDA TIENE OTRA VERSIÓN DEL JUEGO"; return; }
         lanNote_.clear();
         if (lan_.Join(g, g_cfg.playerName)) { scene_ = Scene::LanJoined; menuIndex_ = 0; }
         else lanNote_ = lan_.Error();
@@ -1872,7 +1873,7 @@ public:
             case Scene::LanSearch: {
                 v.title = "BUSCANDO PARTIDAS" + std::string(static_cast<size_t>((menuTick_ / 20) % 4), '.');
                 for (const auto& g : lan_.Games()) {
-                    v.items.push_back(g.name + "  " + std::to_string(g.players) + "/" + std::to_string(g.maxPlayers) + (g.compatible ? "" : " (OTRA VERSIÓN)"));
+                    v.items.push_back(g.name + "  " + std::to_string(g.players) + "/" + std::to_string(g.maxPlayers) + (g.compatible ? "" : (g.sameBase ? " (OTROS NIVELES)" : " (OTRA VERSIÓN)")));
                 }
                 if (lan_.Games().empty()) { v.items.push_back("..."); v.enabled = {false}; v.selected = -1; }
                 v.note = !lanNote_.empty() ? lanNote_ : (lan_.Games().empty() ? lan_.SearchDiag() : "");
@@ -3089,7 +3090,10 @@ int main(int argc, char** argv) {
             const std::string dir = androidBase + "niveles/principal/";
             const std::string marker = dir + "version.txt";
             std::string have;
-            if (FileExists(marker.c_str())) { char* t = LoadFileText(marker.c_str()); if (t) { have = t; UnloadFileText(t); } }
+            {
+                std::ifstream in(marker);                                      // (no LoadFileText: con rutas absolutas raylib busca en otro lado)
+                std::getline(in, have);
+            }
             if (have != BCNES_VERSION) {
                 int n = 0;
                 unsigned char* idx = LoadFileData("niveles_campana/indice.txt", &n);
@@ -3103,10 +3107,14 @@ int main(int argc, char** argv) {
                         if (name.empty()) continue;
                         int sz = 0;
                         unsigned char* d = LoadFileData(("niveles_campana/" + name).c_str(), &sz);
-                        if (d) { SaveFileData((dir + name).c_str(), d, sz); UnloadFileData(d); }
+                        if (d) {
+                            std::ofstream out(dir + name, std::ios::binary);          // (no SaveFileData: con rutas absolutas raylib escribe en otro lado)
+                            out.write(reinterpret_cast<const char*>(d), sz);
+                            UnloadFileData(d);
+                        }
                     }
                     UnloadFileData(idx);
-                    SaveFileText(marker.c_str(), const_cast<char*>(BCNES_VERSION));
+                    std::ofstream(marker) << BCNES_VERSION << "\n";
                 }
             }
         }

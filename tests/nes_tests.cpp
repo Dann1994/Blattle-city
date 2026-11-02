@@ -1297,6 +1297,13 @@ void TestBombing() {
     CHECK(sawHoriz && sawVert);
 }
 
+void TestLanBuildBase() {
+    std::printf("[red] la version sin la huella de los niveles sirve para decir si lo que cambia son los niveles\n");
+    CHECK(app::Lan::BaseOf("BCNES-2026.10.31-v112-380970c2") == std::string("BCNES-2026.10.31-v112"));
+    CHECK(app::Lan::BaseOf("BCNES-2026.10.31-v112") == std::string("BCNES-2026.10.31-v112"));
+    CHECK(app::Lan::BaseOf("BCNES-2026.10.31-v112-811c9dc5") == app::Lan::BaseOf("BCNES-2026.10.31-v112-380970c2"));
+}
+
 void TestForceField() {
     using Mode = app::GameFlow::Mode;
     std::printf("[campo de fuerza] el anillo y las placas frenan las balas, los cristales se rompen con balas de jugadores y al caer el tercero cae el campo\n");
@@ -4625,6 +4632,7 @@ int main() {
     TestBonusOdds();
     TestSuperCannon();
     TestForceField();
+    TestLanBuildBase();
     TestMovableBaseAndPlayers();
     TestEditorSidebar();
     TestCannons();
